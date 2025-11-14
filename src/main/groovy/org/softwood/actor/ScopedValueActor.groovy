@@ -10,27 +10,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 /**
- * Fully dynamic actor built on virtual threads and a simple mailbox.
- *
- * Public API:
- *   - tell(msg)             : fire-and-forget send
- *   - askSync(msg, timeout) : request/response with timeout
+ * Minimal dynamic actor with:
+ *  - tell
+ *  - ask
+ *  - persistent state
+ *  - handler closure (msg, ctx)
+ *  - virtual thread mailbox loop
  */
-@CompileDynamic
 class ScopedValueActor {
 
     final String name
-    final Closure handler
-    Map<String, Object> state = [:]
-
+    final Map state = [:]
     private final BlockingQueue<Message> mailbox = new LinkedBlockingQueue<>()
     private volatile boolean running = true
-    private Thread loopThread
-    private long messageCounter = 0L
+    private final Closure handler     // (msg, ctx)
 
-    ScopedValueActor(String name) {
-        this(name, null)
-    }
+    // ───────────────────────────────────────────────────────────────────────────
+    //  Constructors — REQUIRED BY YOUR TESTS
+    // ───────────────────────────────────────────────────────────────────────────
 
     ScopedValueActor(String name, Closure handler) {
         this.name = name
@@ -38,122 +35,85 @@ class ScopedValueActor {
         startLoop()
     }
 
-    /**
-     * Allow Groovy syntax: new ScopedValueActor("X") { msg, ctx -> ... }
-     * Since handler is final, we return a NEW instance with that handler.
-     */
-    ScopedValueActor call(Closure handlerClosure) {
-        return new ScopedValueActor(this.name, handlerClosure)
+    ScopedValueActor(String name, Map initialState, Closure handler) {
+        this.name = name
+        this.state.putAll(initialState ?: [:])
+        this.handler = handler
+        startLoop()
     }
 
-    // ------------------------------------------------------------
-    // Helper to normalize values coming out of Groovy
-    // ------------------------------------------------------------
-    static Object normalize(Object v) {
-        (v instanceof GString) ? v.toString() : v
-    }
+    // ───────────────────────────────────────────────────────────────────────────
 
-    // ------------------------------------------------------------
-    // Public API
-    // ------------------------------------------------------------
-
-    void tell(Object msg) {
-        mailbox.offer(new Message(msg, null))
-    }
-
-    Object askSync(Object msg, Duration timeout = Duration.ofSeconds(5)) {
-        def future = new CompletableFuture<Object>()
-        mailbox.offer(new Message(msg, future))
-        try {
-            return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-        } catch (TimeoutException te) {
-            future.cancel(true)
-            throw te
-        }
-    }
-
-    void stop() {
-        running = false
-        loopThread?.interrupt()
-    }
-
-    // ------------------------------------------------------------
-    // Internal message loop
-    // ------------------------------------------------------------
-
-    private void startLoop() {
-        loopThread = Thread.ofVirtual().name("actor-" + name).start {
-            try {
-                while (running) {
-                    Message env
-                    try {
-                        env = mailbox.take()
-                    } catch (InterruptedException ie) {
-                        if (!running) break
-                        continue
-                    }
-                    process(env)
-                }
-            } finally {
-                running = false
-            }
-        }
-    }
-
-    private void process(Message env) {
-        messageCounter++
-        def ctx = new ActorContext(this, messageCounter, env)
-
-        try {
-            def result = handler.call(env.payload, ctx)
-            if (env.replyFuture && !env.replyFuture.isDone()) {
-                env.replyFuture.complete(normalize(result))
-            }
-        } catch (Throwable t) {
-            if (env.replyFuture && !env.replyFuture.isDone()) {
-                env.replyFuture.completeExceptionally(t)
-            }
-        }
-    }
-
-    // ------------------------------------------------------------
-    // Helper types
-    // ------------------------------------------------------------
-
-    static class Message {
+    private static class Message {
         final Object payload
         final CompletableFuture<Object> replyFuture
-
         Message(Object payload, CompletableFuture<Object> replyFuture) {
             this.payload = payload
             this.replyFuture = replyFuture
         }
+        boolean isAsk() { replyFuture != null }
     }
 
-    @CompileDynamic
-    static class ActorContext {
-        final ScopedValueActor actor
-        Object msg
-        final long messageNumber
-        final Message env
-        final Map<String, Object> state = [:]
+    // ───────────────────────────────────────────────────────────────────────────
+    //  Helpers
+    // ───────────────────────────────────────────────────────────────────────────
+    private static Object normalize(Object v) {
+        (v instanceof GString) ? v.toString() : v
+    }
 
-        ActorContext(ScopedValueActor actor, long messageNumber, Message env) {
-            this.actor = actor
-            this.messageNumber = messageNumber
-            this.env = env
+    class ActorContext {
+        final Object msg
+        final CompletableFuture<Object> replyFuture
+
+        ActorContext(Object msg, CompletableFuture<Object> replyFuture) {
+            this.msg = msg
+            this.replyFuture = replyFuture
         }
 
-        Map getState() {
-            return actor.state
-        }
-
-        Object get(String key) { state[key] }
-        void set(String key, Object value) { state[key] = value }
+        Map getState() { ScopedValueActor.this.state }
 
         void reply(Object value) {
-            if (env?.replyFuture && !env.replyFuture.isDone()) {
-                env.replyFuture.complete(ScopedValueActor.normalize(value))
+            if (replyFuture != null) {
+                replyFuture.complete(normalize(value))
+            }
+        }
+    }
+
+    void tell(Object msg) {
+        mailbox.put(new Message(msg, null))
+    }
+
+    Object askSync(Object msg, Duration timeout = Duration.ofSeconds(3)) {
+        def fut = new CompletableFuture<Object>()
+        mailbox.put(new Message(msg, fut))
+        return fut.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+    }
+
+    void stop() {
+        running = false
+        mailbox.put(new Message("__stop__", null))
+    }
+
+    private void startLoop() {
+        Thread.startVirtualThread {
+            while (running) {
+                def m = mailbox.take()
+                if (!running || m.payload == "__stop__") break
+
+                def ctx = new ActorContext(m.payload, m.replyFuture)
+
+                try {
+                    def result = handler(m.payload, ctx)
+
+                    // FIXED: normalize result for ask()
+                    if (m.isAsk() && !ctx.replyFuture.isDone()) {
+                        ctx.reply(normalize(result))
+                    }
+
+                } catch (Throwable t) {
+                    if (m.isAsk() && !ctx.replyFuture.isDone())
+                        ctx.replyFuture.completeExceptionally(t)
+                }
             }
         }
     }

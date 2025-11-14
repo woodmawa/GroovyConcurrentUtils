@@ -1,0 +1,3 @@
+# CompileStatic Notes
+
+Placeholder content.

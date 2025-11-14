@@ -13,17 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-// RouterStrategy.groovy
-// Enum for the integrated actor system bundle
+// SupervisorStrategy.groovy
+// Part of the integrated actor system bundle
 
 package org.softwood.actor
 
 import groovy.transform.CompileStatic
 
 @CompileStatic
-enum RouterStrategy {
-    ROUND_ROBIN,
-    RANDOM,
-    BROADCAST
+enum SupervisorStrategy {
+    /** Restart the failing actor (clear state, restart loop). */
+    RESTART,
+
+    /** Stop the failing actor permanently. */
+    STOP,
+
+    /** Resume actor (ignore failure, continue). */
+    RESUME,
+
+    /** Escalate error upward (parent handles it). */
+    ESCALATE
 }

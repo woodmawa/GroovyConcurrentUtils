@@ -9,7 +9,7 @@ import groovy.transform.CompileDynamic
 class ActorSystem implements Closeable {
 
     final String name
-    private final Map<String, ScopedValueActor> actors = [:]
+    private final Map<String, ScopedValueActor> actors = new ActorRegistry().registry
 
     ActorSystem(String name) {
         this.name = name

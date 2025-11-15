@@ -1,0 +1,15 @@
+#  dev env overrides example
+
+distributed: false
+hazelcast:
+  cluster:
+    name: dev-cluster
+  port: 5701
+
+database:
+  url: jdbc:h2:mem:devdb
+  username: dev
+  password: dev123
+
+logging:
+  level: DEBUG

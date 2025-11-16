@@ -1,5 +1,6 @@
 plugins {
     id 'groovy'
+    id 'application'
 }
 
 group = 'org.example'
@@ -16,6 +17,7 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
     implementation "org.yaml:snakeyaml:2.5"
+    implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
@@ -24,4 +26,9 @@ dependencies {
 
 test {
     useJUnitPlatform()
+}
+
+application {
+    // Fully qualified main class containing 'static void main(String[] args)'
+    mainClass = 'org.softwood.Main'
 }

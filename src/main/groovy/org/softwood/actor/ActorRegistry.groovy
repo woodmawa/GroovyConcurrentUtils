@@ -8,34 +8,102 @@ import java.util.concurrent.ConcurrentHashMap
 
 @Slf4j
 class ActorRegistry {
-    private final Map<String, ScopedValueActor> actors
+    private final Map<String, ScopedValueActor> storage
+    private final boolean isDistributed
 
     ActorRegistry() {
         def config = ConfigLoader.loadConfig()
+        logConfiguration(config)
 
-        def finalConf = config.collect {k,v -> "$k = $v"}
-        log.debug """
-=== Final Configuration ==="
-$finalConf
-"===========================\
-"""
-        def useDistributed = ConfigLoader.getBoolean(config, 'distributed', false)
-        def clusterName = ConfigLoader.getString(config, 'hazelcast.cluster.name', 'default-cluster')
-        def port = ConfigLoader.getInt(config, 'hazelcast.port', 5701)
+        this.isDistributed = ConfigLoader.getBoolean(config, 'distributed', false)
 
-        log.debug "Configuration: distributed=$useDistributed, cluster=$clusterName"
-
-        if (useDistributed) {
-            def hz = Hazelcast.newHazelcastInstance()
-            actors = hz.getMap("actors")
-            log.info "Using Hazelcast distributed map"
+        if (isDistributed) {
+            this.storage = createDistributedStorage(config)
         } else {
-            actors = new ConcurrentHashMap<>()
-            log.info "Using local ConcurrentHashMap"
+            this.storage = createLocalStorage()
         }
     }
 
-    Map<String, ScopedValueActor> getRegistry () {
-        actors
+    // ─────────────────────────────────────────────────────────────
+    // Uniform Registry API (works for both local & distributed)
+    // ─────────────────────────────────────────────────────────────
+
+    void register(String name, ScopedValueActor actor) {
+        storage.put(name, actor)
+        log.debug "Registered actor: $name (distributed: $isDistributed)"
+    }
+
+    void unregister(String name) {
+        storage.remove(name)
+        log.debug "Unregistered actor: $name"
+    }
+
+    ScopedValueActor get(String name) {
+        storage.get(name)
+    }
+
+    boolean contains(String name) {
+        storage.containsKey(name)
+    }
+
+    Set<String> getActorNames() {
+        storage.keySet()
+    }
+
+    Collection<ScopedValueActor> getAllActors() {
+        storage.values()
+    }
+
+    int size() {
+        storage.size()
+    }
+
+    void clear() {
+        storage.clear()
+        log.info "Cleared all actors from registry"
+    }
+
+    boolean isDistributed() {
+        isDistributed
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Storage Strategy Creation
+    // ─────────────────────────────────────────────────────────────
+
+    private Map<String, ScopedValueActor> createLocalStorage() {
+        log.info "Using local ConcurrentHashMap for actor registry"
+        return new ConcurrentHashMap<>()
+    }
+
+    private Map<String, ScopedValueActor> createDistributedStorage(Map config) {
+        def clusterName = ConfigLoader.getString(config, 'hazelcast.cluster.name', 'default-cluster')
+        def port = ConfigLoader.getInt(config, 'hazelcast.port', 5701)
+
+        log.info "Using Hazelcast distributed map (cluster: $clusterName, port: $port)"
+
+        def hz = Hazelcast.newHazelcastInstance()
+        return hz.getMap("actors")
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Diagnostics
+    // ─────────────────────────────────────────────────────────────
+
+    private void logConfiguration(Map config) {
+        def configSummary = config.collect { k, v -> "  $k = $v" }.join('\n')
+        log.debug """
+=== Actor Registry Configuration ===
+$configSummary
+===================================="""
+    }
+
+    /**
+     * For backward compatibility - direct map access.
+     * Prefer using the typed methods above.
+     */
+    @Deprecated
+    Map<String, ScopedValueActor> getRegistry() {
+        storage
     }
 }

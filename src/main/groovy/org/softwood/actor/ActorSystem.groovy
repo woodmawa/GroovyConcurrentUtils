@@ -1,44 +1,121 @@
+// ═════════════════════════════════════════════════════════════
+// ActorSystem.groovy
+// ═════════════════════════════════════════════════════════════
 package org.softwood.actor
 
-import groovy.transform.CompileDynamic
+import groovy.transform.CompileStatic
+import groovy.util.logging.Slf4j
+import org.softwood.actor.remote.RemotingTransport
+import org.softwood.actor.remote.RemoteActorRef
 
 /**
- * Minimal dynamic ActorSystem: registry + lifecycle.
+ * ActorSystem: actor lifecycle coordinator.
+ *
+ * Responsibilities:
+ *  - Actor creation and registration
+ *  - System-wide lifecycle (startup/shutdown)
+ *  - Registry coordination (delegates to ActorRegistry)
+ *  - Provides convenient DSL entry point
+ *
+ * The registry handles storage strategy (local vs distributed).
  */
-@CompileDynamic
+@Slf4j
+@CompileStatic
 class ActorSystem implements Closeable {
-
     final String name
-    private final Map<String, ScopedValueActor> actors = new ActorRegistry().registry
+    private final ActorRegistry registry
+    // Optional remoting transports keyed by scheme
+    private final Map<String, org.softwood.actor.remote.RemotingTransport> transports = [:]
+
+    // ─────────────────────────────────────────────────────────────
+    // Construction
+    // ─────────────────────────────────────────────────────────────
 
     ActorSystem(String name) {
-        this.name = name
-        println "ActorSystem '" + name + "' created"
+        this(name, new ActorRegistry())
     }
 
-    ScopedValueActor createActor(String actorName, Closure handler) {
-        def actor = new ScopedValueActor(actorName, handler)
-        actors[actorName] = actor
+    /**
+     * Constructor with injectable registry (useful for testing).
+     */
+    ActorSystem(String name, ActorRegistry registry) {
+        this.name = name
+        this.registry = registry
+        log.info "ActorSystem '$name' created (distributed: ${registry.isDistributed()})"
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Actor Creation & Management
+    // ─────────────────────────────────────────────────────────────
+
+    ScopedValueActor createActor(String actorName, Closure handler, Map initialState = [:]) {
+        if (registry.contains(actorName)) {
+            throw new IllegalArgumentException("Actor '$actorName' already exists in system '$name'")
+        }
+
+        def actor = new ScopedValueActor(actorName, initialState, handler)
+        // inject back-reference to system for context-enabled operations
+        actor.setSystem(this)
+        registry.register(actorName, actor)
+
+        log.debug "Created actor: $actorName"
         return actor
     }
 
-    void register(ScopedValueActor actor) {
+    /**
+     * Remove an actor from the registry and stop it.
+     */
+    void removeActor(String actorName) {
+        def actor = registry.get(actorName)
         if (actor) {
-            actors[actor.name] = actor
+            actor.stop()
+            registry.unregister(actorName)
+            log.debug "Removed actor: $actorName"
         }
     }
 
-    int getActorCount() { actors.size() }
+    // ─────────────────────────────────────────────────────────────
+    // Registry Access (delegated)
+    // ─────────────────────────────────────────────────────────────
 
-    Set<String> getActorNames() { actors.keySet() }
+    ScopedValueActor getActor(String actorName) {
+        registry.get(actorName)
+    }
 
-    ScopedValueActor getActor(String name) { actors[name] }
+    Set<String> getActorNames() {
+        registry.getActorNames()
+    }
+
+    int getActorCount() {
+        registry.size()
+    }
+
+    boolean hasActor(String actorName) {
+        registry.contains(actorName)
+    }
+
+    boolean isDistributed() {
+        registry.isDistributed()
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Lifecycle
+    // ─────────────────────────────────────────────────────────────
 
     void shutdown() {
-        println "Shutting down '" + name + "' with " + actors.size() + " actors"
-        actors.values().each { it.stop() }
-        actors.clear()
-        println "ActorSystem '" + name + "' shutdown complete"
+        log.info "Shutting down ActorSystem '$name' with ${registry.size()} actors"
+
+        // Stop all actors gracefully
+        registry.getAllActors().each { actor ->
+            try {
+                actor.stop()
+            } catch (Exception e) {
+                log.warn "Error stopping actor ${actor.name}: ${e.message}"
+            }
+        }
+
+        registry.clear()
+        log.info "ActorSystem '$name' shutdown complete"
     }
 
     @Override
@@ -46,14 +123,63 @@ class ActorSystem implements Closeable {
         shutdown()
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Convenience DSL Entry Point
+    // ─────────────────────────────────────────────────────────────
+
     /**
-     * Convenience DSL entry so you can do:
+     * Inline actor creation via DSL:
      *   system.actor {
-     *       name "A1"
+     *       name "MyActor"
      *       onMessage { msg, ctx -> ... }
      *   }
      */
-    ScopedValueActor actor(@DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorDSL.ActorBuilder) Closure<?> spec) {
-        return ActorDSL.actor(this, spec)
+    ScopedValueActor actor(
+            @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
+                    Closure<?> spec) {
+        ActorDSL.actor(this, spec)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Diagnostics
+    // ─────────────────────────────────────────────────────────────
+
+    String getStatus() {
+        """ActorSystem: $name
+  Actors: ${registry.size()}
+  Distributed: ${registry.isDistributed()}
+  Actor Names: ${registry.getActorNames()}
+  Remoting: ${transports.keySet()}"""
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Remoting (pluggable)
+    // ─────────────────────────────────────────────────────────────
+
+    /** Register and start one or more remoting transports. */
+    void enableRemoting(List<RemotingTransport> ts) {
+        ts.each { RemotingTransport t ->
+            if (t) {
+                t.start()
+                transports[t.scheme()] = t
+                log.info "Enabled remoting transport: ${t.scheme()}"
+            }
+        }
+    }
+
+    /** Obtain a reference to a remote actor via URI (scheme://host:port/system/actor). */
+    Object remote(String actorUri) {
+        def scheme = parseScheme(actorUri)
+        def transport = transports[scheme]
+        if (!transport) {
+            throw new IllegalStateException("No remoting transport registered for scheme '$scheme'")
+        }
+        return new RemoteActorRef(actorUri, transport)
+    }
+
+    private static String parseScheme(String uri) {
+        def idx = uri?.indexOf('://') ?: -1
+        if (idx <= 0) throw new IllegalArgumentException("Invalid actor URI: $uri")
+        return uri.substring(0, idx).toLowerCase()
     }
 }

@@ -3,6 +3,7 @@
 // ═════════════════════════════════════════════════════════════
 package org.softwood.actor
 
+import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.remote.RemotingTransport
@@ -25,7 +26,7 @@ class ActorSystem implements Closeable {
     final String name
     private final ActorRegistry registry
     // Optional remoting transports keyed by scheme
-    private final Map<String, org.softwood.actor.remote.RemotingTransport> transports = [:]
+    private final Map<String, RemotingTransport> transports = [:]
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -105,12 +106,15 @@ class ActorSystem implements Closeable {
     void shutdown() {
         log.info "Shutting down ActorSystem '$name' with ${registry.size()} actors"
 
-        // Stop all actors gracefully
-        registry.getAllActors().each { actor ->
+        // 🚨 FIX: Use a static Java-style loop to ensure the statically-typed
+        // anonymous subclass override of stop() is called correctly.
+        for (Object actorRef : registry.getAllActors()) {
             try {
-                actor.stop()
+                // We know these objects are ScopedValueActor types
+                ((ScopedValueActor)actorRef).stop()
             } catch (Exception e) {
-                log.warn "Error stopping actor ${actor.name}: ${e.message}"
+                // Assuming 'actorRef' has a 'name' property for logging
+                log.warn "Error stopping actor ${actorRef}: ${e.message}"
             }
         }
 
@@ -158,8 +162,9 @@ class ActorSystem implements Closeable {
 
     /** Register and start one or more remoting transports. */
     void enableRemoting(List<RemotingTransport> ts) {
-        ts.each { RemotingTransport t ->
-            if (t) {
+        // Use a standard for loop to avoid unpredictable Groovy metaclass calls (like asBoolean)
+        for (RemotingTransport t : ts) {
+            if (t != null) {
                 t.start()
                 transports[t.scheme()] = t
                 log.info "Enabled remoting transport: ${t.scheme()}"

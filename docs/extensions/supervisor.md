@@ -1,3 +1,0 @@
-# SupervisorActor
-
-Placeholder content.

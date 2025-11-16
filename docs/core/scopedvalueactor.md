@@ -1,3 +1,0 @@
-# ScopedValueActor
-
-Placeholder content.

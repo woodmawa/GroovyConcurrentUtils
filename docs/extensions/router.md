@@ -1,3 +1,0 @@
-# RouterActor
-
-Placeholder content.

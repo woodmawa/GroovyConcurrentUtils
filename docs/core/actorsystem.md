@@ -1,3 +1,0 @@
-# ActorSystem
-
-Placeholder content.

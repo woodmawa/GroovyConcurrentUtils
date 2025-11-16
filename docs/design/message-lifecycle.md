@@ -1,3 +1,0 @@
-# Message Lifecycle
-
-Placeholder content.

@@ -22,8 +22,17 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    implementation 'org.apache.groovy:groovy-test:5.0.2'
+    testImplementation 'org.apache.groovy:groovy-test:5.0.2'
+    //testImplementation 'org.spockframework:spock-core:2.4-M6-groovy-4.0'
 }
+
+//hack to use spock with version 5 groovy till put up on maven
+/*
+tasks.withType(GroovyCompile).configureEach {
+    options.forkOptions.jvmArgs << '-Dspock.iKnowWhatImDoing.disableGroovyVersionCheck=true'    //it works! But be aware that "options" not "groovyOptions"!
+}
+*/
+
 
 test {
     useJUnitPlatform()

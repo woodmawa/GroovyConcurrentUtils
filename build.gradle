@@ -18,11 +18,13 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.5.20")
     implementation "org.yaml:snakeyaml:2.5"
     implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
+    implementation 'io.vertx:vertx-core:5.0.5'
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation 'org.apache.groovy:groovy-test:5.0.2'
+    testImplementation 'io.vertx:vertx-junit5:5.0.5'
     //testImplementation 'org.spockframework:spock-core:2.4-M6-groovy-4.0'
 }
 

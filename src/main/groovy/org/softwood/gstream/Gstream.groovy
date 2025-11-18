@@ -823,7 +823,7 @@ class Gstream<T> {
      * @return an Optional describing the maximum element, or empty if the stream is empty
      */
     Optional<T> max() {
-        stream.max(Comparator.naturalOrder())
+        stream.max(Comparator.naturalOrder() as Comparator<T>)
     }
 
     /**
@@ -848,7 +848,7 @@ class Gstream<T> {
      * @return an Optional describing the minimum element, or empty if the stream is empty
      */
     Optional<T> min() {
-        stream.min(Comparator.naturalOrder())
+        stream.min(Comparator.naturalOrder() as Comparator<T>)
     }
 
     /**

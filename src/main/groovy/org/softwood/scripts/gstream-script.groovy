@@ -1,4 +1,7 @@
-package org.softwood.gstream
+package org.softwood.scripts
+
+import org.softwood.gstream.Gstream
+
 // Simple builder style
 def result = Gstream.of(1, 2, 3, 4, 5)
         .filter { it % 2 == 0 }
@@ -118,5 +121,22 @@ def complex = Gstream.of(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         .filter { it > 10 }          // Stream: [12, 18, 24, 30]
         .toList()
 println "Complex pipeline: " + complex  // [12, 18, 24, 30]
+
+println "\n✅ parallel examples "
+// Create parallel streams
+def resultp = Gstream.ofParallel(1, 2, 3, 4, 5)
+        .findAll { it % 2 == 0 }
+        .map { it * 2 }
+        .toList()
+
+println "parallel stream result " + resultp
+
+// Convert to parallel mid-stream
+def resultp2 = Gstream.of(1..1000)
+        .parallel()
+        .filter { it % 2 == 0 }
+        .toList()
+
+println "convert to parallel mid stream result " + resultp2
 
 println "\n✅ All examples completed successfully!"

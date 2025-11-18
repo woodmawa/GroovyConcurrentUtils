@@ -33,6 +33,10 @@ class Gstream<T> {
         new Gstream<T>(Stream.of(elements))
     }
 
+    static <T extends Comparable<T>> Gstream<T> of(Range<T> range) {
+        new Gstream<T>(range.stream())
+    }
+
     static <T> Gstream<T> from(Collection<T> collection) {
         new Gstream<T>(collection.stream())
     }
@@ -53,9 +57,23 @@ class Gstream<T> {
         new Gstream<T>(Stream.iterate(seed, next as UnaryOperator<T>))
     }
 
+    // Parallel stream factory methods
+    static <T> Gstream<T> ofParallel(T... elements) {
+        new Gstream<T>(Stream.of(elements).parallel())
+    }
+
+    static <T> Gstream<T> fromParallel(Collection<T> collection) {
+        new Gstream<T>(collection.parallelStream())
+    }
+
     // Wrap intermediate operations to return Gstream
     Gstream<T> filter(Closure<Boolean> predicate) {
         new Gstream<T>(stream.filter(predicate as Predicate<T>))
+    }
+
+    // Groovy-style alias for filter
+    Gstream<T> findAll(Closure<Boolean> predicate) {
+        filter(predicate)
     }
 
     def <R> Gstream<R> map(Closure<R> mapper) {
@@ -88,6 +106,19 @@ class Gstream<T> {
 
     Gstream<T> skip(long n) {
         new Gstream<T>(stream.skip(n))
+    }
+
+    // Parallel/Sequential execution control
+    Gstream<T> parallel() {
+        new Gstream<T>(stream.parallel())
+    }
+
+    Gstream<T> sequential() {
+        new Gstream<T>(stream.sequential())
+    }
+
+    boolean isParallel() {
+        stream.isParallel()
     }
 
     Gstream<T> takeWhile(Closure<Boolean> predicate) {

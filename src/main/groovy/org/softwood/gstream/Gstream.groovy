@@ -333,6 +333,56 @@ class Gstream<T> {
         new Gstream<T>(collection.parallelStream())
     }
 
+    /**
+     * Creates a lazily concatenated stream whose elements are all the elements
+     * of the first stream followed by all the elements of the second stream.
+     * <p>
+     * The resulting stream is ordered if both input streams are ordered, and parallel
+     * if either input stream is parallel. When the resulting stream is closed, the close
+     * handlers for both input streams are invoked.
+     * </p>
+     *
+     * @param stream1 the first stream
+     * @param stream2 the second stream
+     * @param <T> the type of stream elements
+     * @return a concatenated Gstream
+     */
+    static <T> Gstream<T> concat(Gstream<T> stream1, Gstream<T> stream2) {
+        new Gstream<T>(Stream.concat(stream1.stream, stream2.stream))
+    }
+
+    /**
+     * Creates a new stream builder for incrementally constructing a stream.
+     * <p>
+     * This provides a mutable builder pattern for creating streams element by element.
+     * </p>
+     *
+     * @param <T> the type of stream elements
+     * @return a new GstreamBuilder
+     */
+    static <T> GstreamBuilder<T> builder() {
+        new GstreamBuilder<T>()
+    }
+
+    /**
+     * Creates a Gstream using a declarative DSL closure.
+     * <p>
+     * This method provides an idiomatic Groovy way to configure stream pipelines
+     * using a nested closure syntax.
+     * </p>
+     *
+     * @param config a closure that configures the stream using DSL syntax
+     * @param <T> the type of stream elements
+     * @return a configured Gstream ready for terminal operations
+     */
+    static <T> Gstream<T> build(@DelegatesTo(GstreamBuilder) Closure<T> config) {
+        def builder = new GstreamBuilder<T>()
+        config.delegate = builder
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config()
+        builder.build()
+    }
+
     // Intermediate operations
 
     /**
@@ -525,6 +575,42 @@ class Gstream<T> {
      */
     Gstream<T> dropWhile(Closure<Boolean> predicate) {
         new Gstream<T>(stream.dropWhile(predicate as Predicate<T>))
+    }
+
+    /**
+     * Returns an equivalent stream that is unordered.
+     * <p>
+     * This operation may improve performance for operations like {@code distinct()} and
+     * {@code groupBy()} on parallel streams by allowing the stream to ignore encounter order.
+     * </p>
+     *
+     * @return an unordered Gstream
+     */
+    Gstream<T> unordered() {
+        new Gstream<T>(stream.unordered())
+    }
+
+    /**
+     * Returns an equivalent stream with an additional close handler.
+     * <p>
+     * Close handlers are run when the {@code close()} method is called on the stream,
+     * and are useful for releasing resources. Multiple close handlers may be registered
+     * and will be run in reverse order of registration.
+     * </p>
+     *
+     * @param closeHandler a closure to execute when the stream is closed
+     * @return a Gstream with the close handler registered
+     */
+    Gstream<T> onClose(Closure<Void> closeHandler) {
+        new Gstream<T>(stream.onClose(closeHandler as Runnable))
+    }
+
+    /**
+     * Closes this stream, causing all close handlers registered with {@link #onClose(Closure)}
+     * to be called.
+     */
+    void close() {
+        stream.close()
     }
 
     // Terminal operations
@@ -729,6 +815,157 @@ class Gstream<T> {
     }
 
     /**
+     * Returns the maximum element according to natural ordering.
+     * <p>
+     * This is a terminal operation. Elements must implement Comparable.
+     * </p>
+     *
+     * @return an Optional describing the maximum element, or empty if the stream is empty
+     */
+    Optional<T> max() {
+        stream.max(Comparator.naturalOrder())
+    }
+
+    /**
+     * Returns the maximum element according to the provided comparator.
+     * <p>
+     * This is a terminal operation.
+     * </p>
+     *
+     * @param comparator a closure that compares two elements
+     * @return an Optional describing the maximum element, or empty if the stream is empty
+     */
+    Optional<T> max(Closure<Integer> comparator) {
+        stream.max(comparator as Comparator<T>)
+    }
+
+    /**
+     * Returns the minimum element according to natural ordering.
+     * <p>
+     * This is a terminal operation. Elements must implement Comparable.
+     * </p>
+     *
+     * @return an Optional describing the minimum element, or empty if the stream is empty
+     */
+    Optional<T> min() {
+        stream.min(Comparator.naturalOrder())
+    }
+
+    /**
+     * Returns the minimum element according to the provided comparator.
+     * <p>
+     * This is a terminal operation.
+     * </p>
+     *
+     * @param comparator a closure that compares two elements
+     * @return an Optional describing the minimum element, or empty if the stream is empty
+     */
+    Optional<T> min(Closure<Integer> comparator) {
+        stream.min(comparator as Comparator<T>)
+    }
+
+    /**
+     * Partitions elements into two groups according to a predicate.
+     * <p>
+     * This is a terminal operation that returns a Map with Boolean keys:
+     * {@code true} maps to elements matching the predicate,
+     * {@code false} maps to elements not matching.
+     * </p>
+     *
+     * @param predicate a closure to test elements
+     * @return a Map partitioning elements by the predicate result
+     */
+    Map<Boolean, List<T>> partitioningBy(Closure<Boolean> predicate) {
+        stream.collect(Collectors.partitioningBy(predicate as Predicate<T>))
+    }
+
+    /**
+     * Collects elements into a Map using key and value mappers.
+     * <p>
+     * This is a terminal operation. If duplicate keys are encountered, an
+     * {@code IllegalStateException} is thrown.
+     * </p>
+     *
+     * @param keyMapper a closure that produces keys
+     * @param valueMapper a closure that produces values
+     * @param <K> the type of keys
+     * @param <V> the type of values
+     * @return a Map containing the mapped entries
+     */
+    def <K, V> Map<K, V> toMap(Closure<K> keyMapper, Closure<V> valueMapper) {
+        stream.collect(Collectors.toMap(
+                keyMapper as Function<T, K>,
+                valueMapper as Function<T, V>
+        ))
+    }
+
+    /**
+     * Collects elements into a Map using a key mapper, with the elements themselves as values.
+     * <p>
+     * This is a terminal operation. If duplicate keys are encountered, an
+     * {@code IllegalStateException} is thrown.
+     * </p>
+     *
+     * @param keyMapper a closure that produces keys
+     * @param <K> the type of keys
+     * @return a Map with keys from the mapper and original elements as values
+     */
+    def <K> Map<K, T> toMap(Closure<K> keyMapper) {
+        stream.collect(Collectors.toMap(
+                keyMapper as Function<T, K>,
+                Function.identity()
+        ))
+    }
+
+    /**
+     * Collects elements into a Map using key and value mappers, with a merge function
+     * to handle duplicate keys.
+     * <p>
+     * This is a terminal operation.
+     * </p>
+     *
+     * @param keyMapper a closure that produces keys
+     * @param valueMapper a closure that produces values
+     * @param mergeFunction a closure that merges values with the same key
+     * @param <K> the type of keys
+     * @param <V> the type of values
+     * @return a Map containing the mapped and merged entries
+     */
+    def <K, V> Map<K, V> toMap(Closure<K> keyMapper, Closure<V> valueMapper, Closure<V> mergeFunction) {
+        stream.collect(Collectors.toMap(
+                keyMapper as Function<T, K>,
+                valueMapper as Function<T, V>,
+                mergeFunction as BinaryOperator<V>
+        ))
+    }
+
+    /**
+     * Collects elements into a specified Collection using a factory.
+     * <p>
+     * This is a terminal operation.
+     * </p>
+     *
+     * @param collectionFactory a closure that creates a new Collection
+     * @param <C> the type of the resulting Collection
+     * @return a Collection containing all stream elements
+     */
+    def <C extends Collection<T>> C toCollection(Closure<C> collectionFactory) {
+        stream.collect(Collectors.toCollection(collectionFactory as Supplier<C>))
+    }
+
+    /**
+     * Collects elements into an array.
+     * <p>
+     * This is a terminal operation.
+     * </p>
+     *
+     * @return an array containing all stream elements
+     */
+    Object[] toArray() {
+        stream.toArray()
+    }
+
+    /**
      * Provides dynamic method delegation to Groovy's Collection API.
      * <p>
      * This method enables seamless integration with Groovy collection methods by converting
@@ -763,6 +1000,102 @@ class Gstream<T> {
             }
         } else {
             return list."$name"(args)
+        }
+    }
+
+    /**
+     * A builder for constructing Gstream instances incrementally.
+     */
+    @CompileStatic
+    static class GstreamBuilder<T> {
+        private Stream.Builder<T> streamBuilder
+        private Stream<T> sourceStream
+        private boolean isParallel = false
+        private List<Closure> operations = []
+
+        GstreamBuilder() {
+            this.streamBuilder = Stream.builder()
+        }
+
+        GstreamBuilder<T> add(T element) {
+            streamBuilder.add(element)
+            this
+        }
+
+        @TypeChecked(TypeCheckingMode.SKIP)
+        GstreamBuilder<T> add(T... elements) {
+            elements.each { streamBuilder.add(it) }
+            this
+        }
+
+        GstreamBuilder<T> from(Collection<T> collection) {
+            this.sourceStream = collection.stream()
+            this
+        }
+
+        @TypeChecked(TypeCheckingMode.SKIP)
+        GstreamBuilder<T> from(Range range) {
+            this.sourceStream = range.stream()
+            this
+        }
+
+        GstreamBuilder<T> of(T... elements) {
+            this.sourceStream = Stream.of(elements)
+            this
+        }
+
+        GstreamBuilder<T> parallel(boolean parallel) {
+            this.isParallel = parallel
+            this
+        }
+
+        GstreamBuilder<T> filter(Closure<Boolean> predicate) {
+            operations << { Gstream<T> s -> s.filter(predicate) }
+            this
+        }
+
+        GstreamBuilder<T> map(Closure mapper) {
+            operations << { Gstream s -> s.map(mapper) }
+            this
+        }
+
+        GstreamBuilder<T> distinct() {
+            operations << { Gstream<T> s -> s.distinct() }
+            this
+        }
+
+        GstreamBuilder<T> sorted() {
+            operations << { Gstream<T> s -> s.sorted() }
+            this
+        }
+
+        GstreamBuilder<T> sorted(Closure<Integer> comparator) {
+            operations << { Gstream<T> s -> s.sorted(comparator) }
+            this
+        }
+
+        GstreamBuilder<T> limit(long maxSize) {
+            operations << { Gstream<T> s -> s.limit(maxSize) }
+            this
+        }
+
+        GstreamBuilder<T> skip(long n) {
+            operations << { Gstream<T> s -> s.skip(n) }
+            this
+        }
+
+        Gstream<T> build() {
+            Stream<T> baseStream = sourceStream ?: streamBuilder.build()
+            if (isParallel) {
+                baseStream = baseStream.parallel()
+            }
+            Gstream<T> result = new Gstream<T>(baseStream)
+
+            operations.each { operation ->
+                result = operation(result) as Gstream<T>
+            }
+
+            result
         }
     }
 }

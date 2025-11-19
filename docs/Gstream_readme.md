@@ -68,7 +68,7 @@ def zipped = Gstream.of(1, 2, 3)
 // Result: [(1, 'a'), (2, 'b'), (3, 'c')]
 
 // Error handling
-def result = Gstream.of(1, 2, 0, 4)
+def result2 = Gstream.of(1, 2, 0, 4)
     .onErrorContinue { ex, val -> println "Error with $val: ${ex.message}" }
     .map { 10 / it }
     .toList()
@@ -120,10 +120,10 @@ def intStream = IntStream.range(1, 100)
 def gstream = Gstream.fromIntStream(intStream)
 
 def longStream = LongStream.of(1L, 2L, 3L)
-def gstream = Gstream.fromLongStream(longStream)
+def gstream1 = Gstream.fromLongStream(longStream)
 
 def doubleStream = DoubleStream.of(1.0, 2.0, 3.0)
-def gstream = Gstream.fromDoubleStream(doubleStream)
+def gstream2 = Gstream.fromDoubleStream(doubleStream)
 ```
 
 ### Empty Streams
@@ -453,12 +453,12 @@ def map = Gstream.of("apple", "banana", "cherry")
 // Result: [a: "apple", b: "banana", c: "cherry"]
 
 // Key and value mappers
-def map = Gstream.of(1, 2, 3)
+def map1 = Gstream.of(1, 2, 3)
     .toMap({ it }, { it * it })
 // Result: [1: 1, 2: 4, 3: 9]
 
 // With merge function for duplicates
-def map = Gstream.of("apple", "apricot", "banana")
+def map3 = Gstream.of("apple", "apricot", "banana")
     .toMap({ it[0] }, { it }, { a, b -> "$a, $b" })
 // Result: [a: "apple, apricot", b: "banana"]
 
@@ -764,7 +764,7 @@ def result = Gstream.of(1, 2, 3)
 // Result: [1, 10, 100, 2, 20, 200, 3, 30, 300]
 
 // Conditional emission
-def result = Gstream.of(1, 2, 3, 4, 5)
+def result2 = Gstream.of(1, 2, 3, 4, 5)
     .mapMulti { value, emit ->
         if (value % 2 == 0) {
             emit(value)

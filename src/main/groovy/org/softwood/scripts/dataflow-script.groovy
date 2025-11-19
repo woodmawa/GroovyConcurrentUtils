@@ -2,6 +2,7 @@ package org.softwood.scripts
 
 import org.softwood.dataflow.DataflowVariable
 
-DataflowVariable df = new DataflowVariable (10)
+def value =10
+DataflowVariable df = new DataflowVariable (value)
 
-println df.val
+println df.get()

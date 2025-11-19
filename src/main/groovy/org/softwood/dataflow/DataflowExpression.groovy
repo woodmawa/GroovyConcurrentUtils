@@ -238,8 +238,8 @@ abstract class DataflowExpression<T> {
         T resolvedValue
         try {
             // Use compareAndSet for atomic state transition
-            if (!state.compareAndSet(DataFlowState.NOT_INITIALISED, DataFlowState.INITIALISING)) {
-                throw new DataflowException("DataFlowVariable can only be set once ")
+            if (!state.compareAndSet(DataflowState.NOT_INITIALISED, DataflowState.INITIALISING)) {
+                throw new DataflowException("DataflowVariable can only be set once ")
             }
 
             timestamp = LocalDateTime.now()
@@ -260,7 +260,7 @@ abstract class DataflowExpression<T> {
                 throw ex
             } finally {
                 // Ensure state is always set to INITIALIZED
-                state.set(DataFlowState.INITIALIZED)
+                state.set(DataflowState.INITIALIZED)
             }
 
 

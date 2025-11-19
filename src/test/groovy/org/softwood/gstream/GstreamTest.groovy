@@ -783,4 +783,171 @@ class GstreamTest {
 
         assertEquals([1, 2, 3, 5, 8, 9], result)
     }
+
+    @Test
+    void testFlatMapIterable() {
+        def result = Gstream.of(1, 2, 3)
+                .flatMapIterable { [it, it * 10] }
+                .toList()
+
+        assertEquals([1, 10, 2, 20, 3, 30], result)
+    }
+
+    @Test
+    void testSortedBy() {
+        def people = [
+                [name: 'Bob', age: 30],
+                [name: 'Alice', age: 25],
+                [name: 'Charlie', age: 35]
+        ]
+
+        def result = Gstream.from(people)
+                .sortedBy { it.age }
+                .map { it.name }
+                .toList()
+
+        assertEquals(['Alice', 'Bob', 'Charlie'], result)
+    }
+
+    @Test
+    void testDistinctBy() {
+        def words = ["apple", "apricot", "banana", "blueberry"]
+        def result = Gstream.from(words)
+                .distinctBy { it[0] }
+                .toList()
+
+        assertEquals(['apple', 'banana'], result)
+    }
+
+    @Test
+    void testMaxBy() {
+        def result = Gstream.of([name:'Bob',age:25], [name:'Alice',age:30], [name:'Dan',age:28])
+                .maxBy { it.age }
+
+        assertTrue(result.isPresent())
+        assertEquals('Alice', result.get().name)
+    }
+
+    @Test
+    void testMinBy() {
+        def result = Gstream.of([name:'Bob',age:25], [name:'Alice',age:30], [name:'Dan',age:28])
+                .minBy { it.age }
+
+        assertTrue(result.isPresent())
+        assertEquals('Bob', result.get().name)
+    }
+
+    @Test
+    void testZipWithIndex() {
+        def result = Gstream.of('a', 'b', 'c')
+                .zipWithIndex()
+                .toList()
+
+        assertEquals([(0L):'a',(1L):'b',(2L):'c'], result.collectEntries { [(it.v1):it.v2] })
+    }
+
+    @Test
+    void testZip() {
+        def s1 = Gstream.of(1, 2, 3)
+        def s2 = Gstream.of('a', 'b', 'c')
+
+        def result = s1.zip(s2).toList()
+
+        assertEquals([[1,'a'], [2,'b'], [3,'c']], result)
+    }
+
+    @Test
+    void testChunked() {
+        def result = Gstream.of(1,2,3,4,5,6,7)
+                .chunked(3)
+                .toList()
+
+        assertEquals([[1,2,3], [4,5,6], [7]], result)
+    }
+
+    @Test
+    void testWindowed() {
+        def result = Gstream.of(1,2,3,4,5)
+                .windowed(3)
+                .toList()
+
+        assertEquals([[1,2,3], [2,3,4], [3,4,5]], result)
+    }
+
+    @Test
+    void testTee() {
+        def seen = []
+        def result = Gstream.of(1, 2, 3)
+                .tee { seen << it }
+                .map { it * 2 }
+                .toList()
+
+        assertEquals([1,2,3], seen)
+        assertEquals([2,4,6], result)
+    }
+
+    @Test
+    void testMapMulti() {
+        def result = Gstream.of(1, 2, 3)
+                .mapMulti { value, consumer ->
+                    consumer.accept(value)
+                    consumer.accept(value * 10)
+                }
+                .toList()
+
+        assertEquals([1,10,2,20,3,30], result)
+    }
+
+    @Test
+    void testOnErrorContinue() {
+        def result = Gstream.of("10", "x", "30")
+                .map { it.toInteger() }
+                .onErrorContinue { ex, value -> /* ignore */ }
+                .toList()
+
+        assertEquals([10, 30], result)
+    }
+
+    @Test
+    void testSummarizingInt() {
+        def stats = Gstream.of(1, 2, 3, 4, 5).summarizingInt { it }
+
+        assertEquals(5, stats.count)
+        assertEquals(1, stats.min)
+        assertEquals(5, stats.max)
+        assertEquals(15, stats.sum)
+    }
+
+    @Test
+    void testBuilderWithDistinctBy() {
+        def builder = Gstream.builder()
+        builder.add 'apple', 'apricot', 'banana', 'blueberry'
+        builder.distinctBy { it[0] }
+
+        def result = builder.build().toList()
+
+        assertEquals(['apple', 'banana'], result)
+    }
+
+    @Test
+    void testBuilderFlatMapIterable() {
+        def builder = Gstream.builder()
+        builder.add 1,2,3
+        builder.flatMapIterable { [it, it*10] }
+
+        def result = builder.build().toList()
+
+        assertEquals([1,10,2,20,3,30], result)
+    }
+
+    @Test
+    void testBuilderSortedBy() {
+        def builder = Gstream.builder()
+        builder.add([n:'Bob',a:30], [n:'Alice',a:20], [n:'Charlie',a:40])
+        builder.sortedBy { it.a }
+
+        def result = builder.build().map{it.n}.toList()
+
+        assertEquals(['Alice','Bob','Charlie'], result)
+    }
 }

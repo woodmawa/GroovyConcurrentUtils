@@ -1,13 +1,6 @@
 package org.softwood.promise
-package org.softwood.dataflow.promise
 
-import groovy.util.logging.Slf4j
-import io.vertx.core.Vertx
-import io.vertx.core.Promise as VertxPromise
-import org.softwood.dataflow.core.DataFlowVariable
-import org.softwood.dataflow.core.DataFlowFactory
 
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer

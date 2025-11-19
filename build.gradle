@@ -19,6 +19,7 @@ dependencies {
     implementation "org.yaml:snakeyaml:2.5"
     implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
     implementation 'io.vertx:vertx-core:5.0.5'
+    implementation 'io.projectreactor:reactor-core:3.8.0'
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'

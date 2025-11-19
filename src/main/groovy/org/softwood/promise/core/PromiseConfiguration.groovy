@@ -2,8 +2,12 @@ package org.softwood.promise.core
 
 import groovy.util.logging.Slf4j
 import io.vertx.core.Vertx
+import org.softwood.dataflow.DataflowFactory
 import org.softwood.promise.PromiseFactory
 import org.softwood.promise.PromiseImplementation
+import org.softwood.promise.core.cfuture.CompletableFuturePromiseFactory
+import org.softwood.promise.core.dataflow.DataflowPromiseFactory
+import org.softwood.promise.core.vertx.VertxPromiseFactory
 
 import java.util.concurrent.ConcurrentHashMap
 
@@ -20,7 +24,7 @@ class PromiseConfiguration {
 
     static {
         // Register default factories
-        registerFactory(PromiseImplementation.DATAFLOW, new DataFlowPromiseFactory(new DataFlowFactory()))
+        registerFactory(PromiseImplementation.DATAFLOW, new DataflowPromiseFactory(new DataflowFactory()))
     }
 
     /**

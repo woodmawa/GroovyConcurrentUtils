@@ -1,6 +1,7 @@
 package org.softwood.promise.core.dataflow
 
 import groovy.util.logging.Slf4j
+import org.softwood.dataflow.DataflowFactory
 import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 
@@ -11,7 +12,7 @@ import org.softwood.promise.PromiseFactory
 class DataflowPromiseFactory implements PromiseFactory {
     private final DataflowFactory dataflow
 
-    DataFlowPromiseFactory(DataflowFactory dataFlow) {
+    DataflowPromiseFactory(DataflowFactory dataFlow) {
         this.dataflow = dataFlow
     }
 

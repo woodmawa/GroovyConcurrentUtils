@@ -1,6 +1,7 @@
 package org.softwood.promise.core.dataflow
 
 import groovy.util.logging.Slf4j
+import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
 
 import java.util.concurrent.TimeUnit
@@ -12,10 +13,10 @@ import java.util.function.Function
  * DataFlowVariable-based implementation of Promise
  */
 @Slf4j
-class DataFlowPromise<T> implements Promise<T> {
+class DataflowPromise<T> implements Promise<T> {
     private final DataflowVariable<T> variable
 
-    DataFlowPromise(DataflowVariable<T> variable) {
+    DataflowPromise(DataflowVariable<T> variable) {
         this.variable = variable
     }
 
@@ -45,7 +46,7 @@ class DataFlowPromise<T> implements Promise<T> {
         DataflowVariable<R> result = variable.then({ T value ->
             return function.apply(value)
         } as Closure)
-        return new DataFlowPromise<R>(result)
+        return new DataflowPromise<R>(result)
     }
 
     @Override
@@ -60,6 +61,6 @@ class DataFlowPromise<T> implements Promise<T> {
 
     @Override
     <R> Promise<R> recover(Function<Throwable, R> recovery) {
-        return new DataFlowPromise<R>(variable.recover(recovery))
+        return new DataflowPromise<R>(variable.recover(recovery))
     }
 }

@@ -207,7 +207,7 @@ builder.add(2, 3, 4)
 def stream = builder.build()
 ```
 
-### Complex Pipeline with Builder
+## Complex Pipeline with Builder
 ```groovy
 def result = Gstream.build {
     from(people)
@@ -217,6 +217,58 @@ def result = Gstream.build {
     map { [name: it.name, age: it.age] }
 }.toList()
 ```
+### Finalising the pipeline 
+The builder’s build() step happens automatically:
+```groovy
+def list = Gstream.build {
+    of 1,2,3,4,5
+    map { it * 3 }
+}.toList()
+```
+You normally won’t call build() directly, but you can:
+
+```groovy
+def builder = new Gstream.GstreamBuilder()
+builder.of(1,2,3)
+builder.map { it * 2 }
+def stream = builder.build()
+```
+
+### how the builder DSL executes 
+
+The DSL is configured so:
+
+- delegate = GstreamBuilder
+
+- resolveStrategy = DELEGATE_ONLY
+
+This ensures:
+
+✔ DSL words like of, map, elements, sortedBy
+always resolve to builder methods
+❌ They will never fall through to Gstream.methodMissing
+(which would break the pipeline)
+
+```groovy
+def result = Gstream.build {
+    of 1, 2, 3, 4, 5
+    filter { it % 2 == 1 }
+    flatMapIterable { [it, it * 10] }
+    sortedBy { it }
+    limit 6
+}
+.toList()
+
+// → [1, 10, 3, 30, 5, 50]
+```
+
+### When to use the DSL vs direct api 
+|Approach	| When to Use |
+|-----------|-------------|
+|Direct Gstream.of(...).map(...).toList()	| simple pipelines, one-liners, performance-critical code|
+|Gstream.build { ... }	| long pipelines, configuration scripts, readability-focused code |
+
+Both approaches compile down to the same optimized Gstream engine.
 
 ## Intermediate Operations
 

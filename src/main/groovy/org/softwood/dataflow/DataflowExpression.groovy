@@ -30,10 +30,9 @@ abstract class DataflowExpression<T> {
     protected AtomicReference<DataflowState> state = new AtomicReference (DataflowState.NOT_INITIALISED)
 
     protected ConcurrentPool pool = new ConcurrentPool()
-    protected ExecutorService executor = pool.executor
     volatile LocalDateTime timestamp
 
-    ConcurrentLinkedQueue listeners = new ConcurrentLinkedQueue<Closure>()
+    ConcurrentLinkedQueue listeners = new ConcurrentLinkedQueue<MessageClosure>()
 
         static enum DataflowState {
         NOT_INITIALISED,
@@ -45,7 +44,7 @@ abstract class DataflowExpression<T> {
     }
 
     /**
-     * allow DFE to bound upfront when declaring one
+     * allow DFE to be bound upfront when declaring one
      * @param data
      */
     DataflowExpression(data) {
@@ -202,7 +201,7 @@ abstract class DataflowExpression<T> {
                 // Apply the transformation
                 def transformedValue = closure.call(inputValue)
                 // Set the result in the new variable
-                result.set(transformedValue)
+                result.set ((T) transformedValue)
                 return transformedValue
             } catch (Exception ex) {
                 result.setError(ex)
@@ -268,7 +267,7 @@ abstract class DataflowExpression<T> {
             log.debug "DataFlowExpression: notify clients, that value has been set to ($resolvedValue) at $timestamp"
 
             firePropertyChange("value", null, resolvedValue)
-            async ? notifyWhenBoundAsync(resolvedValue) : notifyWhenBound(resolvedValue)  //will use executor to send
+            async ? notifyWhenBoundAsync((T) resolvedValue) : notifyWhenBound((T) resolvedValue)  //will use executor to send
 
             this
 

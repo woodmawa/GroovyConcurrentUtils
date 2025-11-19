@@ -311,7 +311,7 @@ class Gstream<T> {
     static <T> Gstream<T> build(@DelegatesTo(GstreamBuilder) Closure<T> config) {
         def builder = new GstreamBuilder<T>()
         config.delegate = builder
-        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.resolveStrategy = Closure.DELEGATE_ONLY
         config()
         builder.build()
     }
@@ -1349,21 +1349,33 @@ class Gstream<T> {
      */
     @TypeChecked(TypeCheckingMode.SKIP)
     def methodMissing(String name, Object args) {
+
         def list = this.toList()
+
+        // Candidate receivers to attempt invocation on
+        def receivers = [
+                list,
+                list as Set,
+                list as Collection,
+                list as Iterable
+        ]
+
+        Object[] invokeArgs
         if (args == null) {
-            return list."$name"()
+            invokeArgs = [] as Object[]
         } else if (args instanceof Object[]) {
-            Object[] argsArray = (Object[]) args
-            if (argsArray.length == 0) {
-                return list."$name"()
-            } else if (argsArray.length == 1) {
-                return list."$name"(argsArray[0])
-            } else {
-                return list."$name"(*argsArray)
-            }
+            invokeArgs = args
         } else {
-            return list."$name"(args)
+            invokeArgs = [args] as Object[]
         }
+
+        for (receiver in receivers) {
+            if (receiver.metaClass.respondsTo(receiver, name, invokeArgs)) {
+                return receiver.invokeMethod(name, invokeArgs)
+            }
+        }
+
+        throw new MissingMethodException(name, this.class, invokeArgs)
     }
 
     // -------------------------------------------------------------------------
@@ -1417,6 +1429,7 @@ class Gstream<T> {
 
         /** List of deferred pipeline operations applied during build(). */
         private final List<Closure<Gstream<T>>> operations = []
+
 
         // -------------------------------------------------------------------------
         // SOURCE DEFINERS
@@ -1492,6 +1505,12 @@ class Gstream<T> {
                 return fromRange(source as Range)
             throw new IllegalArgumentException("Unsupported 'from' source: $source")
         }
+
+        GstreamBuilder<T> of(T... items) {
+            this.sourceStream = Stream.of(items)
+            return this
+        }
+
 
         // -------------------------------------------------------------------------
         // CONFIGURATION FLAGS

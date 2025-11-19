@@ -1239,7 +1239,7 @@ class Gstream<T> {
      * @return a new Gstream with the same elements
      */
     Gstream<T> tee(Closure<?> sideEffect) {
-        Objects.requireNonNull(sideEffect, "sideEffect must not be null")
+        assert sideEffect != null : "sideEffect closure must not be null"
 
         Stream<T> newStream = stream.peek { T t ->
             sideEffect.call(t)
@@ -1264,7 +1264,7 @@ class Gstream<T> {
      * @return a new Gstream<R>
      */
     def <R> Gstream<R> mapMulti(Closure<?> mapper) {
-        Objects.requireNonNull(mapper, "mapper cannot be null")
+        assert mapper != null : "Mapper closure must not be null"
 
         Stream<R> newStream = stream.mapMulti { T value, java.util.function.Consumer<R> emit ->
             mapper.call(value, emit)
@@ -1282,7 +1282,7 @@ class Gstream<T> {
      * The failing element is skipped and the stream continues.
      */
     Gstream<T> onErrorContinue(Closure<?> handler) {
-        Objects.requireNonNull(handler, "handler must not be null")
+        assert handler != null : "handler closure must not be null"
 
         Spliterator<T> base = stream.spliterator()
 
@@ -1397,7 +1397,7 @@ class Gstream<T> {
      * </pre>
      *
      * <p>
-     * Pipeline operations are stored and applied in sequence once {@link #build()} is
+     * Pipeline operations are stored and applied in sequence once {@link Gstream.GstreamBuilder#build()} is
      * invoked. The created {@link Gstream} instance is fully static and optimized.
      * </p>
      *

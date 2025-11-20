@@ -195,7 +195,7 @@ abstract class DataflowExpression<T> {
      * @throws InterruptedException if the waiting thread is interrupted
      * @throws Throwable if the expression was completed exceptionally
      */
-    T getValue (int waitTime, TimeUnit unit) throws TimeoutException{
+    T getValue (long waitTime, TimeUnit unit) throws TimeoutException{
         try {
             value.get(waitTime, unit)
         } catch (ExecutionException ex) {
@@ -228,7 +228,7 @@ abstract class DataflowExpression<T> {
      * @throws InterruptedException if the waiting thread is interrupted
      * @throws Throwable if the expression was completed exceptionally
      */
-    T join (int waitTime, TimeUnit unit)  throws TimeoutException {
+    T join (long waitTime, TimeUnit unit)  throws TimeoutException {
         value.get (waitTime, unit )
     }
 

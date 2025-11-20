@@ -337,6 +337,8 @@ class DataflowVariable<T> extends  DataflowExpression {
             return (T) getValue (timeout, unit)
         } catch (Exception ex) {
             setError(ex)
+            //rethrow the timeout exception as well for tests
+            throw ex
         }
 
     }

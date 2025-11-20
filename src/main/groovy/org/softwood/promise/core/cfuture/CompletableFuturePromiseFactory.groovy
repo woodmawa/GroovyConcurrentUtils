@@ -4,6 +4,8 @@ import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 
+import java.util.concurrent.CompletableFuture
+
 /**
  * CompletableFuture-based implementation of PromiseFactory
  */
@@ -12,20 +14,20 @@ class CompletableFuturePromiseFactory implements PromiseFactory {
 
     @Override
     <T> Promise<T> createPromise() {
-        return new CompletableFuturePromise<T>(new java.util.concurrent.CompletableFuture<T>())
+        return new CompletableFuturePromise<T>(new CompletableFuture<T>())
     }
 
     @Override
     <T> Promise<T> createPromise(T value) {
         return new CompletableFuturePromise<T>(
-                java.util.concurrent.CompletableFuture.completedFuture(value)
+                CompletableFuture.completedFuture(value)
         )
     }
 
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
         return new CompletableFuturePromise<T>(
-                java.util.concurrent.CompletableFuture.supplyAsync({ task.call() })
+                CompletableFuture.supplyAsync({ task.call() })
         )
     }
 }

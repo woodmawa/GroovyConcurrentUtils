@@ -1,23 +1,40 @@
 package org.softwood.promise.core.cfuture
 
+import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
 
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * CompletableFuture-based implementation of Promise
  */
 @Slf4j
+@ToString
 class CompletableFuturePromise<T> implements Promise<T> {
-    private final java.util.concurrent.CompletableFuture<T> future
+    private final CompletableFuture<T> future
 
-    CompletableFuturePromise(java.util.concurrent.CompletableFuture<T> future) {
+    CompletableFuturePromise(CompletableFuture<T> future) {
         this.future = future
     }
+
+    @Override
+    Promise<T> accept(T value) {
+        future.complete(value)
+        return this
+    }
+
+    @Override
+    Promise<T> accept(Supplier<T> closureValue) {
+        future.complete(closureValue.get())
+        return this
+    }
+
 
     @Override
     T get() throws Exception {

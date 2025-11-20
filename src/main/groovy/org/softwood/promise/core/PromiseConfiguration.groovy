@@ -22,9 +22,14 @@ class PromiseConfiguration {
     // Vertx instance for Vertx promises (lazy initialization)
     private static Vertx vertxInstance
 
+    /**
+     * static initialiser
+     */
     static {
         // Register default factories
         registerFactory(PromiseImplementation.DATAFLOW, new DataflowPromiseFactory(new DataflowFactory()))
+        registerFactory(PromiseImplementation.COMPLETABLE_FUTURE, new CompletableFuturePromiseFactory())
+        registerFactory(PromiseImplementation.VERTX, new VertxPromiseFactory(vertxInstance))
     }
 
     /**
@@ -46,6 +51,11 @@ class PromiseConfiguration {
                 case PromiseImplementation.COMPLETABLE_FUTURE:
                     registerFactory(impl, new CompletableFuturePromiseFactory())
                     break
+                case PromiseImplementation.DATAFLOW:
+                    registerFactory(impl, new DataflowPromiseFactory(new DataflowFactory()))
+                    break
+                default:
+                    log.error "could not find promise implementation for $impl in registry  "
             }
         }
     }
@@ -62,7 +72,7 @@ class PromiseConfiguration {
      */
     static void registerFactory(PromiseImplementation impl, PromiseFactory factory) {
         log.info "Registering factory for implementation: $impl"
-        factories.put(impl, factory)
+        factories.putIfAbsent(impl, factory)
     }
 
     /**

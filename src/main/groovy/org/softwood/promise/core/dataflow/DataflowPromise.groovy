@@ -1,5 +1,6 @@
 package org.softwood.promise.core.dataflow
 
+import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
@@ -8,16 +9,30 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * DataFlowVariable-based implementation of Promise
  */
 @Slf4j
+@ToString
 class DataflowPromise<T> implements Promise<T> {
     private final DataflowVariable<T> variable
 
     DataflowPromise(DataflowVariable<T> variable) {
         this.variable = variable
+    }
+
+    @Override
+    Promise<T> accept(T value) {
+        variable.set (value)
+        this
+    }
+
+    @Override
+    Promise<T> accept(Supplier<T> supplier) {
+        variable.set (supplier.get())
+        return this
     }
 
     @Override

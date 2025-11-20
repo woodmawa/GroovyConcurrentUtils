@@ -12,28 +12,28 @@ class Promises {
     /**
      * Create a new promise using default implementation
      */
-    static <T> Promise<T> promise() {
+    static <T> Promise<T> newPromise() {
         return PromiseConfiguration.getFactory().createPromise()
     }
 
     /**
      * Create a promise with an initial value using default implementation
      */
-    static <T> Promise<T> promise(T value) {
+    static <T> Promise<T> newPromise(T value) {
         return PromiseConfiguration.getFactory().createPromise(value)
     }
 
     /**
      * Create a promise using specific implementation
      */
-    static <T> Promise<T> promise(PromiseImplementation impl) {
+    static <T> Promise<T> newPromise(PromiseImplementation impl) {
         return PromiseConfiguration.getFactory(impl).createPromise()
     }
 
     /**
      * Create a promise with value using specific implementation
      */
-    static <T> Promise<T> promise(PromiseImplementation impl, T value) {
+    static <T> Promise<T> newPromise(PromiseImplementation impl, T value) {
         return PromiseConfiguration.getFactory(impl).createPromise(value)
     }
 

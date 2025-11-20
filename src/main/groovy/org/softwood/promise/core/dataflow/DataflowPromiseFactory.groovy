@@ -6,24 +6,24 @@ import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 
 /**
- * DataFlow-based implementation of PromiseFactory
+ * Dataflow-based implementation of PromiseFactory
  */
 @Slf4j
 class DataflowPromiseFactory implements PromiseFactory {
-    private final DataflowFactory dataflow
+    private final DataflowFactory dataflowFactory
 
-    DataflowPromiseFactory(DataflowFactory dataFlow) {
-        this.dataflow = dataFlow
+    DataflowPromiseFactory(DataflowFactory dataflowFactory) {
+        this.dataflowFactory = dataflowFactory
     }
 
     @Override
     <T> Promise<T> createPromise() {
-        return new DataflowPromise<T>(dataFlow.variable())
+        return new DataflowPromise<T>(dataflowFactory.variable())
     }
 
     @Override
     <T> Promise<T> createPromise(T value) {
-        return new DataflowPromise<T>(dataflow.variable(value))
+        return new DataflowPromise<T>(dataflowFactory.variable(value))
     }
 
     @Override

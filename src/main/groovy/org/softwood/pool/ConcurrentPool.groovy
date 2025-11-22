@@ -43,7 +43,20 @@ class ConcurrentPool {
             errors << "Virtual threads not available: ${e.message}".toString()
         }
 
-        // Shared scheduled executor - always uses platform threads since scheduling needs persistent threads
+        // Shared scheduled executor - uses platform threads for the scheduling mechanism
+        // Even though we prefer virtual threads, scheduled executors need persistent threads
+        // to manage the scheduling queue and dispatch tasks. The actual scheduled tasks
+        // can still run on virtual threads if needed via execute() after scheduling.
+        /*
+            pool.scheduleAtFixedRate(0, 1, TimeUnit.MINUTES) {
+                // This runs on platform thread (scheduler)
+                // But can spawn virtual threads for actual work
+                pool.execute {
+                // Heavy I/O work on virtual thread
+                    fetchAndProcessData()
+                }
+            }
+         */
         try {
             sharedScheduledExecutor = Executors.newScheduledThreadPool(
                     Math.max(1, Runtime.getRuntime().availableProcessors() / 4)

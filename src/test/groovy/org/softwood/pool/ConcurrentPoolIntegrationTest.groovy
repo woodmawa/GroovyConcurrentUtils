@@ -118,21 +118,32 @@ class ConcurrentPoolIntegrationTest extends GroovyTestCase {
         def pool = new ConcurrentPool()
         def counter = new AtomicInteger(0)
 
+        println "1. Pool closed: ${pool.isClosed()}"
+
         // Submit one task before shutdown
         def f1 = pool.execute {
             counter.incrementAndGet()
         }
         f1.get(2, TimeUnit.SECONDS)
 
+        println "2. Before shutdown, closed: ${pool.isClosed()}"
+
         pool.shutdown()
 
+        println "3. After shutdown, closed: ${pool.isClosed()}"
+
         try {
-            pool.execute {
+            println "4. Attempting execute..."
+            def future = pool.execute {
                 counter.incrementAndGet()
-            }.get(2, TimeUnit.SECONDS)
+            }
+            println "5. Execute succeeded (BAD!), getting result..."
+            future.get(2, TimeUnit.SECONDS)
             fail("Submitting after shutdown should fail")
-        } catch (Exception ignored) {
-            // Expected: underlying executor should reject new tasks
+        } catch (IllegalStateException e) {
+            println "6. SUCCESS: Got IllegalStateException: ${e.message}"
+        } catch (Exception e) {
+            println "6. Got exception: ${e.class.name}: ${e.message}"
         }
     }
 

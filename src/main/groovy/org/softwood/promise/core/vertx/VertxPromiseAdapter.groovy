@@ -5,11 +5,13 @@ import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import io.vertx.core.AsyncResult
 import io.vertx.core.Future
+import io.vertx.core.Handler
 import io.vertx.core.Promise as VertxPromise
 import io.vertx.core.Vertx
 import org.softwood.promise.Promise as SoftPromise
 
 import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -124,6 +126,14 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     }
 
     /**
+     * generates completableFuture from the vertx future
+     */
+    CompletableFuture asType (CompletableFuture) {
+        future.toCompletionStage().toCompletableFuture()
+        //future.toCompletionStage().
+    }
+
+    /**
      * Creates a new, incomplete {@code VertxPromiseAdapter} bound to the given Vert.x instance.
      * <p>
      * The returned adapter owns an underlying {@link VertxPromise} that can be completed via
@@ -216,7 +226,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                     } else {
                         promise.tryFail(ar.cause())
                     }
-                } as io.vertx.core.Handler<AsyncResult<T>>)
+                } as Handler<AsyncResult<T>>)
 
         return this
     }
@@ -248,7 +258,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                     error.set(ar.cause())
                 }
                 latch.countDown()
-            } as io.vertx.core.Handler<AsyncResult<T>>)
+            } as Handler<AsyncResult<T>>)
 
             latch.await()
 
@@ -304,7 +314,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                 error.set(ar.cause())
             }
             latch.countDown()
-        } as io.vertx.core.Handler<AsyncResult<T>>)
+        } as Handler<AsyncResult<T>>)
 
         if (!latch.await(timeout, unit)) {
             throw new TimeoutException("Promise timed out after ${timeout} ${unit}")
@@ -345,7 +355,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     SoftPromise<T> onComplete(Consumer<T> callback) {
         future.onSuccess({ T value ->
             callback.accept(value)
-        } as io.vertx.core.Handler<T>)
+        } as Handler<T>)
         return this
     }
 
@@ -362,7 +372,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     SoftPromise<T> onError(Consumer<Throwable> callback) {
         future.onFailure({ Throwable err ->
             callback.accept(err)
-        } as io.vertx.core.Handler<Throwable>)
+        } as Handler<Throwable>)
         return this
     }
 
@@ -385,7 +395,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     @Override
     <R> SoftPromise<R> then(Function<T, R> fn) {
         Future<R> mapped = future.map(
-                { T value -> fn.apply(value) } as java.util.function.Function<T, R>
+                { T value -> fn.apply(value) } as Function<T, R>
         )
         return new VertxPromiseAdapter<R>(mapped, vertx)
     }
@@ -436,7 +446,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                             return Future.failedFuture(t)
                         }
                     }
-                } as java.util.function.Function<AsyncResult<T>, Future<R>>
+                } as Function<AsyncResult<T>, Future<R>>
         )
 
         return new VertxPromiseAdapter<R>(recovered, vertx)

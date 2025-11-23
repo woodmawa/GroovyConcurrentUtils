@@ -3,7 +3,7 @@ package org.softwood.dataflow
 import groovy.beans.Bindable
 import groovy.transform.MapConstructor
 import groovy.util.logging.Slf4j
-
+import io.netty.util.concurrent.CompleteFuture
 import org.softwood.pool.ConcurrentPool
 import java.time.LocalDateTime
 import java.util.concurrent.Callable
@@ -110,6 +110,7 @@ abstract class DataflowExpression<T> {
     DataflowExpression(data) {
         setValue (data)
     }
+
 
     /**
      * Checks if this expression has been bound to a value.

@@ -23,6 +23,10 @@ class CompletableFuturePromise<T> implements Promise<T> {
         this.future = future
     }
 
+    CompletableFuture asType (CompletableFuture) {
+        future
+    }
+
     @Override
     Promise<T> accept(T value) {
         future.complete(value)
@@ -73,8 +77,16 @@ class CompletableFuturePromise<T> implements Promise<T> {
     }
 
     @Override
-    <R> Promise<R> recover(Function<Throwable, R> recovery) {
-        def recovered = future.exceptionally(recovery)
-        return new CompletableFuturePromise<R>(recovered)
+    <T> Promise<T> recover(Function<Throwable, T> recovery) {
+        // Explicitly cast your `future` because Groovy erases generics
+        CompletableFuture<T> cf = (CompletableFuture<T>) future
+
+        // Cast recovery to match Java signature: Function<Throwable, ? extends T>
+        Function<Throwable, ? extends T> fn =
+                (Function<Throwable, ? extends T>) recovery
+
+        CompletableFuture<T> recovered = cf.exceptionally(fn)
+
+        return new CompletableFuturePromise<T>(recovered)
     }
 }

@@ -1,6 +1,6 @@
 package org.softwood.promise
 
-
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
@@ -20,4 +20,5 @@ interface Promise<T> {
     <R> Promise<R> then(Function<T, R> function)
     Promise<T> onError(Consumer<Throwable> errorHandler)
     <R> Promise<R> recover(Function<Throwable, R> recovery)
+    CompletableFuture<T> asType (CompletableFuture)
 }

@@ -1,13 +1,15 @@
 package org.softwood.pool
 
+import groovy.util.logging.Slf4j
 import groovyjarjarantlr4.v4.runtime.misc.NotNull
+
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * For virtual threads: Uses a shared application-wide executor that creates a new virtual thread per task.
  * For platform threads: Creates a fixed-size thread pool for this specific instance.
  */
+@Slf4j
 class ConcurrentPool {
     private static ExecutorService sharedVirtualThreadExecutor
     private static ScheduledExecutorService sharedScheduledExecutor
@@ -59,7 +62,7 @@ class ConcurrentPool {
          */
         try {
             sharedScheduledExecutor = Executors.newScheduledThreadPool(
-                    Math.max(1, Runtime.getRuntime().availableProcessors() / 4)
+                    Math.max(1, Runtime.getRuntime().availableProcessors() / 4) as int
             )
         } catch (Exception e) {
             sharedScheduledExecutor = Executors.newSingleThreadScheduledExecutor()
@@ -159,6 +162,10 @@ class ConcurrentPool {
         errors.asList().asImmutable()
     }
 
+    static void clearErrors () {
+        errors.clear()
+    }
+
     /**
      * Override the executor for this pool instance.
      * Only recommended for testing or advanced use cases.
@@ -209,7 +216,7 @@ class ConcurrentPool {
      * @throws IllegalStateException if pool is closed
      */
     @NotNull
-    def withPool(ExecutorService executor = null, @DelegatesTo(ConcurrentPool) Closure work) {
+    CompletableFuture withPool(ExecutorService executor = null, @DelegatesTo(ConcurrentPool) Closure work) {
         if (this.closed.get() == true) {
             throw new IllegalStateException("Pool is closed and not accepting new tasks")
         }
@@ -219,7 +226,9 @@ class ConcurrentPool {
         work.delegate = this
         work.resolveStrategy = Closure.DELEGATE_FIRST
 
-        return effectiveExecutor.submit(work)
+        Future future =  effectiveExecutor.submit(work)
+        def cf = transformFutureToCFuture(future, effectiveExecutor)
+        return cf
     }
 
     /**
@@ -230,11 +239,52 @@ class ConcurrentPool {
      * @throws IllegalStateException if pool is closed
      */
     @NotNull
-    def execute(Closure task) {
+    CompletableFuture execute(Closure task) {
         if (this.closed.get() == true) {
             throw new IllegalStateException("Pool is closed and not accepting new tasks")
         }
-        return this.executor.submit(task)
+        Future future = this.executor.submit(task)
+        return transformFutureToCFuture(future, this.executor)
+    }
+
+    /**
+     * Submits a task to the pool executor.
+     *
+     * @param task - closure to execute
+     * @param args - args to pass to the closure
+     * @return Future representing the task
+     * @throws IllegalStateException if pool is closed
+     */
+    @NotNull
+    CompletableFuture execute(Closure task, Object[] args) {
+        if (this.closed.get() == true) {
+            throw new IllegalStateException("Pool is closed and not accepting new tasks")
+        }
+
+        Closure workWithArgs = {task (args)}
+        Future future =  this.executor.submit(workWithArgs)
+        return transformFutureToCFuture(future, this.executor)
+    }
+
+    /**
+     * helper function to take the future returned by the executor submit and return is as a completableFuture
+     * takes a future and wraps the sync future.get() with lambda and submits that, sets the value int the new
+     * computableFuture of the completes exceptionally
+     * @param future
+     * @param executorService
+     * @return CompletableFuture
+     */
+    private CompletableFuture transformFutureToCFuture (Future future, ExecutorService executorService) {
+        CompletableFuture cf = new CompletableFuture()
+        executorService.submit ( () -> {
+            try {
+                cf.complete(future.get())
+            } catch (Exception e) {
+                cf.completeExceptionally(e)
+            }
+        })
+        //return the completableFuture with the outcome of the future.get()
+        return cf
     }
 
     /**

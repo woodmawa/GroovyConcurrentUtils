@@ -343,7 +343,7 @@ abstract class DataflowExpression<T> {
      * @return a new DataflowExpression containing the transformed value
      * @throws Exception if the transformation closure throws an exception
      */
-    DataflowExpression<T> then (final Closure closure) throws Exception {
+    DataflowExpression<T> then (final Callable closure) throws Exception {
         log.debug "then: create new MessageClosure, and call value.thenApply where value status is $value"
 
         // Create a new DataFlowVariable for the result

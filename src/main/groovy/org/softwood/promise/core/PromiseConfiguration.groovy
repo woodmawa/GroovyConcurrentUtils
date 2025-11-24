@@ -12,7 +12,12 @@ import org.softwood.promise.core.vertx.VertxPromiseFactory
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Configuration for the promise system
+ * Central registry for Promise factories.
+ *
+ * <p>Promises are created through this configuration to preserve the ability
+ * to swap implementations at runtime or by environment.</p>
+ *
+ * <p>Typical usage is indirect via {@link org.softwood.promise.Promises}.</p>
  */
 @Slf4j
 class PromiseConfiguration {
@@ -68,7 +73,10 @@ class PromiseConfiguration {
     }
 
     /**
-     * Register a custom factory for an implementation
+     * Register/replace a factory at runtime.
+     *
+     * @param impl implementation key
+     * @param factory factory instance
      */
     static void registerFactory(PromiseImplementation impl, PromiseFactory factory) {
         log.info "Registering factory for implementation: $impl"
@@ -76,7 +84,10 @@ class PromiseConfiguration {
     }
 
     /**
-     * Get factory for specific implementation
+     * Get a specific factory by implementation key.
+     *
+     * @param impl implementation type
+     * @return the matching factory
      */
     static PromiseFactory getFactory(PromiseImplementation impl = null) {
         PromiseImplementation target = impl ?: defaultImplementation

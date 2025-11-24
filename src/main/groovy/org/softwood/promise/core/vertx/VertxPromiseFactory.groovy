@@ -10,45 +10,35 @@ import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 
 import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.function.Function
 
 /**
+ * <h2>Vert.x 5 Promise Factory</h2>
+ *
  * <p>
- * Factory for creating {@link org.softwood.promise.Promise} instances backed by Vert.x 5.
+ * Implementation of {@link org.softwood.promise.PromiseFactory} producing
+ * {@link VertxPromiseAdapter} instances backed by Vert.x 5.x {@link Future}
+ * and {@link io.vertx.core.Promise}.
  * </p>
  *
- * <h2>Purpose</h2>
- * <p>
- * This class provides a Vert.x-specific implementation of a Promise factory.
- * All promises returned are {@link VertxPromiseAdapter} instances wrapping Vert.x
- * {@link io.vertx.core.Future} objects.  It supports:
- * </p>
- *
+ * <h3>Responsibilities</h3>
  * <ul>
- *     <li>Creating incomplete, succeeded, and failed promises</li>
- *     <li>Executing Groovy closures asynchronously via Vert.x worker pool</li>
- *     <li>Parallel orchestration with {@code all()} and {@code any()}</li>
- *     <li>Sequential orchestration via {@code sequence()}</li>
- *     <li>Vert.x shutdown as a promise</li>
+ *   <li>Creating incomplete, succeeded, and failed promises</li>
+ *   <li>Wrapping Java {@link CompletableFuture}</li>
+ *   <li>Wrapping other {@link org.softwood.promise.Promise} instances</li>
+ *   <li>Executing closures asynchronously on Vert.x worker threads</li>
+ *   <li>Parallel orchestration: all(), any()</li>
+ *   <li>Sequential orchestration: sequence()</li>
+ *   <li>Providing a shutdown promise</li>
  * </ul>
  *
- * <h2>Vert.x 5 Compatibility</h2>
- * <p>
- * Vert.x 5 moved list-based composition APIs from {@code CompositeFuture.all/any}
- * to static helpers on {@link Future}.  Additionally, {@code CompositeFuture}
- * no longer supports {@code map()}, so all transformations must use
- * {@code transform(Function)} explicitly.  This class implements these changes
- * correctly so it compiles under Groovy 5's {@code @CompileStatic}.
- * </p>
- *
- * <h2>Thread Safety</h2>
- * <p>
- * All created promises delegate to Vert.x’s thread-safe Future implementation.
- * Worker-thread dispatch is used for blocking closures.
- * </p>
- *
- * @author Softwood
- * @since 2025-01-20
+ * <h3>Vert.x 5 Compatibility Notes</h3>
+ * <ul>
+ *   <li>{@code CompositeFuture.all/any} now returns {@code Future&lt;CompositeFuture&gt;}.</li>
+ *   <li>Transformations must use {@link Future#transform(Function)}.</li>
+ *   <li>All owned promise completions occur within a Vert.x context.</li>
+ * </ul>
  */
 @Slf4j
 @CompileStatic
@@ -57,10 +47,10 @@ class VertxPromiseFactory implements PromiseFactory {
     private final Vertx vertx
 
     /**
-     * Constructs a new Vert.x-backed promise factory.
+     * Constructs a Vert.x backed promise factory.
      *
-     * @param vertx a non-null Vert.x instance used by all promises created
-     * @throws IllegalArgumentException if {@code vertx} is null
+     * @param vertx non-null Vert.x instance shared by all promises created
+     * @throws IllegalArgumentException if vertx is null
      */
     VertxPromiseFactory(Vertx vertx) {
         if (vertx == null)
@@ -73,10 +63,7 @@ class VertxPromiseFactory implements PromiseFactory {
     // -------------------------------------------------------------------------
 
     /**
-     * Creates an uncompleted promise.
-     *
-     * @param <T> result type
-     * @return a new promise that may later be completed or failed
+     * Create a new uncompleted promise backed by Vert.x.
      */
     @Override
     <T> Promise<T> createPromise() {
@@ -84,11 +71,7 @@ class VertxPromiseFactory implements PromiseFactory {
     }
 
     /**
-     * Creates a promise completed successfully with the supplied value.
-     *
-     * @param value the completed result value (may be null)
-     * @param <T>   result type
-     * @return a succeeded promise
+     * Create a promise completed successfully with a value.
      */
     @Override
     <T> Promise<T> createPromise(T value) {
@@ -96,11 +79,7 @@ class VertxPromiseFactory implements PromiseFactory {
     }
 
     /**
-     * Creates a promise failed with the given exception.
-     *
-     * @param cause failure cause
-     * @param <T>   result type (unused)
-     * @return a failed promise
+     * INTERNAL: create a Vert.x failed promise.
      */
     <T> Promise<T> createFailedPromise(Throwable cause) {
         return VertxPromiseAdapter.failedPromise(vertx, cause)
@@ -111,16 +90,14 @@ class VertxPromiseFactory implements PromiseFactory {
     // -------------------------------------------------------------------------
 
     /**
-     * Executes a blocking Groovy closure asynchronously on a Vert.x worker thread.
+     * Executes a closure asynchronously using Vert.x worker pool.
      *
      * <p>
-     * This method is intended for CPU-bound or blocking work that must not run
-     * on an event loop thread.
+     * Use this method for CPU-heavy or blocking operations.
      * </p>
      *
-     * @param task a closure producing a value
-     * @param <T>  result type
-     * @return a promise that completes with the closure’s result or failure
+     * @param task closure to execute
+     * @param <T> result type
      */
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
@@ -130,27 +107,65 @@ class VertxPromiseFactory implements PromiseFactory {
     }
 
     // -------------------------------------------------------------------------
+    //  from(CompletableFuture<T>)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Adapts a Java {@link CompletableFuture} into a Vert.x-backed promise.
+     *
+     * <p>
+     * A new {@link VertxPromiseAdapter} is created, and the completion of the
+     * {@code CompletableFuture} is forwarded into Vert.x via the adapter’s
+     * {@code accept(CompletableFuture)} method.  Completion always occurs
+     * on a Vert.x context.
+     * </p>
+     *
+     * @param future Java CompletableFuture
+     * @param <T>    value type
+     * @return a promise completing with the same result as the future
+     */
+    @Override
+    def <T> Promise<T> from(CompletableFuture<T> future) {
+        VertxPromiseAdapter<T> adapter = VertxPromiseAdapter.<T>create(vertx)
+        adapter.accept(future)
+        return adapter
+    }
+
+    // -------------------------------------------------------------------------
+    //  from(Promise<T>)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Adapts another {@link org.softwood.promise.Promise} instance into a new
+     * Vert.x-backed promise.
+     *
+     * <p>
+     * A brand new {@link VertxPromiseAdapter} is created and bound to the
+     * supplied SoftPromise via {@code accept(Promise)}.  The resulting promise
+     * uses Vert.x for all continuations.
+     * </p>
+     *
+     * @param otherPromise the source SoftPromise to adapt
+     * @param <T> value type
+     * @return a Vert.x-backed promise that completes with the same result
+     */
+    @Override
+    def <T> Promise<T> from(Promise<T> otherPromise) {
+        VertxPromiseAdapter<T> adapter = VertxPromiseAdapter.<T>create(vertx)
+        adapter.accept(otherPromise)
+        return adapter
+    }
+
+    // -------------------------------------------------------------------------
     //  Parallel composition: ALL
     // -------------------------------------------------------------------------
 
     /**
-     * Executes a list of promises in parallel and returns a promise that
-     * completes when <b>all</b> input promises complete successfully.
-     *
-     * <ul>
-     *     <li>If all succeed → returns their results in order</li>
-     *     <li>If any fail → returned promise fails with that error</li>
-     * </ul>
-     *
-     * <p>
-     * Vert.x 5 returns a {@link CompositeFuture} from {@link Future#all(List)},
-     * so this method wraps it using {@code transform} to produce
-     * {@code Future<List<T>>}.
-     * </p>
+     * Execute several promises in parallel and complete when all succeed.
      *
      * @param promises list of promises
-     * @param <T> item type
-     * @return promise completing with list of results
+     * @param <T>      value type
+     * @return promise completing with ordered list of results
      */
     <T> Promise<List<T>> all(List<Promise<T>> promises) {
         if (!promises || promises.isEmpty()) {
@@ -161,8 +176,7 @@ class VertxPromiseFactory implements PromiseFactory {
             ((VertxPromiseAdapter<T>) p).future
         }
 
-        CompositeFuture cf =
-                Future.all(futures as List<Future<?>>)
+        Future<CompositeFuture> cf = Future.all(futures as List<Future<?>>)
 
         Future<List<T>> listFuture = cf.transform(
                 { AsyncResult<CompositeFuture> ar ->
@@ -182,17 +196,9 @@ class VertxPromiseFactory implements PromiseFactory {
     // -------------------------------------------------------------------------
 
     /**
-     * Races a list of promises and returns the result of the first one
-     * that succeeds.
+     * Completes with the first successfully completed promise.
      *
-     * <ul>
-     *     <li>If one promise succeeds → returns its value</li>
-     *     <li>If all promises fail → returned promise fails with aggregated error</li>
-     * </ul>
-     *
-     * @param promises list of promises to race
-     * @param <T>      result type
-     * @return promise containing the first successful result
+     * @param promises list to race
      */
     <T> Promise<T> any(List<Promise<T>> promises) {
         if (!promises || promises.isEmpty()) {
@@ -205,8 +211,7 @@ class VertxPromiseFactory implements PromiseFactory {
             ((VertxPromiseAdapter<T>) p).future
         }
 
-        CompositeFuture cf =
-                Future.any(futures as List<Future<?>>)
+        Future<CompositeFuture> cf = Future.any(futures as List<Future<?>>)
 
         Future<T> firstFuture = cf.transform(
                 { AsyncResult<CompositeFuture> ar ->
@@ -218,9 +223,10 @@ class VertxPromiseFactory implements PromiseFactory {
                                 return Future.succeededFuture(v)
                             }
                         }
-                        // Should not occur
                         return Future.failedFuture(
-                                new IllegalStateException("any() succeeded, but no succeeded index found")
+                                new IllegalStateException(
+                                        "any() succeeded without any succeeded index"
+                                )
                         )
                     }
                     return Future.failedFuture(ar.cause())
@@ -235,17 +241,11 @@ class VertxPromiseFactory implements PromiseFactory {
     // -------------------------------------------------------------------------
 
     /**
-     * Runs a list of closures sequentially, threading each result into the next.
+     * Sequentially runs a list of closures, each receiving the output of the
+     * previous one.  All steps execute using Vert.x worker threads.
      *
-     * <p>
-     * This behaves like a fold/left-reduce, where each closure has signature:
-     * {@code T call(T previous)}.
-     * </p>
-     *
-     * @param initial starting value
-     * @param tasks   tasks applied sequentially
-     * @param <T>     accumulated type
-     * @return promise completing with final accumulated value
+     * @param initial initial value
+     * @param tasks   closures of type {@code T call(T)}
      */
     <T> Promise<T> sequence(T initial, List<Closure<T>> tasks) {
         if (!tasks || tasks.isEmpty()) {
@@ -267,23 +267,20 @@ class VertxPromiseFactory implements PromiseFactory {
     }
 
     // -------------------------------------------------------------------------
-    //  Shutdown
+    //  Vert.x Shutdown
     // -------------------------------------------------------------------------
 
     /**
-     * Closes the Vert.x instance and returns a promise completing when fully closed.
-     *
-     * @return a promise that resolves when Vert.x shutdown completes
+     * Shuts down the Vert.x instance and returns a promise that completes
+     * when the shutdown is fully finished.
      */
     Promise<Void> shutdown() {
-        Future<Void> cf = vertx.close()
-        return new VertxPromiseAdapter<Void>(cf, vertx)
+        Future<Void> closing = vertx.close()
+        return new VertxPromiseAdapter<Void>(closing, vertx)
     }
 
     /**
-     * Provides the Vert.x instance used by this factory.
-     *
-     * @return Vert.x instance
+     * Returns the Vert.x instance this factory was constructed with.
      */
     Vertx getVertx() {
         return vertx

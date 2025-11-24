@@ -39,6 +39,15 @@ class CompletableFuturePromise<T> implements Promise<T> {
         return this
     }
 
+    @Override
+    Promise<T> accept(CompletableFuture<T> future) {
+        return null
+    }
+
+    @Override
+    Promise<T> accept(Promise<T> otherPromise) {
+        return null
+    }
 
     @Override
     T get() throws Exception {
@@ -88,5 +97,15 @@ class CompletableFuturePromise<T> implements Promise<T> {
         CompletableFuture<T> recovered = cf.exceptionally(fn)
 
         return new CompletableFuturePromise<T>(recovered)
+    }
+
+    @Override
+    CompletableFuture<T> asType(Class clazz) {
+        if (clazz == CompletableFuture)
+            return this
+        else {
+            throw new RuntimeException("conversion to type $clazz not supported")
+        }
+
     }
 }

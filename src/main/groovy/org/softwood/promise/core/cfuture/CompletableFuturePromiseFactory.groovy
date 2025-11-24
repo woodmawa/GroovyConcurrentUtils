@@ -30,4 +30,14 @@ class CompletableFuturePromiseFactory implements PromiseFactory {
                 CompletableFuture.supplyAsync({ task.call() })
         )
     }
+
+    @Override
+    def <T> Promise<T> from(CompletableFuture<T> future) {
+        return null
+    }
+
+    @Override
+    def <T> Promise<T> from(Promise<T> otherPromise) {
+        return null
+    }
 }

@@ -72,7 +72,7 @@ class DataflowFactory {
      * Creates a new DataFlowVariable
      * @return A new DataFlowVariable
      */
-    <T> DataflowVariable<T> variable() {
+    <T> DataflowVariable<T> createDataflowVariable() {
         return new DataflowVariable<T>()
     }
 
@@ -81,7 +81,7 @@ class DataflowFactory {
      * @param initialValue The initial value for the variable
      * @return A new DataFlowVariable with the given initial value
      */
-    <T> DataflowVariable<T> variable(T initialValue) {
+    <T> DataflowVariable<T> createDataflowVariable(T initialValue) {
         def variable = new DataflowVariable<T>()
         variable.set(initialValue)
         return variable

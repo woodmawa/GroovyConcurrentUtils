@@ -43,6 +43,15 @@ interface PromiseFactory {
      * @param <T> result type
      * @return promise bound to task's eventual result
      */
+
+    /**
+     * Create a promise already failed with the supplied error.
+     *
+     * @param cause cause of failure
+     * @return failed Promise
+     */
+    <T> Promise<T> createFailedPromise(Throwable cause)
+
     <T> Promise<T> executeAsync(Closure<T> task)
 
     /**

@@ -1,13 +1,8 @@
-package org.softwood.promise.core
+package org.softwood.promise.core.cfuture
 
 import org.junit.jupiter.api.*
-import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
-import org.softwood.promise.core.dataflow.DataflowPromise
-
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
+import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Consumer
 import java.util.function.Function
@@ -16,7 +11,7 @@ import java.util.function.Supplier
 import static org.junit.jupiter.api.Assertions.*
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class DataflowPromiseTest {
+class CompletableFuturePromiseTest {
 
     // -----------------------------------------------------------
     //  Basic Completion Tests
@@ -24,24 +19,22 @@ class DataflowPromiseTest {
 
     @Test
     void "accept(T) completes successfully"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> promise = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
-        promise.accept("hello")
+        p.accept("hello")
 
-        assertEquals("hello", promise.get())
-        assertTrue(promise.isDone())
+        assertEquals("hello", p.get())
+        assertTrue(p.isDone())
     }
 
     @Test
     void "accept(Supplier) completes with supplied value"() {
-        def dfv = new DataflowVariable<Integer>()
-        Promise<Integer> promise = new DataflowPromise<>(dfv)
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
-        promise.accept({ -> 42 } as Supplier<Integer>)
+        p.accept({ -> 42 } as Supplier<Integer>)
 
-        assertEquals(42, promise.get())
-        assertTrue(promise.isDone())
+        assertEquals(42, p.get())
+        assertTrue(p.isDone())
     }
 
     // -----------------------------------------------------------
@@ -50,8 +43,7 @@ class DataflowPromiseTest {
 
     @Test
     void "then transforms successful result"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         def chained = p
                 .accept("abc")
@@ -66,11 +58,10 @@ class DataflowPromiseTest {
 
     @Test
     void "onComplete is called when value becomes available"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         def ref = new AtomicReference<String>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
+        def latch = new CountDownLatch(1)
 
         p.onComplete({ String v ->
             ref.set(v)
@@ -84,14 +75,13 @@ class DataflowPromiseTest {
     }
 
     @Test
-    void "onComplete called immediately if value already bound"() {
-        def dfv = new DataflowVariable<Integer>()
-        Promise<Integer> p = new DataflowPromise<>(dfv)
+    void "onComplete called immediately if already complete"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         p.accept(99)
 
         def ref = new AtomicReference<Integer>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
+        def latch = new CountDownLatch(1)
 
         p.onComplete({ Integer v ->
             ref.set(v)
@@ -108,8 +98,7 @@ class DataflowPromiseTest {
 
     @Test
     void "get(long,TimeUnit) times out when not completed"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         assertThrows(TimeoutException) {
             p.get(100, TimeUnit.MILLISECONDS)
@@ -118,8 +107,7 @@ class DataflowPromiseTest {
 
     @Test
     void "isDone false before completion and true after"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         assertFalse(p.isDone())
 
@@ -128,16 +116,18 @@ class DataflowPromiseTest {
         assertTrue(p.isDone())
     }
 
+    // -----------------------------------------------------------
+    //  accept(CompletableFuture)
+    // -----------------------------------------------------------
+
     @Test
     void "accept(CompletableFuture) completes when future completes"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+        def other = new CompletableFuture<String>()
 
-        def future = new CompletableFuture<String>()
+        p.accept(other)
 
-        p.accept(future)
-
-        future.complete("futureValue")
+        other.complete("futureValue")
 
         assertEquals("futureValue", p.get())
         assertTrue(p.isDone())
@@ -145,15 +135,13 @@ class DataflowPromiseTest {
 
     @Test
     void "accept(CompletableFuture) propagates future exception"() {
-        def dfv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dfv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+        def other = new CompletableFuture<String>()
 
-        def future = new CompletableFuture<String>()
-
-        p.accept(future)
+        p.accept(other)
 
         def ex = new RuntimeException("failure")
-        future.completeExceptionally(ex)
+        other.completeExceptionally(ex)
 
         def caught = assertThrows(Exception) {
             p.get()
@@ -162,16 +150,16 @@ class DataflowPromiseTest {
         assertTrue(caught.message.contains("failure"))
     }
 
+    // -----------------------------------------------------------
+    //  accept(Promise)
+    // -----------------------------------------------------------
+
     @Test
     void "accept(Promise) completes when other promise completes"() {
-        def sourceVar = new DataflowVariable<String>()
-        Promise<String> source = new DataflowPromise<>(sourceVar)
-
-        def targetVar = new DataflowVariable<String>()
-        Promise<String> target = new DataflowPromise<>(targetVar)
+        Promise<String> source = new CompletableFuturePromise<>(new CompletableFuture<>())
+        Promise<String> target = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         target.accept(source)
-
         source.accept("fromSource")
 
         assertEquals("fromSource", target.get())
@@ -180,20 +168,14 @@ class DataflowPromiseTest {
 
     @Test
     void "accept(Promise) propagates error from other promise"() {
-        def sourceVar = new DataflowVariable<String>()
-        Promise<String> source = new DataflowPromise<>(sourceVar)
+        Promise<String> source = new CompletableFuturePromise<>(new CompletableFuture<>())
+        Promise<String> target = new CompletableFuturePromise<>(new CompletableFuture<>())
 
-        def targetVar = new DataflowVariable<String>()
-        Promise<String> target = new DataflowPromise<>(targetVar)
-
-        // Wire source → target
         target.accept(source)
 
-        // Now fail the source using the official API
         def ex = new RuntimeException("boom")
         source.fail(ex)
 
-        // target should now receive the propagated error
         def thrown = assertThrows(Exception) {
             target.get()
         }
@@ -201,10 +183,13 @@ class DataflowPromiseTest {
         assertTrue(thrown.message.contains("boom"))
     }
 
+    // -----------------------------------------------------------
+    //  recover()
+    // -----------------------------------------------------------
+
     @Test
     void "recover maps error into a value"() {
-        def dv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         def recovered = p.recover { ex -> "fallback" }
 
@@ -215,8 +200,7 @@ class DataflowPromiseTest {
 
     @Test
     void "recover does not run on success"() {
-        def dv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
         def recovered = p.recover { ex -> "shouldNotRun" }
 
@@ -227,16 +211,16 @@ class DataflowPromiseTest {
 
     @Test
     void "recover rethrows if recovery function throws"() {
-        def dv = new DataflowVariable<String>()
-        Promise<String> p = new DataflowPromise<>(dv)
+        Promise<String> p = new CompletableFuturePromise<>(new CompletableFuture<>())
 
-        def recovered = p.recover { ex -> throw new RuntimeException("fail in recover") }
+        def recovered = p.recover { ex ->
+            throw new RuntimeException("fail in recover")
+        }
 
-        p.fail(new RuntimeException("source"))
+        p.fail(new RuntimeException("srcErr"))
 
         def thrown = assertThrows(Exception) { recovered.get() }
+
         assertTrue(thrown.message.contains("fail in recover"))
     }
-
-
 }

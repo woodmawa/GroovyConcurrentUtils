@@ -24,6 +24,12 @@ class CompletableFuturePromiseFactory implements PromiseFactory {
         )
     }
 
+    <T> Promise<T> createFailedPromise(Throwable cause) {
+        def cf = new CompletableFuture<T>()
+        cf.completeExceptionally(cause)
+        return new CompletableFuturePromise<T>(cf)
+    }
+
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
         return new CompletableFuturePromise<T>(

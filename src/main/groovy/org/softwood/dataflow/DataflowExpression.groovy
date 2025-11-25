@@ -8,6 +8,7 @@ import org.softwood.pool.ConcurrentPool
 import java.time.LocalDateTime
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
@@ -320,6 +321,104 @@ abstract class DataflowExpression<T> {
      */
     void whenBound (String message, final Consumer consumer  ) {
         whenBound( message, consumer as Closure)
+    }
+
+    /**
+     * Registers a Java {@link Consumer} to be invoked when this expression
+     * completes with an error.
+     *
+     * <p>If this expression has already failed when this method is called, the
+     * handler is invoked immediately on the calling thread. Otherwise, the
+     * handler is attached to the underlying {@link CompletableFuture} and will
+     * be invoked when that future completes exceptionally.</p>
+     *
+     * <p>The {@link CompletionException} / {@link ExecutionException} wrapper
+     * is unwrapped so that the handler sees the original cause where possible.</p>
+     *
+     * @param handler consumer of {@link Throwable} representing the failure
+     */
+    void whenError(Consumer<Throwable> handler) {
+        // If we already know about an error, fire synchronously
+        if (hasError()) {
+            try {
+                handler.accept(error)
+            } catch (ignored) {
+                // swallow exceptions coming from the handler
+            }
+            return
+        }
+
+        // Otherwise, attach to the underlying future to observe exceptional completion
+        value.whenComplete { v, err ->
+            if (err != null) {
+                // Unwrap common wrapper exceptions
+                Throwable cause = err
+                if (cause instanceof CompletionException && cause.cause != null) {
+                    cause = cause.cause
+                } else if (cause instanceof ExecutionException && cause.cause != null) {
+                    cause = cause.cause
+                }
+                try {
+                    handler.accept(cause)
+                } catch (ignored) {
+                    // swallow exceptions coming from the handler
+                }
+            }
+        }
+    }
+
+    /**
+     * Registers a Groovy {@link Closure} to be invoked when this expression
+     * completes with an error.
+     *
+     * <p>The closure may declare 0 or 1 parameter:</p>
+     * <ul>
+     *   <li>0 parameters: {@code { -> ... }}</li>
+     *   <li>1 parameter: {@code { Throwable t -> ... }}</li>
+     * </ul>
+     *
+     * <p>If this expression has already failed when this method is called, the
+     * closure is invoked immediately. Otherwise, it is attached to the underlying
+     * {@link CompletableFuture} and executed when that future completes
+     * exceptionally.</p>
+     *
+     * @param errorClosure closure to invoke on error
+     */
+    void whenError(Closure errorClosure) {
+        if (hasError()) {
+            try {
+                if (errorClosure.maximumNumberOfParameters == 0) {
+                    errorClosure.call()
+                } else {
+                    errorClosure.call(error)
+                }
+            } catch (ignored) {
+                // ignore failure in error handler
+            }
+            return
+        }
+
+        value.whenComplete { v, err ->
+            if (err != null) {
+                // Unwrap common wrapper exceptions
+                Throwable cause = err
+                if (cause instanceof CompletionException && cause.cause != null) {
+                    cause = cause.cause
+                } else if (cause instanceof ExecutionException && cause.cause != null) {
+                    cause = cause.cause
+                }
+
+                try {
+                    if (errorClosure.maximumNumberOfParameters == 0) {
+                        errorClosure.call()
+                    } else {
+                        errorClosure.call(cause)
+                    }
+                } catch (ignored) {
+                    // ignore failure in error handler
+                }
+            }
+        }
     }
 
     /**

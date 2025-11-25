@@ -62,7 +62,7 @@ class ConcurrentPool {
          */
         try {
             sharedScheduledExecutor = Executors.newScheduledThreadPool(
-                    Math.max(1, Runtime.getRuntime().availableProcessors() / 4) as int
+                     Math.max( 1, Runtime.getRuntime().availableProcessors() / 4) as int
             )
         } catch (Exception e) {
             sharedScheduledExecutor = Executors.newSingleThreadScheduledExecutor()
@@ -74,7 +74,10 @@ class ConcurrentPool {
      * Creates a pool using virtual threads if available, otherwise creates a cached thread pool.
      * This is the recommended constructor for most use cases.
      */
-    ConcurrentPool() {
+    ConcurrentPool(String name =null) {
+        if (name)
+            this.name = name
+
         if (virtualThreadsAvailable.get()) {
             // Use shared virtual thread executor - no need to create a new one
             this.executor = sharedVirtualThreadExecutor

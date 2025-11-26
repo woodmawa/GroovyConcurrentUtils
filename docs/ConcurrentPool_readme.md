@@ -7,6 +7,7 @@
 - **Shared virtual thread executor** - Application-wide singleton for virtual threads
 - **Platform thread pools** - Optional fixed-size pools for specific use cases
 - **Scheduled execution** - Built-in support for delayed and periodic tasks
+- **CompletableFuture support** - All task executions return CompletableFuture for modern async patterns
 - **Lifecycle management** - Proper shutdown semantics with ownership tracking
 - **Closed state enforcement** - Prevents task submission after shutdown
 - **Error tracking** - Centralized reporting of initialization issues
@@ -52,6 +53,7 @@ ScheduledExecutorService schedExec = ConcurrentPool.sharedScheduledExecutor
 // Check for initialization errors
 if (ConcurrentPool.hasErrors()) {
     ConcurrentPool.errors.each { println "Init error: $it" }
+    ConcurrentPool.clearErrors()  // Optional: clear error list
 }
 ```
 
@@ -63,12 +65,15 @@ if (ConcurrentPool.hasErrors()) {
 
 ```groovy
 def pool = new ConcurrentPool()
+// or with name
+def pool = new ConcurrentPool("my-pool")
 ```
 
 - **Java 21+**: Uses the shared virtual thread executor
 - **Older Java**: Creates a cached thread pool (platform threads)
 - **Scheduled tasks**: Lazily uses the shared scheduled executor
 - **Ownership**: Does not own the executor (won't shut it down)
+- **Optional name**: Useful for debugging and logging
 
 **Best for**: Most use cases where you want virtual threads and simple concurrent execution.
 
@@ -108,7 +113,7 @@ def pool = new ConcurrentPool(customExec, customSched)
 ```groovy
 def pool = new ConcurrentPool()
 
-def future = pool.execute {
+CompletableFuture future = pool.execute {
     // Runs on virtual thread (if available)
     performWork()
     "result"
@@ -118,7 +123,23 @@ def result = future.get(2, TimeUnit.SECONDS)
 ```
 
 - Submits task to the pool's executor
-- Returns a `Future` for result retrieval
+- Returns a `CompletableFuture` for result retrieval and chaining
+- **Throws**: `IllegalStateException` if pool is closed
+
+#### `execute(Closure task, Object[] args)`
+
+```groovy
+def pool = new ConcurrentPool()
+
+CompletableFuture future = pool.execute({ String name, int value ->
+    "Processing $name with $value"
+}, ["test", 42] as Object[])
+
+println future.get()  // "Processing test with 42"
+```
+
+- Submits task with arguments
+- Returns `CompletableFuture`
 - **Throws**: `IllegalStateException` if pool is closed
 
 #### `withPool(ExecutorService executor = null, Closure work)`
@@ -126,10 +147,11 @@ def result = future.get(2, TimeUnit.SECONDS)
 ```groovy
 def pool = new ConcurrentPool()
 
-pool.withPool {
+CompletableFuture future = pool.withPool {
     // Delegate is the pool instance
     execute { println "Task 1" }
     execute { println "Task 2" }
+    "completed"
 }
 
 // Or with custom executor for this block only
@@ -141,6 +163,7 @@ pool.withPool(customExec) {
 
 - DSL-style execution with the pool as delegate
 - Optionally override executor for just this invocation
+- Returns `CompletableFuture` for the entire block's result
 - **Throws**: `IllegalStateException` if pool is closed
 
 ### Scheduled Execution
@@ -150,7 +173,7 @@ pool.withPool(customExec) {
 ```groovy
 def pool = new ConcurrentPool()
 
-def future = pool.scheduleExecution(500, TimeUnit.MILLISECONDS) {
+ScheduledFuture future = pool.scheduleExecution(500, TimeUnit.MILLISECONDS) {
     println "Executed after 500ms"
 }
 
@@ -166,7 +189,7 @@ future.get()  // Wait for completion
 ```groovy
 def pool = new ConcurrentPool()
 
-def future = pool.scheduleWithFixedDelay(1, 5, TimeUnit.SECONDS) {
+ScheduledFuture future = pool.scheduleWithFixedDelay(1, 5, TimeUnit.SECONDS) {
     println "Runs every 5 seconds (after previous completes)"
 }
 
@@ -183,7 +206,7 @@ future.cancel(false)
 ```groovy
 def pool = new ConcurrentPool()
 
-def future = pool.scheduleAtFixedRate(0, 10, TimeUnit.SECONDS) {
+ScheduledFuture future = pool.scheduleAtFixedRate(0, 10, TimeUnit.SECONDS) {
     println "Runs every 10 seconds (fixed rate)"
 }
 
@@ -302,13 +325,15 @@ boolean isClosed()           // True if shutdown() or shutdownNow() was called
 boolean isShutdown()         // True if owned executors are shut down, or pool is closed
 boolean isUsingVirtualThreads()  // True if using shared virtual thread executor
 int getPoolSize()            // Pool size for ThreadPoolExecutor, -1 for virtual threads
+String getName()             // Pool name (if provided in constructor)
 ```
 
 **Example:**
 
 ```groovy
-def pool = new ConcurrentPool()
+def pool = new ConcurrentPool("worker-pool")
 
+println "Pool name: ${pool.name}"  // "worker-pool"
 println "Using virtual threads: ${pool.isUsingVirtualThreads()}"  // true (Java 21+)
 println "Pool size: ${pool.poolSize}"  // -1 (virtual threads have no fixed size)
 println "Closed: ${pool.isClosed()}"   // false
@@ -320,8 +345,9 @@ println "Closed: ${pool.isClosed()}"   // true
 ### Error Reporting
 
 ```groovy
-static boolean hasErrors()   // True if initialization errors occurred
-static List getErrors()      // Immutable list of error messages
+static boolean hasErrors()     // True if initialization errors occurred
+static List getErrors()        // Immutable list of error messages
+static void clearErrors()      // Clear the error list
 ```
 
 **Example:**
@@ -330,6 +356,7 @@ static List getErrors()      // Immutable list of error messages
 if (ConcurrentPool.hasErrors()) {
     println "Initialization errors:"
     ConcurrentPool.errors.each { println "  - $it" }
+    ConcurrentPool.clearErrors()
 }
 ```
 
@@ -426,6 +453,25 @@ pool.withPool {
 }
 ```
 
+### Pattern 6: CompletableFuture Chaining
+
+```groovy
+def pool = new ConcurrentPool()
+
+pool.execute {
+    fetchUserData()
+}.thenApplyAsync({ user ->
+    enrichUserData(user)
+}, pool.executor)
+.thenAcceptAsync({ result ->
+    saveToDatabase(result)
+}, pool.executor)
+.exceptionally { ex ->
+    log.error("Pipeline failed", ex)
+    null
+}
+```
+
 ---
 
 ## Virtual Threads vs Platform Threads
@@ -454,7 +500,7 @@ pool.withPool {
 
 ```groovy
 // Virtual threads - for high I/O concurrency
-def ioPool = new ConcurrentPool()
+def ioPool = new ConcurrentPool("io-pool")
 (1..10000).each { ioPool.execute { httpClient.get(url) } }
 
 // Platform threads - for CPU-bound work
@@ -466,20 +512,30 @@ def cpuPool = new ConcurrentPool(Runtime.runtime.availableProcessors())
 
 ## Integration with CompletableFuture
 
-For complex async workflows, combine `ConcurrentPool` with `CompletableFuture`:
+All `execute()` and `withPool()` methods return `CompletableFuture`, enabling modern async patterns:
 
 ```groovy
 def pool = new ConcurrentPool()
 
-CompletableFuture.supplyAsync({
-    fetchUserData()
-}, pool.executor)
-.thenApplyAsync({ user ->
-    enrichUserData(user)
-}, pool.executor)
-.thenAccept { result ->
-    println "Final result: $result"
-}
+// Sequential async operations
+pool.execute { fetchUser(userId) }
+    .thenCompose { user -> 
+        pool.execute { fetchOrders(user.id) }
+    }
+    .thenAccept { orders ->
+        println "User has ${orders.size()} orders"
+    }
+
+// Parallel async operations
+def userFuture = pool.execute { fetchUser(userId) }
+def ordersFuture = pool.execute { fetchOrders(userId) }
+
+CompletableFuture.allOf(userFuture, ordersFuture)
+    .thenRun {
+        def user = userFuture.get()
+        def orders = ordersFuture.get()
+        processUserWithOrders(user, orders)
+    }
 ```
 
 ---
@@ -497,6 +553,11 @@ def pool = new ConcurrentPool(testExecutor, null)
 def future = pool.execute { "test result" }
 assert future.get() == "test result"
 
+// Verify CompletableFuture behavior
+def cf = pool.execute { 42 }
+assert cf instanceof CompletableFuture
+assert cf.get() == 42
+
 // Verify shutdown behavior
 pool.shutdown()
 assert pool.isClosed()
@@ -513,21 +574,23 @@ testExecutor.shutdown()
 
 ---
 
-## Migration from Original Implementation
+## Migration from Previous Versions
 
 If you're migrating from an older version:
 
-### Changes:
-1. **Shared executor**: Default constructor now uses shared virtual thread executor
-2. **Closed state**: New `isClosed()` method and enforcement after shutdown
-3. **Ownership tracking**: Automatic management of executor lifecycle
-4. **Additional methods**: `scheduleWithFixedDelay()`, `scheduleAtFixedRate()`, `shutdownNow()`, `awaitTermination()`
-5. **Naming**: `virtualThreadsEnabled` → `virtualThreadsAvailable` (more accurate)
+### Key Changes:
+1. **CompletableFuture return type**: `execute()` and `withPool()` now return `CompletableFuture` instead of `Future`
+2. **Shared executor**: Default constructor now uses shared virtual thread executor
+3. **Closed state**: New `isClosed()` method and enforcement after shutdown
+4. **Ownership tracking**: Automatic management of executor lifecycle
+5. **Error management**: Added `clearErrors()` method
+6. **Named pools**: Constructor now accepts optional name parameter
 
-### Migration tips:
+### Migration Tips:
+- If your code expects `Future`, `CompletableFuture` is fully compatible (it extends `Future`)
+- For enhanced async patterns, leverage `CompletableFuture` methods like `thenApply`, `thenCompose`, etc.
 - If you relied on each instance having its own virtual thread executor, no change needed (it still works, just more efficiently now)
-- If you call `shutdown()` on pools using shared executors, they now properly reject new tasks
-- Tests expecting `RejectedExecutionException` should now catch `IllegalStateException` for shared executor pools
+- Tests expecting `RejectedExecutionException` should now catch `IllegalStateException` for closed pools
 
 ---
 
@@ -537,8 +600,10 @@ If you're migrating from an older version:
 2. **Create fixed pools sparingly** - only when you truly need bounded concurrency
 3. **Don't shut down shared executors** - let the application lifecycle handle it
 4. **Prefer virtual threads** - they're the future of Java concurrency
-5. **Check errors on startup** - use `hasErrors()` to detect environment issues
-6. **Clean shutdown** - call `shutdown()` and `awaitTermination()` on owned pools
+5. **Leverage CompletableFuture** - use chaining and composition for complex workflows
+6. **Check errors on startup** - use `hasErrors()` to detect environment issues
+7. **Clean shutdown** - call `shutdown()` and `awaitTermination()` on owned pools
+8. **Name your pools** - helps with debugging and logging in production
 
 ---
 
@@ -553,5 +618,12 @@ If you're migrating from an older version:
 ## Summary
 
 `ConcurrentPool` provides a modern, virtual-thread-first approach to concurrent execution in Groovy applications. It simplifies executor management while maintaining flexibility for advanced use cases. The shared executor model reduces resource overhead while the ownership tracking ensures proper lifecycle management.
+
+Key benefits:
+- Automatic virtual thread support with graceful fallback
+- CompletableFuture-based API for modern async programming
+- Proper lifecycle management with closed state enforcement
+- Flexible scheduling capabilities
+- Minimal boilerplate for common concurrent patterns
 
 For most use cases, simply create a `new ConcurrentPool()` and start submitting tasks - the class handles the complexity of modern Java concurrency for you.

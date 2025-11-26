@@ -646,7 +646,7 @@ abstract class DataflowExpression<T> {
         /** Unique identifier for this listener */
         String id
         /** Descriptive message text associated with this listener */
-        String messageText
+        String messageText = ""
         /** The value that was bound (wrapped in Optional) */
         Optional<T> newValue = Optional.ofNullable(null)
         /** Timestamp when the parent DataflowExpression was bound */

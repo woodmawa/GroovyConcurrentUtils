@@ -15,28 +15,21 @@ class DataflowFactory {
     /**
     * Maps threads/tasks to parallel groups they belong to
     */
-    public static final ThreadLocal<ConcurrentPool> activePool = new ThreadLocal<ConcurrentPool>()
+    public static ConcurrentPool activePool
+    private final ConcurrentPool pool
 
-    static ConcurrentPool getActiveConcurrentPool () {
+    static  {
         if (defaultPool == null) {
             def newPool = new ConcurrentPool ()
-            activePool.set(newPool)
+            activePool = newPool
             defaultPool = newPool
             log.debug "default pool was null - just created new active pool"
         }
-        activePool.get()
+        activePool
     }
 
-    /*static {
-        // Initialize with virtual threads by default if running on Java 21+
-        defaultPool = new ConcurrentPool()
-    }*/
 
-    private final ConcurrentPool pool
-
-    DataflowFactory() {
-        this.pool = getActiveConcurrentPool()
-    }
+    DataflowFactory() {}
 
     /**
      * if given new pool just use the one provided
@@ -45,7 +38,7 @@ class DataflowFactory {
      */
     DataflowFactory(ConcurrentPool pool) {
         this.pool = pool
-        activePool.set (pool)
+        activePool = pool
     }
 
     /**
@@ -55,7 +48,7 @@ class DataflowFactory {
      */
     DataflowFactory(ExecutorService executor ) {
         this.pool = new ConcurrentPool (executor)
-        activePool.set (pool)
+        activePool = pool
     }
 
 
@@ -65,7 +58,7 @@ class DataflowFactory {
      */
     static void setDefaultPool(ConcurrentPool pool) {
         defaultPool = pool
-        activePool.set (pool)
+        activePool = pool
     }
 
     /**
@@ -95,7 +88,7 @@ class DataflowFactory {
      */
     static <T> DataflowVariable<T> task(Closure<T> task) {
         DataflowVariable variable = new DataflowVariable<T>()
-        getActiveConcurrentPool().executor.submit {
+        activePool.executor.submit {
             try {
                 //todo if call throws execption outside of the variable,
                 // then the value is never set to initialised and get will block ()
@@ -124,6 +117,6 @@ class DataflowFactory {
      * @return The executor
      */
     ExecutorService getExecutor() {
-        return getActiveConcurrentPool().executor
+        return activePool.executor
     }
 }

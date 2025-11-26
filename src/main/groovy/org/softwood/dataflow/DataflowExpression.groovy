@@ -1,766 +1,555 @@
 package org.softwood.dataflow
 
 import groovy.beans.Bindable
-import groovy.transform.MapConstructor
+import groovy.transform.CompileDynamic
+import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
-import io.netty.util.concurrent.CompleteFuture
 import org.softwood.pool.ConcurrentPool
+
+import java.beans.PropertyChangeListener
+import java.beans.PropertyChangeSupport
 import java.time.LocalDateTime
-import java.util.concurrent.Callable
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionException
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Future
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
+import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Consumer
 import java.util.function.Supplier
 
 /**
- * Abstract base class implementing dataflow expression semantics for concurrent programming.
+ * A {@code DataflowExpression} represents a single-assignment, asynchronously-completing value.
  *
- * <p>A DataflowExpression represents a single-assignment variable that can be set once and read many times.
- * It provides thread-safe, non-blocking access to values that may not yet be available, enabling
- * declarative concurrent programming without explicit locks or synchronization.</p>
+ * <p>It is conceptually similar to a {@link CompletableFuture}, but with a Groovy-friendly API and
+ * additional support for:</p>
  *
- * <h3>Key Features:</h3>
  * <ul>
- *   <li><b>Single Assignment:</b> Can only be set once, subsequent attempts throw DataflowException</li>
- *   <li><b>Blocking Reads:</b> Reading an unbound variable blocks until a value is available</li>
- *   <li><b>Listener Support:</b> Register callbacks via whenBound() to be notified when value is set</li>
- *   <li><b>Error Handling:</b> Supports propagating exceptions to all waiting readers</li>
- *   <li><b>PropertyChangeSupport:</b> Fires property change events when value is bound</li>
- *   <li><b>Future Conversion:</b> Can be converted to CompletableFuture for integration with Java async APIs</li>
+ *     <li>Single-assignment semantics enforced at runtime.</li>
+ *     <li>Asynchronous listeners registered via {@code #whenBound(groovy.lang.Closure)} and
+ *         {@code #whenBound(String, groovy.lang.Closure)}.</li>
+ *     <li>Integration with a {@link ConcurrentPool} for thread execution.</li>
+ *     <li>Property change events for tooling / UI via {@link PropertyChangeSupport}.</li>
  * </ul>
  *
- * <h3>Usage Example:</h3>
- * <pre>
- * // Create and bind a dataflow variable
- * def dfv = new DataflowVariable()
- * dfv.whenBound("Result available") { value, msg ->
- *     println "Received: $value with message: $msg"
- * }
- * dfv.setValue(42)  // Triggers the whenBound callback
+ * <p>The typical life-cycle of a {@code DataflowExpression} is:</p>
  *
- * // Chain transformations
- * def result = dfv.then { it * 2 }  // Creates new DFV with transformed value
- * println result.getValue()  // Prints: 84
+ * <ol>
+ *     <li>Create it, optionally specifying a value type.</li>
+ *     <li>Register one or more listeners using {@code whenBound(...)}.</li>
+ *     <li>Bind it once using {@code #setValue(Object)} or record an error using {@code #setError(Throwable)}.</li>
+ *     <li>Read the value (blocking) via {@code #getValue()} or {@code #getValue(long, TimeUnit)}.</li>
+ * </ol>
  *
- * // Handle errors
- * def errorDfv = new DataflowVariable()
- * errorDfv.setError(new RuntimeException("Failed"))
- * try {
- *     errorDfv.getValue()
- * } catch (RuntimeException e) {
- *     println "Caught: ${e.message}"
- * }
- * </pre>
+ * <p>Instances are thread-safe.</p>
  *
- * <h3>Thread Safety:</h3>
- * <p>All operations are thread-safe. Multiple threads can safely read, set, or register listeners
- * on the same DataflowExpression instance. The first thread to call setValue() wins, and all
- * other attempts will throw DataflowException.</p>
- *
- * @param <T> the type of value held by this dataflow expression
- * @author William Woodman
- * @see DataflowVariable
- * @see CompletableFuture
+ * @param <T> type of the value produced by this expression
  */
+@CompileStatic
 @Slf4j
-abstract class DataflowExpression<T> {
-
-    //add pcs support via @Bindable
-    @Bindable CompletableFuture<T> value = new CompletableFuture<T>()
-    private final ReentrantLock setValueLock = new ReentrantLock()
-
-    protected volatile Throwable error
-    protected AtomicReference<DataflowState> state = new AtomicReference (DataflowState.NOT_INITIALISED)
-
-    protected ConcurrentPool pool = new ConcurrentPool()
-    volatile LocalDateTime timestamp
-
-    ConcurrentLinkedQueue listeners = new ConcurrentLinkedQueue<MessageClosure>()
+class DataflowExpression<T> {
 
     /**
-     * Represents the lifecycle states of a DataflowExpression.
+     * Possible completion states of the expression.
      */
-    static enum DataflowState {
-        /** Initial state before any value assignment */
-        NOT_INITIALISED,
-        /** Transitional state during value resolution and assignment */
-        INITIALISING,
-        /** Final state after value has been successfully set or an error occurred */
-        INITIALIZED
+    enum State {
+        /** The expression has not yet been completed. */
+        PENDING,
+        /** The expression completed successfully with a value. */
+        SUCCESS,
+        /** The expression completed with an error. */
+        ERROR
+    }
+
+    /** Pool used for asynchronous callback execution. */
+    final ConcurrentPool pool
+
+    /** Backing future representing completion of this expression. */
+    private final CompletableFuture<T> value
+
+    /** Lock to enforce single-assignment semantics. */
+    private final ReentrantLock completionLock = new ReentrantLock()
+
+    /** Human-friendly type information (optional). */
+    final Class<T> type
+
+    /** Property change support for tooling / UI / binding frameworks. */
+    private final PropertyChangeSupport pcs = new PropertyChangeSupport(this)
+
+    /** Current state of the expression. */
+    @Bindable
+    State state = State.PENDING
+
+    /** Timestamp of when the expression was completed (successfully or exceptionally). */
+    @Bindable
+    LocalDateTime timestamp
+
+    /**
+     * Creates a new expression backed by the given pool.
+     *
+     * @param pool concurrency pool used for asynchronous work
+     */
+    DataflowExpression(ConcurrentPool pool) {
+        this(pool, null)
     }
 
     /**
-     * Creates an unbound DataflowExpression. Call setValue() to bind it.
+     * Creates a new expression backed by the given pool with an explicit value type.
+     *
+     * @param pool concurrency pool used for asynchronous work
+     * @param type type of values produced by this expression (optional, may be {@code null})
      */
-    DataflowExpression() {
+    DataflowExpression(ConcurrentPool pool, Class<T> type) {
+        this.pool = pool
+        this.type = type
+        this.value = new CompletableFuture<>()
     }
 
     /**
-     * Creates a DataflowExpression and immediately binds it with the provided data.
+     * Adds a property change listener.
      *
-     * @param data the value to bind, can be a direct value, Closure, or Callable
+     * @param listener the listener to add
      */
-    DataflowExpression(data) {
-        setValue (data)
-    }
-
-
-    /**
-     * Checks if this expression has been bound to a value.
-     *
-     * @return true if setValue() has completed successfully or setError() has been called
-     */
-    boolean isBound () { value.isDone()}
-
-    /**
-     * Alias for isBound(). Checks if this expression has been set.
-     *
-     * @return true if a value or error has been set
-     */
-    boolean isSet() { value.isDone()}
-
-    /**
-     * Sets an error state for this expression, completing it exceptionally.
-     * All waiting readers will receive this exception when they call getValue().
-     *
-     * @param err the error to propagate to readers
-     */
-    void setError (Throwable err) {
-        error = err
-        // If the value isn't already completed, complete it exceptionally
-        if (!value.isDone()) {
-            value.completeExceptionally(err)
-        }
-        // Also set the state to initialized to indicate we're done
-        state.set(DataflowState.INITIALIZED)
+    void addPropertyChangeListener(PropertyChangeListener listener) {
+        pcs.addPropertyChangeListener(listener)
     }
 
     /**
-     * Checks if this expression completed with an error.
+     * Removes a previously added property change listener.
      *
-     * @return true if setError() was called or setValue() failed
+     * @param listener the listener to remove
      */
-    boolean hasError () {
-        error != null
+    void removePropertyChangeListener(PropertyChangeListener listener) {
+        pcs.removePropertyChangeListener(listener)
     }
 
     /**
-     * Retrieves the value, blocking until it becomes available.
+     * Fires a property change event.
      *
-     * <p>This is a blocking call that will wait indefinitely until either:
-     * <ul>
-     *   <li>A value is set via setValue()</li>
-     *   <li>An error is set via setError()</li>
-     * </ul>
-     *
-     * @return the bound value of type T
-     * @throws InterruptedException if the waiting thread is interrupted
-     * @throws Throwable if the expression was completed exceptionally via setError()
+     * @param propertyName name of the changed property
+     * @param oldValue     old value
+     * @param newValue     new value
      */
-    T getValue () throws InterruptedException {
+    protected void firePropertyChange(String propertyName, Object oldValue, Object newValue) {
+        pcs.firePropertyChange(propertyName, oldValue, newValue)
+    }
+
+    /**
+     * Returns {@code true} if this expression has completed (successfully or with error).
+     *
+     * @return whether the expression is completed
+     */
+    boolean isBound() {
+        return value.isDone()
+    }
+
+    /**
+     * Returns {@code true} if this expression completed successfully with a value.
+     *
+     * @return whether the expression completed successfully
+     */
+    boolean isSuccess() {
+        return state == State.SUCCESS
+    }
+
+    /**
+     * Returns {@code true} if this expression completed with an error.
+     *
+     * @return whether the expression completed with an error
+     */
+    boolean isError() {
+        return state == State.ERROR
+    }
+
+    boolean hasError() {
+        return state == State.ERROR
+    }
+
+    /**
+     * Returns the current state of the expression.
+     *
+     * @return current state
+     */
+    State getState() {
+        return state
+    }
+
+    /**
+     * Completes this expression with the given value.
+     *
+     * <p>This is a single-assignment operation: subsequent calls will throw
+     * {@link IllegalStateException}.</p>
+     *
+     * @param newValue value to complete the expression with (may be {@code null})
+     * @throws IllegalStateException if the expression has already been completed
+     */
+    void setValue(T newValue) {
+        setValue(newValue, false)
+    }
+
+    /**
+     * Completes this expression with the given value.
+     *
+     * @param newValue value to complete the expression with (may be {@code null})
+     * @param async    if {@code true}, callbacks will be scheduled asynchronously via the pool
+     * @throws IllegalStateException if the expression has already been completed
+     */
+    void setValue(T newValue, boolean async) {
+        completionLock.lock()
         try {
-            return value.get()
-        } catch (ExecutionException ex) {
-            // If the cause is set, grab it, otherwise use the exception itself
-            Throwable cause = ex.getCause() ?: ex
-            error = cause
-            throw cause
+            if (value.isDone()) {
+                throw new IllegalStateException("DataflowExpression can only be completed once")
+            }
+            timestamp = LocalDateTime.now()
+            log.debug "set DataFlow value to $newValue "
+            value.complete(newValue)
+            state = State.SUCCESS
+            firePropertyChange("state", State.PENDING, State.SUCCESS)
+            log.debug "DataFlowExpression: notify clients, that value has been set to (${newValue}) at $timestamp"
+            if (async) {
+                notifyWhenBoundAsync(newValue)
+            } else {
+                notifyWhenBound(newValue)
+            }
+        } finally {
+            completionLock.unlock()
         }
     }
 
     /**
-     * Retrieves the value if bound, otherwise returns the result of the supplied function.
+     * Completes this expression with the given error.
      *
-     * @param orElseResult a Supplier providing the alternative value if not bound
-     * @return the bound value or the result of orElseResult
-     * @throws InterruptedException if interrupted while retrieving the value
-     */
-    T getValueOrElse (Supplier<T> orElseResult ) throws InterruptedException {
-        isBound() ? value.get() : orElseResult.get()
-    }
-
-    /**
-     * Retrieves the value with a timeout, blocking until available or timeout expires.
+     * <p>This is a single-assignment operation: subsequent calls will throw
+     * {@link IllegalStateException}.</p>
      *
-     * @param waitTime the maximum time to wait
-     * @param unit the time unit of the waitTime argument
-     * @return the bound value of type T
-     * @throws TimeoutException if the wait times out before value is available
-     * @throws InterruptedException if the waiting thread is interrupted
-     * @throws Throwable if the expression was completed exceptionally
+     * @param t error to complete the expression with
+     * @throws IllegalStateException if the expression has already been completed
      */
-    T getValue (long waitTime, TimeUnit unit) throws TimeoutException{
+    void setError(Throwable t) {
+        completionLock.lock()
         try {
-            value.get(waitTime, unit)
-        } catch (ExecutionException ex) {
-            // If the cause is set, grab it, otherwise use the exception itself
-            Throwable cause = ex.getCause() ?: ex
-            error = cause
-            throw cause
+            if (value.isDone()) {
+                throw new IllegalStateException("DataflowExpression can only be completed once")
+            }
+            timestamp = LocalDateTime.now()
+            log.debug "set DataFlow error to ${t.message} "
+            value.completeExceptionally(t)
+            state = State.ERROR
+            firePropertyChange("state", State.PENDING, State.ERROR)
+
+            // IMPORTANT: notify listeners for error completions as well.
+            // We follow the same convention as whenBound(String, Closure):
+            // for error completions we still invoke listeners but pass null as value.
+            notifyWhenBoundAsync(null)
+        } finally {
+            completionLock.unlock()
         }
     }
 
     /**
-     * Waits for the value to be set and returns it, throwing any exception unwrapped.
-     * Unlike getValue(), this does not wrap exceptions in ExecutionException.
+     * Returns the underlying {@link CompletableFuture}.
      *
-     * @return the bound value of type T
-     * @throws InterruptedException if the waiting thread is interrupted
-     * @throws Throwable if the expression was completed exceptionally
-     */
-    T join () throws InterruptedException{
-        value.join()
-    }
-
-    /**
-     * Waits for the value with a timeout and returns it, throwing any exception unwrapped.
-     *
-     * @param waitTime the maximum time to wait
-     * @param unit the time unit of the waitTime argument
-     * @return the bound value of type T
-     * @throws TimeoutException if the wait times out
-     * @throws InterruptedException if the waiting thread is interrupted
-     * @throws Throwable if the expression was completed exceptionally
-     */
-    T join (long waitTime, TimeUnit unit)  throws TimeoutException {
-        value.get (waitTime, unit )
-    }
-
-    /**
-     * Returns the underlying CompletableFuture for integration with Java async APIs.
-     *
-     * @return the CompletableFuture backing this dataflow expression
+     * @return future representing the completion of this expression
      */
     CompletableFuture<T> toFuture() {
-        value
+        return value
     }
 
     /**
-     * Non-blocking check that returns this expression if bound, null otherwise.
-     * Useful for polling without blocking.
+     * Blocks until the expression is completed and returns the value.
      *
-     * @return this DataflowExpression if bound, null if still waiting for a value
+     * <p>If the expression completed with an error, throws {@link DataflowException} wrapping the
+     * underlying cause.</p>
+     *
+     * @return value produced by the expression
+     * @throws DataflowException if the expression completed with an error
+     * @throws InterruptedException if the current thread is interrupted while waiting
      */
-    DataflowExpression<T> poll() {
-        isBound() ? this : null
+    T getValue() throws InterruptedException {
+        try {
+            return value.get()
+        } catch (ExecutionException e) {
+            def cause = e.cause ?: e
+            if (cause instanceof DataflowException)
+                throw cause
+            throw new DataflowException(cause.message, cause)
+        }
     }
 
     /**
-     * Registers a callback to be invoked when this expression is bound, using a custom thread pool.
+     * Blocks until the expression is completed or the timeout elapses.
      *
-     * @param pool the ConcurrentPool to use for executing the callback
-     * @param message a descriptive message passed to the callback
-     * @param closure the callback to invoke, receives (value, message) as parameters
+     * @param timeout timeout value
+     * @param unit    timeout unit
+     * @return the value
+     * @throws TimeoutException    if the timeout elapses before completion
+     * @throws InterruptedException if the current thread is interrupted while waiting
+     * @throws DataflowException   if the expression completed with an error
      */
-    void whenBound (ConcurrentPool pool, String message, final Closure closure  ) {
-        this.pool = pool
-        whenBound (message, closure )
+    T getValue(long timeout, TimeUnit unit) throws TimeoutException, InterruptedException {
+        try {
+            return value.get(timeout, unit)
+        } catch (TimeoutException e) {
+            throw e
+        } catch (ExecutionException e) {
+            throw new DataflowException("Error getting value from DataflowExpression", e.cause ?: e)
+        }
     }
 
     /**
-     * Registers a Consumer callback to be invoked when this expression is bound, using a custom thread pool.
+     * Returns the recorded error if the expression completed exceptionally, otherwise {@code null}.
      *
-     * @param pool the ConcurrentPool to use for executing the callback
-     * @param message a descriptive message passed to the callback
-     * @param consumer the Consumer callback to invoke
+     * @return the error or {@code null}
      */
-    void whenBound (ConcurrentPool pool, String message, final Consumer consumer  ) {
-        whenBound( pool, message, consumer as Closure)
+    Throwable getError() {
+        if (!value.isCompletedExceptionally()) {
+            return null
+        }
+        try {
+            value.get()
+            return null
+        } catch (ExecutionException e) {
+            return e.cause ?: e
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+            return e
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Listener registration (whenBound)
+    // ---------------------------------------------------------------------------------------------
+
+    /** Registered when-bound listeners. */
+    private final List<MessageClosure<T>> listeners = Collections.synchronizedList(new ArrayList<>())
+
+    /**
+     * Registers a listener that will be invoked once the expression becomes bound.
+     *
+     * <p>If the expression is already bound, the listener is invoked immediately. Otherwise it will be
+     * invoked once when the value becomes available.</p>
+     *
+     * @param listener listener closure; may accept 0, 1 or 2 parameters
+     * @return this expression
+     */
+    DataflowExpression<T> whenBound(Closure listener) {
+        return whenBound("whenBound", listener)
     }
 
     /**
-     * Registers a callback to be invoked when this expression is bound.
+     * Registers a listener with an associated diagnostic message.
      *
-     * <p>If the expression is already bound when this method is called, the callback
-     * executes immediately on the calling thread. Otherwise, it's queued and will be
-     * invoked asynchronously when setValue() is called.</p>
+     * <p>The {@code message} is used purely for logging and debugging; it is not passed to the closure unless
+     * the closure declares two parameters.</p>
      *
-     * <p>The closure can accept 0, 1, or 2 parameters:
-     * <ul>
-     *   <li>0 params: { -> println "Bound!" }</li>
-     *   <li>1 param: { value -> println "Value: $value" }</li>
-     *   <li>2 params: { value, msg -> println "$msg: $value" }</li>
-     * </ul>
-     *
-     * @param message a descriptive message passed to the callback
-     * @param closure the callback closure to invoke when bound
+     * @param message  textual description of the listener
+     * @param listener listener closure
+     * @return this expression
      */
-    void whenBound (String message, final Closure closure  ) {
-        Closure whenBoundClosure = closure.clone() as Closure
-        whenBoundClosure.delegate = this
-        def messageClosure = new MessageClosure (id: UUID.randomUUID(), messageText: message, closure:whenBoundClosure)
+    DataflowExpression<T> whenBound(String message, Closure listener) {
+        MessageClosure<T> msg = new MessageClosure<T>(pool, this, message, listener)
+        listeners.add(msg as MessageClosure<T>)
 
-        // If already bound, execute immediately
         if (isBound()) {
-            try {
-                // Get the value and pass it to the closure
-                T boundValue = getValue()
-                messageClosure.send(boundValue, message)
-            } catch (Exception ex) {
-                log.error "whenBound immediate execution failed: ${ex.message}"
-            }
-        } else {
-            // Otherwise add to listeners for later notification
-            listeners.add(messageClosure)
-        }
-    }
-
-    /**
-     * Registers a Consumer callback to be invoked when this expression is bound.
-     *
-     * @param message a descriptive message passed to the callback
-     * @param consumer the Consumer callback to invoke when bound
-     */
-    void whenBound (String message, final Consumer consumer  ) {
-        whenBound( message, consumer as Closure)
-    }
-
-    /**
-     * Registers a Java {@link Consumer} to be invoked when this expression
-     * completes with an error.
-     *
-     * <p>If this expression has already failed when this method is called, the
-     * handler is invoked immediately on the calling thread. Otherwise, the
-     * handler is attached to the underlying {@link CompletableFuture} and will
-     * be invoked when that future completes exceptionally.</p>
-     *
-     * <p>The {@link CompletionException} / {@link ExecutionException} wrapper
-     * is unwrapped so that the handler sees the original cause where possible.</p>
-     *
-     * @param handler consumer of {@link Throwable} representing the failure
-     */
-    void whenError(Consumer<Throwable> handler) {
-        // If we already know about an error, fire synchronously
-        if (hasError()) {
-            try {
-                handler.accept(error)
-            } catch (ignored) {
-                // swallow exceptions coming from the handler
-            }
-            return
-        }
-
-        // Otherwise, attach to the underlying future to observe exceptional completion
-        value.whenComplete { v, err ->
-            if (err != null) {
-                // Unwrap common wrapper exceptions
-                Throwable cause = err
-                if (cause instanceof CompletionException && cause.cause != null) {
-                    cause = cause.cause
-                } else if (cause instanceof ExecutionException && cause.cause != null) {
-                    cause = cause.cause
-                }
-                try {
-                    handler.accept(cause)
-                } catch (ignored) {
-                    // swallow exceptions coming from the handler
-                }
-            }
-        }
-    }
-
-    /**
-     * Registers a Groovy {@link Closure} to be invoked when this expression
-     * completes with an error.
-     *
-     * <p>The closure may declare 0 or 1 parameter:</p>
-     * <ul>
-     *   <li>0 parameters: {@code { -> ... }}</li>
-     *   <li>1 parameter: {@code { Throwable t -> ... }}</li>
-     * </ul>
-     *
-     * <p>If this expression has already failed when this method is called, the
-     * closure is invoked immediately. Otherwise, it is attached to the underlying
-     * {@link CompletableFuture} and executed when that future completes
-     * exceptionally.</p>
-     *
-     * @param errorClosure closure to invoke on error
-     */
-    void whenError(Closure errorClosure) {
-        if (hasError()) {
-            try {
-                if (errorClosure.maximumNumberOfParameters == 0) {
-                    errorClosure.call()
-                } else {
-                    errorClosure.call(error)
-                }
-            } catch (ignored) {
-                // ignore failure in error handler
-            }
-            return
-        }
-
-        value.whenComplete { v, err ->
-            if (err != null) {
-                // Unwrap common wrapper exceptions
-                Throwable cause = err
-                if (cause instanceof CompletionException && cause.cause != null) {
-                    cause = cause.cause
-                } else if (cause instanceof ExecutionException && cause.cause != null) {
-                    cause = cause.cause
-                }
-
-                try {
-                    if (errorClosure.maximumNumberOfParameters == 0) {
-                        errorClosure.call()
-                    } else {
-                        errorClosure.call(cause)
-                    }
-                } catch (ignored) {
-                    // ignore failure in error handler
-                }
-            }
-        }
-    }
-
-    /**
-     * Creates a new DataflowExpression by applying a transformation to this expression's value.
-     * This enables functional composition and chaining of dataflow operations.
-     *
-     * <p>The transformation is applied asynchronously when this expression is bound,
-     * and the result is stored in a new DataflowVariable that is returned immediately.</p>
-     *
-     * <h3>Example:</h3>
-     * <pre>
-     * def dfv = new DataflowVariable()
-     * def doubled = dfv.then { it * 2 }
-     * def formatted = doubled.then { "Result: $it" }
-     *
-     * dfv.setValue(21)
-     * println formatted.getValue()  // Prints: "Result: 42"
-     * </pre>
-     *
-     * @param closure the transformation function to apply to the value
-     * @return a new DataflowExpression containing the transformed value
-     * @throws Exception if the transformation closure throws an exception
-     */
-    DataflowExpression<T> then (final Callable closure) throws Exception {
-        log.debug "then: create new MessageClosure, and call value.thenApply where value status is $value"
-
-        // Create a new DataFlowVariable for the result
-        DataflowVariable<T> result = new DataflowVariable<>()
-
-        value.thenApply { inputValue ->
-            log.debug "then(): thenApply with inputValue set to: $inputValue"
-            try {
-                // Apply the transformation
-                def transformedValue = closure.call(inputValue)
-                // Set the result in the new variable
-                result.set ((T) transformedValue)
-                return transformedValue
-            } catch (Exception ex) {
-                result.setError(ex)
-                throw ex
-            }
-        }
-
-        //return new dataFlowVariable
-        return result
-    }
-
-    /**
-     * Converts this DataflowExpression to a CompletableFuture for integration with Java async APIs.
-     *
-     * @param target the CompletableFuture class (used for Groovy's asType coercion)
-     * @return the underlying CompletableFuture
-     */
-    CompletableFuture<T> asType (CompletableFuture) {
-        value
-    }
-
-    /**
-     * Binds this expression to a value (single assignment semantics).
-     *
-     * <p>This method can only be called once per instance. Subsequent calls will throw
-     * DataflowException. The value can be:
-     * <ul>
-     *   <li>A direct value: setValue(42)</li>
-     *   <li>A Closure that computes the value: setValue({ 21 * 2 })</li>
-     *   <li>A Callable: setValue(someCallable)</li>
-     * </ul>
-     *
-     * <p>When called, this method:
-     * <ol>
-     *   <li>Resolves the value (calling Closure/Callable if needed)</li>
-     *   <li>Completes the underlying CompletableFuture</li>
-     *   <li>Records a timestamp</li>
-     *   <li>Fires PropertyChangeEvent for "value" property</li>
-     *   <li>Notifies all registered whenBound listeners</li>
-     * </ol>
-     *
-     * @param val the value to bind (can be direct value, Closure, or Callable)
-     * @param async if true (default), listeners are notified asynchronously in parallel;
-     *              if false, listeners are notified synchronously (useful for testing)
-     * @return this DataflowExpression for method chaining
-     * @throws DataflowException if this expression has already been bound
-     * @throws Throwable if value resolution (Closure/Callable execution) fails
-     */
-    DataflowExpression setValue (T val, async = true) {
-        // Acquire the lock to ensure thread-safe state transition
-        setValueLock.lock()
-
-        T resolvedValue
-        try {
-            // Use compareAndSet for atomic state transition
-            if (!state.compareAndSet(DataflowState.NOT_INITIALISED, DataflowState.INITIALISING)) {
-                throw new DataflowException("DataflowVariable can only be set once ")
-            }
-
-            timestamp = LocalDateTime.now()
-
-            try {
-                //just set the value
-                resolvedValue = resolveValue (val)
-
-                // Complete the original future first (this is what clients are waiting on)
-                value.complete(resolvedValue)
-
-                log.debug "set DataFlow value to $resolvedValue "
-
-            } catch (Throwable ex) {
-                // Handle resolution errors
-                error = ex
-                value.completeExceptionally(ex)
-                throw ex
-            } finally {
-                // Ensure state is always set to INITIALIZED
-                state.set(DataflowState.INITIALIZED)
-            }
-
-
-            // Fire notifications synchronously to ensure test cases work
-            log.debug "DataFlowExpression: notify clients, that value has been set to ($resolvedValue) at $timestamp"
-
-            firePropertyChange("value", null, resolvedValue)
-            async ? notifyWhenBoundAsync((T) resolvedValue) : notifyWhenBound((T) resolvedValue)  //will use executor to send
-
-            this
-
-        } finally {
-            // Always release the lock
-            setValueLock.unlock()
-        }
-
-    }
-
-    /**
-     * Safely resolves the input value which might be a Closure, Callable, or direct value.
-     *
-     * @param val the input value to resolve
-     * @return the resolved value after calling Closure/Callable if needed
-     * @throws Throwable if Closure/Callable execution fails
-     */
-    private T resolveValue(T val) {
-        T resolvedValue
-        try {
-            if (val instanceof Closure) {
-                resolvedValue = (T) val.call()
-            } else if (val instanceof Callable) {
-                resolvedValue = (Callable) val.call()
+            // Already bound – invoke immediately
+            if (isError()) {
+                // For error completions we still invoke the listener, but pass null as value;
+                // clients may also query {@link #getError()} directly.
+                msg.sendAsyncWithValue(null)
             } else {
-                resolvedValue = val
+                msg.sendAsyncWithValue(value.getNow(null))
             }
-            return resolvedValue
-        } catch (Throwable ex) {
-            log.error "Error resolving closure value: ${ex.message}"
-            throw ex
         }
-
+        return this
     }
 
     /**
-     * Synchronously notifies all registered whenBound listeners with the newly bound value.
-     * Processes listeners sequentially on the calling thread.
+     * Notifies all registered listeners synchronously.
      *
-     * @param newValue the value that was just bound
+     * @param newValue the value to pass to the listeners
      */
-    protected void notifyWhenBound (T newValue) {
-        assert timestamp
+    protected void notifyWhenBound(T newValue) {
         log.debug "notifyWhenBound(): -send to all MessageClosure listeners with value: $newValue"
-
-        // Make a copy of the listeners to avoid concurrent modification issues
-        def listenersCopy = new ArrayList<>(listeners)
-        listeners.clear() // Clear the original list since we're processing all listeners
-
-        // Process each listener synchronously
-        listenersCopy.each { MessageClosure mc ->
-            try {
-                //synchronous send
-                mc.send(newValue, mc.messageText)
-            } catch (Exception ex) {
-                log.error "Error notifying $mc whenBound listener: ${ex.message}"
-            }
+        List<MessageClosure<T>> snapshot = new ArrayList<>(listeners)
+        for (MessageClosure<T> mc : snapshot) {
+            mc.sendWithValue(newValue)
         }
     }
 
     /**
-     * Asynchronously notifies all registered whenBound listeners with the newly bound value.
-     * Processes listeners in parallel using parallel streams for better performance.
+     * Notifies all registered listeners asynchronously using the pool's executor.
      *
-     * @param newValue the value that was just bound
+     * @param newValue the value to pass to the listeners
      */
-    protected void notifyWhenBoundAsync (T newValue) {
-        assert timestamp
+    protected void notifyWhenBoundAsync(T newValue) {
         log.debug "notifyWhenBoundAsync(): -send to all MessageClosure listeners with value: $newValue"
-
-        // Make a copy of the listeners to avoid concurrent modification issues
-        def listenersCopy = new ArrayList<>(listeners)
-        listeners.clear() // Clear the original list since we're processing all listeners
-
-        // Process each as parallel stream
-        listenersCopy.parallelStream().each {MessageClosure mc ->
-            try {
-                mc.send (newValue, mc.messageText)
-            } catch (Exception ex) {
-                log.error "Error notifying $mc whenBound listener: ${ex.message}"
-            }
+        List<MessageClosure<T>> snapshot = new ArrayList<>(listeners)
+        for (MessageClosure<T> mc : snapshot) {
+            mc.sendAsyncWithValue(newValue)
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Transformation / chaining
+    // ---------------------------------------------------------------------------------------------
+
     /**
-     * Internal helper class representing a listener closure with associated metadata.
+     * Creates a new expression that applies the given transformation to the value of this expression.
      *
-     * <p>MessageClosure wraps a user-provided closure along with:
-     * <ul>
-     *   <li>A unique ID for tracking</li>
-     *   <li>A message text for context</li>
-     *   <li>The bound value when notification occurs</li>
-     *   <li>A timestamp when the DataflowExpression was bound</li>
-     * </ul>
+     * <p>The transformation is executed once this expression is successfully bound. If this expression
+     * completes exceptionally, the returned expression also completes exceptionally with the same error.</p>
      *
-     * <p>Supports both synchronous (send) and asynchronous (sendAsync) execution modes.</p>
-     *
-     * @param <T> the type of value being communicated
+     * @param transform Groovy {@link groovy.lang.Closure} mapping the value of this expression to a new value
+     * @return a new expression representing the transformed value
      */
-    @MapConstructor
-    @Slf4j
-    private class MessageClosure<T> {
-        /** Unique identifier for this listener */
-        String id
-        /** Descriptive message text associated with this listener */
-        String messageText = ""
-        /** The value that was bound (wrapped in Optional) */
-        Optional<T> newValue = Optional.ofNullable(null)
-        /** Timestamp when the parent DataflowExpression was bound */
-        LocalDateTime whenDataFlowExpressionBoundDateTime = { -> timestamp }.call()
+    DataflowExpression then(final Closure transform) {
+        log.debug "then: create new dependent DataflowExpression where value status is $value"
+        def newExpression = new DataflowExpression(pool, type)
 
-        @Delegate
-        Closure closure
-        /** Executor service for asynchronous execution */
-        ExecutorService executor = new ConcurrentPool().executor
-
-        /**
-         * Creates a MessageClosure with an optional work closure.
-         *
-         * @param work the closure to execute when notified (delegates to this MessageClosure)
-         */
-        MessageClosure(@DelegatesTo(MessageClosure) Closure work = null) {
-            id = UUID.randomUUID()
-            closure = work ?: {}
-        }
-
-        /**
-         * Sets the value to be passed to the closure when invoked.
-         *
-         * @param value the bound value from the DataflowExpression
-         */
-        void setNewValue(value) {
-            log.debug "MessageClosure: setNewValue() called with $value"
-            newValue = Optional.ofNullable(value)
-        }
-
-        /**
-         * Asynchronously executes the closure in a thread pool.
-         *
-         * <p>The closure is invoked with 0, 1, or 2 parameters based on its signature:
-         * <ul>
-         *   <li>0 params: closure()</li>
-         *   <li>1 param: closure(value)</li>
-         *   <li>2 params: closure(value, message)</li>
-         * </ul>
-         *
-         * @param message optional message to pass (defaults to messageText)
-         * @return a Future representing the pending completion of the closure execution
-         */
-        Future sendAsync(String message = null) {
-            whenDataFlowExpressionBoundDateTime = { -> timestamp }.call()
-            log.debug "sendAsync(): message $message, at: $whenDataFlowExpressionBoundDateTime"
-            def maxParams = closure.maximumNumberOfParameters
-            Callable messageClosureCallPlan
-
-            assert isBound()
-
-            //based on closure params setup call to submit via the executor, async
-            switch (maxParams) {
-                case 0:
-                    messageClosureCallPlan = { closure() } as Callable
-                    break
-                case 1:
-                    messageClosureCallPlan = { closure(newValue.get()) } as Callable
-                    break
-                case 2:
-                    //add the Optional newValue as first param
-                    messageClosureCallPlan = { closure(newValue.get(), message ?: messageText) } as Callable
-                    break
-                default:
-                    throw new IllegalArgumentException("expecting no more than 2 parameters for the mc.closure ")
+        // Use whenBound with a normal Groovy closure; the closure receives the value when it becomes bound.
+        whenBound("then") { T v ->
+            try {
+                def transformed = transform.call(v)
+                newExpression.setValue((T) transformed)
+            } catch (Throwable t) {
+                newExpression.setError(t)
             }
+        }
 
-            Future future = executor.submit(messageClosureCallPlan)
-            future
+        return newExpression
+    }
+
+    /**
+     * String representation including state and (if bound) the value or error.
+     *
+     * @return string representation for debugging
+     */
+    String toString() {
+        String core
+        if (!isBound()) {
+            core = "PENDING"
+        } else if (isError()) {
+            core = "ERROR(${getError()?.message})"
+        } else {
+            def v = value.get()
+            core = "SUCCESS($v)"
+        }
+        return "DataflowExpression[$core]"
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Internal class: MessageClosure
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Internal wrapper that associates a descriptive message string, and the underlying Groovy
+     * {@link groovy.lang.Closure} to invoke when the owning {@link DataflowExpression} is bound.
+     *
+     * @param <T> type of value produced by the associated DataflowExpression
+     */
+    @CompileStatic
+    class MessageClosure<T> implements Callable {
+
+        /** Pool used for asynchronous execution. */
+        final ConcurrentPool pool
+
+        /** Owning expression that we are listening to. */
+        final DataflowExpression<T> owner
+
+        /** Human-readable message used in logging. */
+        final String message
+
+        /** Underlying Groovy closure to invoke. */
+        final Closure closure
+
+        /** Reference to the latest value to deliver to the closure. */
+        private final AtomicReference<T> newValueRef = new AtomicReference<>()
+
+        /**
+         * Creates a new message closure.
+         *
+         * @param pool    pool used for asynchronous execution
+         * @param owner   owning expression
+         * @param message descriptive message for logging
+         * @param closure underlying Groovy closure to invoke
+         */
+        MessageClosure(ConcurrentPool pool, DataflowExpression<T> owner, String message, Closure closure) {
+            this.pool = pool
+            this.owner = owner
+            this.message = message
+            this.closure = closure
         }
 
         /**
-         * Synchronously executes the closure with the provided value.
+         * Sets the latest value that should be supplied to the closure.
          *
-         * @param value the value to pass to the closure
-         * @param message optional message to pass (defaults to messageText)
-         * @return the result of the closure execution
+         * @param newValue value to deliver
          */
-        def send(value, String message = null) {
-            setNewValue(value)
-            send(message)
+        void setNewValue(T newValue) {
+            log.debug "MessageClosure: setNewValue() called with $newValue"
+            newValueRef.set(newValue)
         }
 
         /**
-         * Synchronously executes the closure on the calling thread.
+         * Invokes the wrapped closure with the appropriate arguments based on its arity.
          *
-         * @param message optional message to pass (defaults to messageText)
-         * @return the result of the closure execution
+         * <p>If the closure accepts a single argument, it receives the value. If it accepts two arguments,
+         * it receives the value and the {@code message}. Additional arities are supported but discouraged.</p>
+         *
+         * @return result of closure invocation (if any)
+         * @throws Exception if the closure throws
          */
-        def send(String message = null) {
-            whenDataFlowExpressionBoundDateTime = { -> timestamp }.call()
-            log.debug "send(): message $message, at: $whenDataFlowExpressionBoundDateTime"
-            def maxParams = closure.maximumNumberOfParameters
-
-            assert isBound()
-
-            //based on closure params notify synchronously
-            def result
-            switch (maxParams) {
-                case 0:
-                    result = closure()
-                    break
-                case 1:
-                    result = closure(newValue.get())
-                    break
-                case 2:
-                    //add the Optional newValue as first param
-                    result = closure(newValue.get(), message ?: messageText)
-                    break
-                default:
-                    throw new IllegalArgumentException("expecting no more than 2 parameters for the mc.closure ")
+        @Override
+        @CompileDynamic
+        Object call() throws Exception {
+            T v = newValueRef.get()
+            int paramCount = closure.maximumNumberOfParameters
+            if (paramCount == 0) {
+                return closure.call()
+            } else if (paramCount == 1) {
+                return closure.call(v)
+            } else if (paramCount == 2) {
+                return closure.call(v, message)
+            } else {
+                // fall back to passing value and message; additional parameters receive null
+                List args = [v, message]
+                while (args.size() < paramCount) {
+                    args.add(null)
+                }
+                return closure.call(*args)
             }
+        }
 
-            result
+        /**
+         * Synchronously invokes the closure with the given value.
+         *
+         * @param newValue value to send to the listener
+         */
+        void sendWithValue(T newValue) {
+            log.debug "MessageClosure: send(): message $message, at: ${getTimestamp()}"
+            setNewValue(newValue)
+            try {
+                call()
+            } catch (Throwable t) {
+                log.warn("Error executing whenBound listener: ${t.message}", t)
+            }
+        }
+
+        /**
+         * Asynchronously invokes the closure with the given value using the pool's executor.
+         *
+         * @param newValue value to send to the listener
+         */
+        void sendAsyncWithValue(T newValue) {
+            log.debug "MessageClosure: sendAsync(): message $message, at: ${getTimestamp()}"
+            setNewValue(newValue)
+            pool.executor.submit({ ->
+                try {
+                    call()
+                } catch (Throwable t) {
+                    log.warn("Error executing whenBound listener asynchronously: ${t.message}", t)
+                }
+            } as Callable)
         }
     }
 }
+
+
+

@@ -143,7 +143,7 @@ class Dataflows extends GroovyObjectSupport {
 
         try {
             bindToDFV(name, value)
-            return ensureDFV(name).getValNonBlocking()
+            return ensureDFV(name).getNonBlocking()
         } catch (DataflowException e) {
             throw new IllegalStateException("Property '$name' already bound", e)
         }
@@ -298,7 +298,7 @@ class Dataflows extends GroovyObjectSupport {
         Map<Object, Object> snapshot = new LinkedHashMap<>()
         variables.forEach { name, dfv ->
             if (dfv.isBound()) {
-                snapshot[name] = dfv.getValNonBlocking()
+                snapshot[name] = dfv.getNonBlocking()
             }
         }
         return Collections.unmodifiableMap(snapshot)

@@ -4,4 +4,8 @@ class DataflowException extends Exception {
     DataflowException(String errorMessage) {
         super (errorMessage)
     }
+
+    DataflowException(String msg, Throwable cause) {
+        super(msg, cause)
+    }
 }

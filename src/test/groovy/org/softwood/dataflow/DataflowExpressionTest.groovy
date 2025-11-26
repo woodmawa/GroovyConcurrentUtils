@@ -53,9 +53,9 @@ class DataflowExpressionTest {
     void testSetErrorPropagates() {
         DataflowVariable<Integer> df = new DataflowVariable<>();
 
-        df.setError(new RuntimeException("boom"));
+        df.setError(new DataflowException("boom"));
 
-        RuntimeException ex = assertThrows(RuntimeException.class, df::getValue);
+        DataflowException ex = assertThrows(DataflowException.class, df::getValue);
         assertEquals("boom", ex.getMessage());
         assertTrue(df.hasError());
     }

@@ -36,6 +36,16 @@ tasks.withType(GroovyCompile).configureEach {
 }
 */
 
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+}
+
 
 test {
     useJUnitPlatform()

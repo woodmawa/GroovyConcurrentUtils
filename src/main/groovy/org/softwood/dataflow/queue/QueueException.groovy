@@ -18,9 +18,24 @@ class QueueException extends RuntimeException {
         }
     }
 
+    /**
+     * Thrown when publishing to the sink fails after retries.
+     */
     static class PublishingException extends QueueException {
+
+        /**
+         * Construct with message only.
+         */
+        PublishingException(String message) {
+            super(message)
+        }
+
+        /**
+         * Construct with message + cause.
+         */
         PublishingException(String message, Throwable cause) {
             super(message, cause)
         }
     }
+
 }

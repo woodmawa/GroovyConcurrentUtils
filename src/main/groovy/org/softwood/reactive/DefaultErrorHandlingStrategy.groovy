@@ -2,8 +2,22 @@ package org.softwood.reactive
 
 import groovy.util.logging.Slf4j
 
+import java.time.Duration
+
 @Slf4j
 class DefaultErrorHandlingStrategy implements ErrorHandlingStrategy {
+
+    /**
+     * Maximum duration producers will wait to acquire capacity
+     * before failing with {@link QueueException.QueueFullException}.
+     */
+    Duration publishTimeout = Duration.ofSeconds(5)
+
+    /**
+     * Whether to log errors (true by default).
+     */
+    boolean logErrors = true
+
     @Override
     void onError(Throwable t, Object item, ErrorMode mode = ErrorMode.DEFAULT) {
         switch (mode) {

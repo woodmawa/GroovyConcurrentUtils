@@ -1,59 +1,107 @@
 package org.softwood.reactive
 
-import groovy.transform.CompileStatic
-import groovy.util.logging.Slf4j
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Sinks
 
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.Semaphore
 
-@Slf4j
-@CompileStatic
 class DataflowQueue<T> {
 
-    private int capacity
+    private Flux<T> flux
     private LinkedBlockingQueue<T> queue
     private Sinks.Many<T> sink
-    private Flux<T> flux
-    private ErrorHandlingStrategy errorStrategy
-    private Semaphore permits
-
-    //default constructor
-    DataflowQueue () {
-        DataflowQueue (25)
-    }
 
     DataflowQueue (int capacity, ErrorHandlingStrategy = new DefaultErrorHandlingStrategy()) {
-        this.capacity = capacity
-        this.queue = new LinkedBlockingQueue<>(capacity)
-        this.permits = new Semaphore (capacity, true)
-        this.errorStrategy = new DefaultErrorHandlingStrategy ()
 
-        // Unicast sink → exactly one consumer
-        this.sink = Sinks.many().unicast().onBackpressureBuffer()
-
-        // Build a single shared consumer pipeline
-        this.flux = sink.asFlux()
-                .publishOn(Schedulers.boundedElastic())
-                .doOnNext { T ignored ->
-                    // FIFO removal matches emission order
-                    T removed = queue.poll()
-                    if (removed == null && errorStrategy.logErrors) {
-                        log.warn("Consumer attempted to poll but queue was empty")
-                    }
-                    permits.release()
-                }
-                .doOnError { Throwable err ->
-                    if (errorStrategy.logErrors) {
-                        log.error("Error in work queue stream", err)
-                    }
-                }
-                .publish()
-                .autoConnect(1)
     }
 
+    void enqueue (T item) {
 
+    }
 
+    /**
+     * Groovy operator overload for {@link #enqueue(Object)}.
+     *
+     * @param item item to enqueue
+     * @return this queue (fluent API)
+     */
+    DataflowQueue<T> leftShift (T item) {
+        enqueue (item)
+        return this
+    }
 
+    /**
+     * Returns a hot Flux representing the stream of consumed items.
+     * <p>
+     * Only a single subscriber is permitted. The subscriber will receive items
+     * in the same order they were enqueued.
+     * </p>
+     *
+     * @return shared Flux
+     */
+    Flux<T> stream() {
+        return flux
+    }
+
+    /**
+     * Subscribes using closures for convenience.
+     *
+     * @param onNext item consumer
+     * @param onError optional error handler
+     * @param onComplete optional completion handler
+     * @return the shared Flux
+     */
+    Flux<T> consume(Closure<?> onNext,
+                    Closure<?> onError = null,
+                    Closure<?> onComplete = null) {
+        if (onNext != null) {
+            if (onError && onComplete) {
+                flux.subscribe(onNext, onError, onComplete)
+            } else if (onError) {
+                flux.subscribe(onNext, onError)
+            } else {
+                flux.subscribe(onNext)
+            }
+        }
+        return flux
+    }
+
+    /**
+     * Returns the next item in the queue without removing it.
+     *
+     * @return Optional containing next item or empty if queue is empty
+     */
+    Optional<T> peek() {
+        return Optional.ofNullable(queue.peek())
+    }
+
+    /**
+     * @return the current queue size
+     */
+    int size() {
+        return queue.size()
+    }
+
+    /**
+     * @return true if the queue is empty
+     */
+    boolean isEmpty() {
+        return queue.isEmpty()
+    }
+
+    /**
+     * Returns a snapshot of queue contents in FIFO order.
+     *
+     * @return immutable list copy
+     */
+    List<T> toList() {
+        return Collections.unmodifiableList(new ArrayList<>(queue))
+    }
+
+    /**
+     * Completes the reactive stream. No further items may be enqueued.
+     */
+    void complete() {
+        sink.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST)
+    }
 }

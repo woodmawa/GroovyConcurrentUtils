@@ -6,8 +6,8 @@ import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
-import static org.junit.jupiter.api.Assertions.assertThrows
+
+import static org.junit.jupiter.api.Assertions.*
 
 class AgentIntegrationTest extends GroovyTestCase {
 
@@ -15,12 +15,10 @@ class AgentIntegrationTest extends GroovyTestCase {
     void testAsyncSendExecutesOnWrappedObjectSequentially() {
         def agent = Agent.agent([count: 0]).build()
 
-        // enqueue several increments
         10.times {
             agent.send { count++ }
         }
 
-        // now read back synchronously
         def result = agent.sendAndGet { count }
 
         assertEquals(10, result)
@@ -79,7 +77,6 @@ class AgentIntegrationTest extends GroovyTestCase {
         def underlying = [count: 0, items: [1, 2, 3]]
         def agent = Agent.agent(underlying).build()
 
-        // mutate via agent
         agent.sendAndGet {
             count = 5
             items << 4
@@ -89,7 +86,6 @@ class AgentIntegrationTest extends GroovyTestCase {
         assertEquals(5, snapshot.count)
         assertEquals([1, 2, 3, 4], snapshot.items)
 
-        // now try to mutate snapshot and ensure underlying agent state doesn't change
         snapshot.count = 999
         snapshot.items << 999
 
@@ -104,30 +100,27 @@ class AgentIntegrationTest extends GroovyTestCase {
     void testSendAndGetTimeoutThrows() {
         def agent = Agent.agent([flag: false]).build()
 
-        // Block inside closure longer than timeout
+        // No-timeout version must succeed
         try {
             agent.sendAndGet({
                 Thread.sleep(500)
                 flag = true
                 flag
-            }, 0L /* no timeout, should succeed */)
+            }, 0L)
         } catch (Exception e) {
             fail("First sendAndGet without timeout should not fail: $e")
         }
 
-        // Now with a very small timeout
+        // Timeout expected
         def ex = assertThrows(RuntimeException) {
             agent.sendAndGet({
                 Thread.sleep(1500)
                 flag = true
                 flag
-            }, 1L) // change to >0 if you want strict timeout; here 0L means "no timeout"
+            }, 1L)
         }
 
         assertTrue(ex.message.contains("sendAndGet timed out"))
-
-        // If you want a real timeout assertion, use >0 timeoutSeconds and assert message
-        // For now we just validate that we can call with timeout and not blow up API-wise
 
         agent.shutdown()
     }
@@ -138,17 +131,16 @@ class AgentIntegrationTest extends GroovyTestCase {
         def agent = new Agent([count: 0], null, externalExecutor)
 
         agent.send { count++ }
-        agent.sendAndGet { count++ }   // ensure some work ran
+        agent.sendAndGet { count++ }
 
-        agent.shutdown()   // should NOT shut down externalExecutor
+        agent.shutdown()
 
-        // verify external executor still accepts tasks
+        // Executor should still be usable
         def latch = new CountDownLatch(1)
-        externalExecutor.execute {
-            latch.countDown()
-        }
-        assertTrue("External executor should still be running",
-                latch.await(2, TimeUnit.SECONDS))
+        externalExecutor.execute { latch.countDown() }
+
+        assertTrue(latch.await(2, TimeUnit.SECONDS),
+                "External executor should still be running")
 
         externalExecutor.shutdown()
     }
@@ -160,21 +152,15 @@ class AgentIntegrationTest extends GroovyTestCase {
         def latch = new CountDownLatch(20)
 
         20.times { i ->
-            def t = Thread.start {
-                agent.send {
-                    list << i
-                }
+            threads << Thread.start {
+                agent.send { list << i }
                 latch.countDown()
             }
-            threads << t
         }
 
         latch.await(5, TimeUnit.SECONDS)
         threads*.join()
 
-        // the order in the list should be the same as the order tasks were processed,
-        // which is FIFO on the queue, but submission order is concurrent.
-        // We can't guarantee numeric order, but we can assert size and that all values exist.
         def snapshot = agent.val
         assertEquals(20, snapshot.list.size())
         assertEquals((0..19).toSet(), snapshot.list.toSet())
@@ -193,7 +179,6 @@ class AgentIntegrationTest extends GroovyTestCase {
         }
 
         assertEquals("boom", ex.message)
-
 
         agent.shutdown()
     }
@@ -218,12 +203,11 @@ class AgentIntegrationTest extends GroovyTestCase {
         assertEquals([1, 2, 3, 4], snapshot1.items)
         assertEquals(['a', 'b', 'c'], snapshot1.meta.tags)
 
-        // mutate snapshot deeply
+        // Mutate snapshot but not the real state
         snapshot1.count = 999
         snapshot1.items << 999
         snapshot1.meta.tags << 'MUTATED'
 
-        // re-read from agent; should not see snapshot mutations
         def snapshot2 = agent.val
         assertEquals(5, snapshot2.count)
         assertEquals([1, 2, 3, 4], snapshot2.items)
@@ -246,7 +230,6 @@ class AgentIntegrationTest extends GroovyTestCase {
         assertEquals('Alice', snap1.user.name)
         assertEquals(['admin', 'user'], snap1.user.roles)
 
-        // mutate snapshot
         snap1.user.name = 'Bob'
         snap1.user.roles << 'hacker'
 
@@ -283,7 +266,6 @@ class AgentIntegrationTest extends GroovyTestCase {
         assertEquals([1, 2, 3, 4], snap1.nums)
         assertEquals([true, false, true], snap1.meta.flags)
 
-        // mutate snapshot
         snap1.x = 999
         snap1.nums << 999
         snap1.meta.flags.clear()

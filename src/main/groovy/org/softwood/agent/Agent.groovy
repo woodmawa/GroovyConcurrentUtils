@@ -6,456 +6,300 @@ import groovy.util.logging.Slf4j
 import groovyjarjarantlr4.v4.runtime.misc.NotNull
 import org.softwood.pool.ConcurrentPool
 
-import java.lang.reflect.Field
 import java.lang.reflect.Modifier
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Supplier
-import java.util.concurrent.CountDownLatch
 
 /**
- * A thread-safe agent that wraps a non-thread-safe object.
+ * Agent<T> – single-threaded, message-driven access to mutable state.
  *
- * - All actions on the wrapped object are executed sequentially.
- * - Execution is performed on an ExecutorService (virtual-thread pool by default via ConcurrentPool).
- * - Closures are executed with delegate = wrappedObject (DELEGATE_FIRST).
- * - getVal() returns a defensive copy when possible, or the wrapped object as a fallback.
+ * <p>This class wraps a mutable object and guarantees all updates and reads occur
+ * sequentially on a dedicated worker thread. Multiple threads may submit work concurrently;
+ * the Agent ensures serialized execution.</p>
  *
- * API:
- *   Agent<T> agent = Agent.agent([count: 0]).build()
+ * <h2>Features</h2>
+ * <ul>
+ *   <li>Serial execution of closures on a wrapped object</li>
+ *   <li>Fire-and-forget ({@link #send}) and synchronous ({@link #sendAndGet}) operations</li>
+ *   <li>Immutable snapshot copying via a pluggable copy strategy</li>
+ *   <li>Graceful draining shutdown ({@link #shutdown})</li>
+ *   <li>Convenient DSL builder ({@code #agent(Object)})</li>
+ * </ul>
  *
- *   agent >> { count++ }            // async, fire-and-forget
- *   def v = agent << { count }      // sync, returns result
- *
- *   agent.send { count++ }          // async
- *   def res = agent.sendAndGet { count }  // sync
+ * @param <T> type of underlying state
  */
 @Slf4j
 @CompileStatic
 class Agent<T> {
 
-    /** Wrapped, non-thread-safe object. Only touched from the worker. */
+    /** Wrapped mutable state */
     private final T wrappedObject
 
-    /** FIFO of tasks to run on the wrapped object. */
+    /** FIFO queue of tasks to run sequentially */
     private final ConcurrentLinkedQueue<Task> taskQueue = new ConcurrentLinkedQueue<>()
 
-    /** Guards single consumer: true while worker is draining the queue. */
+    /** Flag controlling entry into processing loop */
     private final AtomicBoolean processing = new AtomicBoolean(false)
 
-    /** Strategy to produce a defensive copy of the wrapped object. */
+    /** True once shutdown has been initiated */
+    private final AtomicBoolean shuttingDown = new AtomicBoolean(false)
+
+    /** Signals when queue has fully drained after shutdown */
+    private final CountDownLatch drained = new CountDownLatch(1)
+
+    /** Supplier returning an immutable snapshot of wrappedObject */
     private final Supplier<T> immutableCopySupplier
 
-    /** Executor used to run the single worker. */
+    /** Executor for running the worker loop */
     private final ExecutorService executor
 
-    /** If true, this Agent owns the executor and will shut it down on close. */
-    private final boolean ownsExecutor
+    // ----------------------------------------------------------------------
+    // TASK TYPES
+    // ----------------------------------------------------------------------
 
-    // ─────────────────────────────────────────────────────────────
-    // Internal Task abstraction
-    // ─────────────────────────────────────────────────────────────
-
+    /**
+     * A unit of work executed sequentially by the Agent.
+     */
     private static interface Task {
         void execute(Object target)
     }
 
+    /**
+     * Fire-and-forget closure task.
+     */
     private static class ClosureTask implements Task {
-        private final Closure closure
+        final Closure closure
+        ClosureTask(Closure c) { this.closure = c }
 
-        ClosureTask(Closure closure) {
-            this.closure = closure
-        }
-
-        @Override
+        /** Executes the closure with delegate=target */
         void execute(Object target) {
-            Closure cloned = closure.clone() as Closure
-            cloned.delegate = target
-            cloned.resolveStrategy = Closure.DELEGATE_FIRST
-            cloned.call()
+            Closure cc = closure.clone() as Closure
+            cc.delegate = target
+            cc.resolveStrategy = Closure.DELEGATE_FIRST
+            cc.call()
         }
     }
 
+    /**
+     * Synchronous task that captures a return value.
+     */
     private static class SendAndGetTask<R> implements Task {
-        private final Closure<R> action
-        private R result
-        private Throwable error
+        final Closure<R> action
+        R result
+        Throwable error
 
-        SendAndGetTask(Closure<R> action) {
-            this.action = action
-        }
+        SendAndGetTask(Closure<R> a) { action = a }
 
-        @Override
+        /** Executes closure and captures result or error */
         void execute(Object target) {
             try {
-                Closure<R> cloned = action.clone() as Closure
-                cloned.delegate = target
-                cloned.resolveStrategy = Closure.DELEGATE_FIRST
-                result = cloned.call() as R
+                Closure<R> c = action.clone() as Closure
+                c.delegate = target
+                c.resolveStrategy = Closure.DELEGATE_FIRST
+                result = (R) c.call()
             } catch (Throwable t) {
                 error = t
             }
         }
 
+        /** Returns result or rethrows error */
         R getResult() {
-            if (error != null) {
-                if (error instanceof RuntimeException) {
-                    throw (RuntimeException) error
-                }
-                throw new RuntimeException("sendAndGet: Exception during task execution", error)
-            }
-            return result
+            if (error != null)
+                throw (error instanceof RuntimeException ? error : new RuntimeException(error))
+            result
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Construction
-    // ─────────────────────────────────────────────────────────────
+    // ----------------------------------------------------------------------
+    // CONSTRUCTION
+    // ----------------------------------------------------------------------
 
     /**
-     * Primary constructor (used by builder / factory).
+     * Creates a new Agent wrapping the given object.
+     *
+     * @param wrappedObject object whose state will be updated sequentially
+     * @param copy strategy for defensive snapshot cloning; defaults to reflection-based deep copy
+     * @param exec optional executor; defaults to ConcurrentPool
      */
-    Agent(@NotNull T wrappedObject,
-          Supplier<T> immutableCopySupplier = null,
-          ExecutorService executor = null) {
-
+    Agent(@NotNull T wrappedObject, Supplier<T> copy = null, ExecutorService exec = null) {
         this.wrappedObject = wrappedObject
-
-        if (immutableCopySupplier != null) {
-            this.immutableCopySupplier = immutableCopySupplier
-        } else {
-            this.immutableCopySupplier = useDeepCopySupplier()
-        }
-
-        if (executor != null) {
-            this.executor = executor
-            this.ownsExecutor = false
-        } else {
-            def pool = new ConcurrentPool()              // virtual-thread per task
-            this.executor = pool.getExecutor()
-            this.ownsExecutor = true
-        }
-
-        log.debug("Agent created with object: {}", wrappedObject)
+        this.immutableCopySupplier = copy ?: { deepCopy(wrappedObject) } as Supplier<T>
+        this.executor = exec ?: new ConcurrentPool().executor
     }
 
     /**
-     * Factory entry point for DSL-style creation:
-     *   def a = Agent.agent(myObj).build()
-     *   def a = Agent.agent(myObj).immutableCopyBy { ... }.usingExecutor(custom).build()
+     * Creates a builder for constructing an Agent with DSL-style options.
      */
-    static <T> AgentBuilder<T> agent(T value) {
-        new AgentBuilder<>(value)
-    }
+    static <T> AgentBuilder<T> agent(T value) { new AgentBuilder<>(value) }
 
+    /** Builder class for Agent instantiation */
     static class AgentBuilder<T> {
-        private final T value
-        private Supplier<T> copySupplier
-        private ExecutorService executor
+        final T value
+        Supplier<T> copySupplier
+        ExecutorService exec
 
-        AgentBuilder(T value) {
-            this.value = value
-        }
+        AgentBuilder(T v) { value = v }
 
-        AgentBuilder<T> immutableCopyBy(Supplier<T> supplier) {
-            this.copySupplier = supplier
-            this
-        }
+        /** Sets custom snapshot copy strategy */
+        AgentBuilder<T> immutableCopyBy(Supplier<T> s) { copySupplier = s; this }
 
-        AgentBuilder<T> usingExecutor(ExecutorService executor) {
-            this.executor = executor
-            this
-        }
+        /** Sets custom executor */
+        AgentBuilder<T> usingExecutor(ExecutorService e) { exec = e; this }
 
-        Agent<T> build() {
-            new Agent<>(value, copySupplier, executor)
-        }
+        /** Creates the Agent */
+        Agent<T> build() { new Agent<>(value, copySupplier, exec) }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Deep copy support (best-effort)
-    // ─────────────────────────────────────────────────────────────
+    // ----------------------------------------------------------------------
+    // DEEP COPY ENGINE
+    // ----------------------------------------------------------------------
 
-    /**
-     * Returns a supplier that performs a deep-ish copy of the wrapped object.
-     */
-    private Supplier<T> useDeepCopySupplier() {
-        return { deepCopy(wrappedObject) } as Supplier<T>
-    }
-
-
-    /**
-     * Deep copy entry point for the wrapped object.
-     * Delegates to deepCopyValue for recursive copying.
-     */
+    /** Deep-copies arbitrary values including nested Maps/Lists */
     @CompileDynamic
-    @NotNull
-    T deepCopy(Object object) {
-        (T) deepCopyValue(object)
-    }
-
-/**
- * Recursively deep-copies arbitrary objects:
- *  - null → null
- *  - primitives / wrappers / String / Number / Boolean / Character → same instance
- *  - Collection → new collection, deep-copy each element
- *  - Map → new map, deep-copy each value (and keys if they are complex)
- *  - Cloneable with clone() → use clone()
- *  - Other objects → reflectively copy fields, deep-copying each field value
- */
-    @CompileDynamic
-    private Object deepCopyValue(Object value) {
-        if (value == null) {
-            return null
-        }
-
-        // Immutable / primitive-like values: safe to share
-        if (value instanceof String ||
-                value instanceof Number ||
-                value instanceof Boolean ||
-                value instanceof Character ||
-                value instanceof Enum) {
-            return value
-        }
-
-        // Collections
-        if (value instanceof Collection) {
-            Collection original = (Collection) value
-            Collection copy
-            try {
-                copy = (Collection) value.getClass().getDeclaredConstructor().newInstance()
-            } catch (Exception ignored) {
-                // Fallback to most general types
-                copy = (value instanceof Set) ? (Collection) new LinkedHashSet<>() : new ArrayList<>()
-            }
-            original.each { elem ->
-                copy.add(deepCopyValue(elem))
-            }
+    private Object deepCopyValue(Object v) {
+        if (v == null) return null
+        if (v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Character || v instanceof Enum)
+            return v
+        if (v instanceof Collection) {
+            Collection src = (Collection) v
+            Collection copy = (v instanceof Set) ? new LinkedHashSet<>() : new ArrayList<>()
+            src.each { copy.add(deepCopyValue(it)) }
             return copy
         }
-
-        // Maps
-        if (value instanceof Map) {
-            Map original = (Map) value
-            Map copy
-            try {
-                copy = (Map) value.getClass().getDeclaredConstructor().newInstance()
-            } catch (Exception ignored) {
-                copy = new LinkedHashMap<>()
-            }
-            original.each { k, v ->
-                def newKey = deepCopyValue(k)
-                def newVal = deepCopyValue(v)
-                copy[newKey] = newVal
-            }
+        if (v instanceof Map) {
+            Map m = (Map) v
+            Map copy = new LinkedHashMap<>()
+            m.each { k, val -> copy[deepCopyValue(k)] = deepCopyValue(val) }
             return copy
         }
-
-        // Cloneable objects with clone()
-        if (value instanceof Cloneable && value.metaClass.respondsTo(value, 'clone')) {
-            return value.clone()
-        }
-
-        // Fallback: reflectively copy fields of a "bean"/POJO
-        return deepCopyObject(value)
+        return deepCopyObject(v)
     }
 
-    /**
-     * Deep-copy a non-collection, non-map object by:
-     *  - constructing a new instance (default or Map constructor)
-     *  - walking its class hierarchy
-     *  - deepCopyValue() on each non-static, non-final, non-synthetic field
-     */
+    /** Deep-copies arbitrary POJOs using reflection */
     @CompileDynamic
-    private Object deepCopyObject(Object original) {
-        def originalClass = original.getClass()
-        def copyInstance
+    private Object deepCopyObject(Object o) {
+        def cls = o.class
+        def inst = cls.getDeclaredConstructor().newInstance()
 
-        // Try default constructor or Map constructor
-        try {
-            copyInstance = originalClass.getDeclaredConstructor().newInstance()
-        } catch (Exception e) {
-            def constructors = originalClass.declaredConstructors
-            def ctor = constructors.find { c ->
-                c.parameterTypes.length == 0 ||
-                        (c.parameterTypes.length == 1 && c.parameterTypes[0] == Map)
-            }
-            if (ctor) {
-                ctor.accessible = true
-                copyInstance = ctor.parameterTypes.length == 0 ? ctor.newInstance() : ctor.newInstance([:])
-            } else {
-                throw new RuntimeException("Cannot find suitable constructor for class ${originalClass.name}")
+        def classes = []
+        for (def c = cls; c != Object; c = c.superclass) classes.add(0, c)
+
+        classes.each { c ->
+            c.declaredFields.each { f ->
+                if (Modifier.isStatic(f.modifiers) || Modifier.isFinal(f.modifiers) || f.synthetic) return
+                if (!f.canAccess(o)) f.accessible = true
+                f.set(inst, deepCopyValue(f.get(o)))
             }
         }
-
-        // Copy fields up the hierarchy
-        def classesToCopy = []
-        def currentClass = originalClass
-        while (currentClass != Object) {
-            classesToCopy.add(0, currentClass)
-            currentClass = currentClass.superclass
-        }
-
-        classesToCopy.each { Class<?> clazz ->
-            copyPropertiesFromClass(clazz, original, copyInstance)
-        }
-
-        return copyInstance
+        inst
     }
 
-    /**
-     * Copy all non-static, non-final, non-synthetic fields from original to copy,
-     * using deepCopyValue() for the field value.
-     */
-    @CompileDynamic
-    private void copyPropertiesFromClass(Class clazz, Object original, Object copy) {
-        Field[] fields = clazz.declaredFields
-        fields.each { Field field ->
-            if (Modifier.isStatic(field.modifiers) ||
-                    Modifier.isFinal(field.modifiers) ||
-                    field.synthetic) {
-                return
-            }
+    /** Generic deep copy entry point */
+    T deepCopy(Object o) { (T) deepCopyValue(o) }
 
-            if (field.name == 'size') {
-                return
-            }
-
-            if (!field.canAccess(original)) {
-                try {
-                    field.accessible = true
-                } catch (SecurityException se) {
-                    log.trace("Field ${field.name} inaccessible, skipping")
-                    return
-                }
-            }
-
-            def originalValue = field.get(original)
-            def copiedValue = deepCopyValue(originalValue)
-            field.set(copy, copiedValue)
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Public API
-    // ─────────────────────────────────────────────────────────────
+    // ----------------------------------------------------------------------
+    // PUBLIC OPERATIONS
+    // ----------------------------------------------------------------------
 
     /**
-     * Fire-and-forget: enqueue a closure to run against the wrapped object.
-     * Closure delegate = wrappedObject, DELEGATE_FIRST.
+     * Submits a fire-and-forget update task.
+     *
+     * @param action closure to execute on underlying state
+     * @return this Agent
      */
     Agent<T> send(Closure action) {
-        log.trace("Queuing action for execution")
+        if (shuttingDown.get()) throw new IllegalStateException("Agent is shutting down")
         taskQueue.offer(new ClosureTask(action))
         processQueue()
-        return this
+        this
     }
 
-    /** Alias for send() for readability. */
-    Agent<T> async(Closure action) {
-        send(action)
-    }
+    /** Alias for {@link #send} */
+    Agent<T> async(Closure c) { send(c) }
+
+    /** Synchronous update with optional timeout */
+    def <R> R sync(Closure<R> c, long t = 0) { sendAndGet(c, t) }
+
+    /** Operator: agent >> closure */
+    def rightShift(Closure c) { async(c) }
+
+    /** Operator: agent << closure returning R */
+    def <R> R leftShift(Closure<R> c) { sync(c) }
 
     /**
-     * Execute closure on wrapped object and return its result.
-     * Blocks the caller until completion (cheap with virtual threads).
+     * Submits a closure and blocks until it completes.
      *
-     * Optional timeout in seconds; 0 or negative means "no timeout".
+     * @param action closure returning a result
+     * @param timeoutSeconds optional timeout
+     * @return closure return value
      */
     def <R> R sendAndGet(Closure<R> action, long timeoutSeconds = 0L) {
+        if (shuttingDown.get()) throw new IllegalStateException("Agent is shutting down")
         def task = new SendAndGetTask<R>(action)
         def latch = new CountDownLatch(1)
 
         send {
-            try {
-                task.execute(delegate)
-            } finally {
-                latch.countDown()
-            }
+            try { task.execute(delegate) } finally { latch.countDown() }
         }
 
-        boolean completed
+        boolean ok
         if (timeoutSeconds > 0) {
-            completed = latch.await(timeoutSeconds, TimeUnit.SECONDS)
+            ok = latch.await(timeoutSeconds, TimeUnit.SECONDS)
         } else {
             latch.await()
-            completed = true
+            ok = true
         }
 
-        if (!completed) {
-            throw new RuntimeException("sendAndGet timed out after ${timeoutSeconds}s")
-        }
-
-        return task.getResult()
+        if (!ok) throw new RuntimeException("sendAndGet timed out after ${timeoutSeconds}s")
+        task.getResult()
     }
 
-    /** Alias for sendAndGet() for readability. */
-    def <R> R sync(Closure<R> action, long timeoutSeconds = 0L) {
-        sendAndGet(action, timeoutSeconds)
-    }
-
-    /** Operator overloads: >> = async, << = sync. */
-    def rightShift(Closure action) {
-        async(action)
-    }
-
-    def <R> R leftShift(Closure<R> action) {
-        sync(action)
-    }
+    /** Returns an immutable defensive snapshot of state */
+    T getVal() { immutableCopySupplier?.get() ?: wrappedObject }
 
     /**
-     * Returns a defensive copy of the wrapped object when possible.
-     * If no copy strategy is available, returns the wrapped object itself.
-     */
-    T getVal() {
-        log.trace("Getting immutable/defensive copy of wrapped object")
-        return immutableCopySupplier != null ? immutableCopySupplier.get() : wrappedObject
-    }
-
-    /**
-     * Cleanup method. If this Agent owns its executor, it will be shut down.
+     * Initiates shutdown: prevents new tasks, drains queue, waits until finished.
      */
     void shutdown() {
-        if (ownsExecutor) {
-            executor.shutdown()
-        }
+        shuttingDown.set(true)
+        processQueue()
+        drained.await()
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Internal: worker loop
-    // ─────────────────────────────────────────────────────────────
+    // ----------------------------------------------------------------------
+    // INTERNAL EXECUTION LOOP
+    // ----------------------------------------------------------------------
 
+    /**
+     * Processes tasks in FIFO order. Uses executor to run a worker loop
+     * that drains the queue until empty. Ensures only one processor runs
+     * at a time via CAS on {@link #processing}.
+     */
     private void processQueue() {
-        if (processing.compareAndSet(false, true)) {
-            try {
-                executor.execute(new Runnable() {
-                    @Override
-                    void run() {
+        if (!processing.compareAndSet(false, true)) return
+
+        try {
+            executor.execute({ ->
+                try {
+                    Task t
+                    while ((t = taskQueue.poll()) != null) {
                         try {
-                            Task task
-                            while ((task = taskQueue.poll()) != null) {
-                                log.trace("Executing queued task")
-                                try {
-                                    task.execute(wrappedObject)
-                                } catch (Throwable t) {
-                                    log.error("Error executing agent action", t)
-                                }
-                            }
-                        } finally {
-                            processing.set(false)
-                            if (!taskQueue.isEmpty()) {
-                                processQueue()
-                            }
+                            t.execute(wrappedObject)
+                        } catch (Throwable e) {
+                            log.error("Agent task failed", e)
                         }
                     }
-                })
-            } catch (Throwable t) {
-                // Ensure we don't get stuck with processing=true
-                processing.set(false)
-                log.error("Failed to schedule agent worker on executor", t)
-            }
+                } finally {
+                    processing.set(false)
+
+                    if (!taskQueue.isEmpty()) processQueue()
+                    else if (shuttingDown.get()) drained.countDown()
+                }
+            } as Runnable)
+        } catch (Throwable e) {
+            processing.set(false)
+            log.error("Failed to schedule agent worker", e)
         }
     }
 }

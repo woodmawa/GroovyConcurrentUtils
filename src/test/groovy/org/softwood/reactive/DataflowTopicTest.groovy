@@ -1,17 +1,25 @@
-package org.softwood.dataflow.queue
+package org.softwood.reactive
 
 import org.junit.jupiter.api.Test
 import reactor.test.StepVerifier
-import reactor.test.scheduler.VirtualTimeScheduler
 
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 
+/**
+ * Tests for DataflowTopic using the new external ErrorHandlingStrategy model.
+ *
+ * NOTE:
+ * - No test uses the internal emission handler anymore
+ * - All tests explicitly set `errorStrategy` where needed
+ * - DefaultErrorHandlingStrategy is used automatically unless overridden
+ */
 class DataflowTopicTest {
 
     @Test
     void testSingleSubscriberReceivesEvents() {
         def topic = new DataflowTopic<String>()
+        topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
 
         StepVerifier.create(topic.stream().take(2))
                 .then { topic.publish("A") }
@@ -23,25 +31,23 @@ class DataflowTopicTest {
     @Test
     void testMultiSubscriberBroadcast() {
         def topic = new DataflowTopic<Integer>()
+        topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
 
-        // We’re testing pure broadcast, not timeout/retry here.
+        // pure broadcast: disable timeout and retry influence
         topic.timeout = Duration.ofDays(1)
         topic.maxRetries = 0
 
         def results1 = new CopyOnWriteArrayList<Integer>()
         def results2 = new CopyOnWriteArrayList<Integer>()
 
-        // Attach two simultaneous subscribers
-        def sub1 = topic.stream().subscribe { results1 << it }
-        def sub2 = topic.stream().subscribe { results2 << it }
+        topic.stream().subscribe { results1 << it }
+        topic.stream().subscribe { results2 << it }
 
-        // Publish events AFTER subscription
         topic.publish(1)
         topic.publish(2)
         topic.publish(3)
         topic.complete()
 
-        // Block until topic completes
         StepVerifier.create(topic.awaitCompletion())
                 .verifyComplete()
 
@@ -52,8 +58,9 @@ class DataflowTopicTest {
     @Test
     void testLateSubscriberOnlyGetsNewEvents() {
         def topic = new DataflowTopic<String>()
+        topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
 
-        // Publish old events before subscription
+        // publish BEFORE subscription → should be lost (hot topic)
         topic.publish("old-1")
         topic.publish("old-2")
 
@@ -67,6 +74,7 @@ class DataflowTopicTest {
     @Test
     void testCompletionEvent() {
         def topic = new DataflowTopic<String>()
+        topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
 
         StepVerifier.create(topic.stream())
                 .then { topic.publish("X") }
@@ -74,13 +82,14 @@ class DataflowTopicTest {
                 .expectNext("X")
                 .verifyComplete()
 
-        // Emits after complete must have no visible effect
+        // Emits after complete must have no effect
         topic.publish("ignored")
     }
 
     @Test
     void testPublishOperator() {
         def topic = new DataflowTopic<String>()
+        topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
 
         StepVerifier.create(topic.stream().take(2))
                 .then { topic << "hello" }
@@ -91,14 +100,17 @@ class DataflowTopicTest {
 
     @Test
     void testTimeoutAndRetry() {
-        // Let StepVerifier manage VirtualTimeScheduler; do NOT call getOrSet() globally
         StepVerifier.withVirtualTime({
             def topic = new DataflowTopic<String>()
+            topic.errorStrategy = new DefaultErrorHandlingStrategy()   // NEW
+
             topic.timeout = Duration.ofMillis(200)
             topic.maxRetries = 1
+
             topic.stream().take(1)
         })
-                .thenAwait(Duration.ofMillis(600)) // timeout + retry + completion
+        // enough time for timeout + retry + completion
+                .thenAwait(Duration.ofMillis(600))
                 .verifyComplete()
     }
 }

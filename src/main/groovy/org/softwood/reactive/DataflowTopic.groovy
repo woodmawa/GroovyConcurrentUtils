@@ -1,4 +1,4 @@
-package org.softwood.dataflow.queue
+package org.softwood.reactive
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
@@ -18,17 +18,31 @@ import java.util.concurrent.TimeoutException
  * <strong>from the moment of subscription onward</strong>. No replay is ever performed.
  * </p>
  *
+ * <p>
+ * This class preserves the exact behavioural semantics of a pure best-effort
+ * multicast sink while adding a unified pluggable {@link ErrorHandlingStrategy}
+ * using {@link ErrorMode} classifiers. All failures are delegated through the
+ * strategy instead of only logging internally, providing consistent and
+ * testable error pathways.
+ * </p>
+ *
  * <h3>Sink characteristics</h3>
  * <ul>
  *     <li>Uses {@code Sinks.many().multicast().directBestEffort()} → a true hot topic</li>
  *     <li>No pre-subscriber buffering</li>
  *     <li>Each subscriber gets all future events</li>
  *     <li>Slow subscribers may drop events (best-effort delivery)</li>
+ *     <li>Unified error handling through strategy rather than internal println/logging only</li>
  * </ul>
  *
  * <h3>Error handling</h3>
- * Timeout and retry behavior is applied <strong>per subscriber</strong> inside {@code #stream()},
- * ensuring the shared hot source is never restarted or corrupted.
+ * <p>
+ * This implementation has been extended to integrate the unified
+ * {@link ErrorHandlingStrategy} and classifier {@link ErrorMode}, allowing
+ * consistent error processing across publish and subscriber operations while
+ * preserving Reactor's non-blocking semantics.
+ * </p>
+ *
  *
  * @param <T> event type
  */
@@ -36,30 +50,54 @@ import java.util.concurrent.TimeoutException
 @CompileStatic
 class DataflowTopic<T> {
 
+    /**
+     * The underlying Reactor sink powering this hot topic.
+     * <p>
+     * This variant never buffers nor replays events and is the highest throughput
+     * multicast mode. It also means any subscriber pressure is ignored.
+     * </p>
+     */
     private final Sinks.Many<T> sink
 
     /**
-     * Duration after which a subscriber triggers a TimeoutException
-     * if no events are emitted.
+     * Maximum idle duration permitted for each subscriber before a
+     * {@link TimeoutException} is raised.
      */
     Duration timeout = Duration.ofSeconds(5)
 
     /**
-     * Maximum number of retry attempts for timeout/illegal-state failures.
+     * Maximum number of retry attempts for transient errors such as
+     * {@link TimeoutException} or {@link IllegalStateException}.
      */
     int maxRetries = 3
 
+    /** The pluggable error-handling strategy. */
+    ErrorHandlingStrategy errorStrategy = new DefaultErrorHandlingStrategy()
+
+    /** Default classifier used for delegation. */
+    ErrorMode errorMode = ErrorMode.DEFAULT
+
     /**
      * Creates a new hot broadcast topic.
+     *
+     * @param ignoredBufferCapacity compatibility parameter; ignored
      */
     DataflowTopic(int ignoredBufferCapacity = 0) {
-        // true hot topic: no replay, no buffering pre-subscribe
         this.sink = Sinks.many().multicast().directBestEffort()
     }
 
     /**
-     * Emit an event to all subscribers.
-     * Performs internal retry on FAIL_NON_SERIALIZED.
+     * Emit a single event to all subscribers.
+     *
+     * <p>Internal behaviour:</p>
+     * <ul>
+     *   <li>Retries on {@code FAIL_NON_SERIALIZED} automatically.</li>
+     *   <li>{@code FAIL_ZERO_SUBSCRIBER}: event is quietly dropped.</li>
+     *   <li>Any other failure results in delegation to the configured
+     *       {@link ErrorHandlingStrategy}.</li>
+     * </ul>
+     *
+     * @param element event to emit
      */
     void publish(T element) {
         boolean ok = true
@@ -69,26 +107,25 @@ class DataflowTopic<T> {
                 case Sinks.EmitResult.OK:
                     return false
                 case Sinks.EmitResult.FAIL_NON_SERIALIZED:
-                    return true
+                    return true // retry immediately
                 case Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER:
-                    // silently drop if nobody is listening
                     log.debug("Dropping {} — no subscribers", element)
                     ok = true
                     return false
                 default:
-                    log.warn("Emission failure {} for {}", result, element)
                     ok = false
                     return false
             }
         }
 
         if (!ok) {
-            log.error("Final emission failure for {}", element)
+            def ex = new IllegalStateException("Final emission failure for $element")
+            errorStrategy.onError(ex, element, errorMode)
         }
     }
 
     /**
-     * Groovy operator for publish().
+     * Groovy operator alias for {@link #publish(Object)}.
      *
      * @param element event to emit
      * @return this topic
@@ -99,12 +136,15 @@ class DataflowTopic<T> {
     }
 
     /**
-     * Returns a per-subscriber Flux.
+     * Creates a new subscriber view of the topic as a {@link Flux}.
      *
-     * The sink itself is shared and hot; timeout + retry is applied on
-     * a per-subscriber basis here.
+     * <p>
+     * The sink itself is hot and shared across all subscribers. This method
+     * applies timeout, retry and centralised error-handling rules to the
+     * subscriber's stream but never replays or re-emits events.
+     * </p>
      *
-     * @return Flux for this subscriber
+     * @return a new Flux representing this subscriber's live view
      */
     Flux<T> stream() {
         return sink.asFlux()
@@ -112,8 +152,11 @@ class DataflowTopic<T> {
     }
 
     /**
-     * Convenience subscription API for Groovy users.
+     * Groovy-friendly subscription helper.
      *
+     * @param onNext callback for next event
+     * @param onError optional callback for errors
+     * @param onComplete optional callback when stream completes
      * @return this topic
      */
     DataflowTopic<T> subscribe(Closure<?> onNext,
@@ -133,21 +176,38 @@ class DataflowTopic<T> {
     }
 
     /**
-     * Mono that completes when the topic completes.
+     * Returns a {@link Mono} that completes when the underlying sink completes.
      */
     Mono<Void> awaitCompletion() {
         return sink.asFlux().then()
     }
 
     /**
-     * Completes the topic.
+     * Completes the topic. Any failure during completion is handled by
+     * the configured {@link ErrorHandlingStrategy}.
      */
     void complete() {
-        sink.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST)
+        try {
+            sink.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST)
+        } catch (Throwable t) {
+            errorStrategy.onError(t, null, errorMode)
+        }
     }
 
     /**
-     * Per-subscriber timeout and retry logic.
+     * Applies per-subscriber timeout, retry and centralised error-handling logic.
+     *
+     * <p>
+     * Behavioural rules:
+     * </p>
+     * <ul>
+     *   <li>TimeoutException → retry (up to {@link #maxRetries}), then empty()</li>
+     *   <li>IllegalStateException → retry (up to max), then empty()</li>
+     *   <li>All other errors → delegated then fail subscriber</li>
+     * </ul>
+     *
+     * @param source the upstream Flux from the sink
+     * @return transformed Flux with subscriber-local error policy
      */
     private Flux<T> applyErrorHandling(Flux<T> source) {
         return source
@@ -161,11 +221,12 @@ class DataflowTopic<T> {
                                 }
                 )
                 .onErrorResume { ex ->
+                    errorStrategy.onError(ex, null, errorMode)
+
                     if (ex instanceof TimeoutException || ex instanceof IllegalStateException) {
-                        log.warn("Transient error: ${ex.message}", ex)
                         return Flux.empty()
                     }
-                    log.error("Unhandled error", ex)
+
                     return Flux.error(ex)
                 }
     }

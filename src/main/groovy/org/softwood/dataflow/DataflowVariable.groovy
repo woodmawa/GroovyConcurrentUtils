@@ -8,12 +8,15 @@ import org.softwood.pool.ConcurrentPool
 import java.time.Duration
 import java.util.Optional
 import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.BiConsumer
+import java.util.function.BiFunction
 import java.util.function.Consumer
 import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * A specialised {@link DataflowExpression} that behaves like a single-assignment
@@ -25,13 +28,13 @@ import java.util.function.Function
  *     <li>Synchronous and asynchronous listeners (whenBound)</li>
  *     <li>Promise-compatible success/error listeners:
  *         <ul>
- *             <li>{@link #whenAvailable(Consumer)}</li>
- *             <li>{@link #whenError(Consumer)}</li>
+ *             <li>{@code #whenAvailable(Consumer)}</li>
+ *             <li>{@code #whenError(Consumer)}</li>
  *         </ul>
  *     </li>
- *     <li>Groovy operator support via {@link #methodMissing(String, Object)}</li>
- *     <li>Chaining via {@link #then(Function)} and {@link #recover(Function)}</li>
- *     <li>Non-blocking value inspection via {@link #getIfAvailable()}</li>
+ *     <li>Groovy operator support via {@code #methodMissing(String, Object)}</li>
+ *     <li>Chaining via {@code #then(Function)} and {@code #recover(Function)}</li>
+ *     <li>Non-blocking value inspection via {@code #getIfAvailable()}</li>
  * </ul>
  *
  * <p>This class is the foundation underlying {@code DataflowPromise}.</p>
@@ -110,7 +113,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * Get the value, blocking until available.
      *
      * @return value if successful
-     * @throws DataflowException if the DFV was completed with error
+     * @throws DataflowException    if the DFV was completed with error
      * @throws InterruptedException if interrupted while waiting
      */
     T get() {
@@ -175,14 +178,14 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * </ul>
      */
     boolean isSuccess() {
-        return isBound() && !isError()
+        return isBound() && !hasError()
     }
 
     /**
      * Whether the DFV has an error.
      */
     boolean hasError() {
-        return isError() && getError() != null
+        return super.hasError()
     }
 
     /**
@@ -192,6 +195,55 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         if (!isSuccess()) return Optional.empty()
         try { return Optional.ofNullable(get()) }
         catch (Throwable ignore) { return Optional.empty() }
+    }
+
+    /**
+     * Expose this variable as a {@link CompletableFuture} for interoperability with
+     * standard Future/Promise-based APIs (e.g. {@code DataflowPromise}).
+     *
+     * <p>Semantics:</p>
+     * <ul>
+     *     <li>If the DFV is already successful, the returned future is completed with the value.</li>
+     *     <li>If the DFV is already in error, the returned future is completed exceptionally
+     *         with that error.</li>
+     *     <li>If the DFV is still pending, the future is completed when the DFV completes,
+     *         either normally or exceptionally.</li>
+     *     <li>Each call returns a new, independent future view.</li>
+     * </ul>
+     *
+     * @return a {@link CompletableFuture} reflecting this variable's completion
+     */
+    CompletableFuture<T> toFuture() {
+        CompletableFuture<T> cf = new CompletableFuture<>()
+
+        // Already completed?
+        if (isBound()) {
+            if (hasError()) {
+                cf.completeExceptionally(getError())
+            } else {
+                try {
+                    cf.complete(get())
+                } catch (Throwable t) {
+                    cf.completeExceptionally(t)
+                }
+            }
+            return cf
+        }
+
+        // Still pending: wire listeners.
+        whenAvailable { T v ->
+            if (!cf.isDone()) {
+                cf.complete(v)
+            }
+        }
+
+        whenError { Throwable t ->
+            if (!cf.isDone()) {
+                cf.completeExceptionally(t)
+            }
+        }
+
+        return cf
     }
 
     // =============================================================================================
@@ -213,9 +265,9 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     DataflowVariable<T> whenAvailable(Consumer<? super T> callback) {
         if (isSuccess()) {
             callback.accept(get())
-        } else if (!isError()) {
+        } else if (!hasError()) {
             whenBound { T v ->
-                if (!isError()) {
+                if (!hasError()) {
                     callback.accept(v)
                 }
             }
@@ -234,11 +286,11 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * </ul>
      */
     DataflowVariable<T> whenError(Closure<?> handler) {
-        if (isError()) {
+        if (hasError()) {
             handler.call(getError())
         } else {
             whenBound {
-                if (isError()) {
+                if (hasError()) {
                     handler.call(getError())
                 }
             }

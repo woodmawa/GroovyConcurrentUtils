@@ -1,4 +1,4 @@
-package org.softwood.dataflow.queue
+package org.softwood.reactive
 
 /**
  * Custom exceptions for queue-specific error scenarios

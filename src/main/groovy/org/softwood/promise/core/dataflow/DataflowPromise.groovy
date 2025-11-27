@@ -103,12 +103,13 @@ class DataflowPromise<T> implements Promise<T> {
      */
     @Override
     T get(long timeout, TimeUnit unit) throws TimeoutException {
+        CompletableFuture<T> future = variable.toFuture()
         try {
-            return variable.toFuture().get(timeout, unit)
+            return future.get(timeout, unit)
         } catch (TimeoutException e) {
             throw e
         } catch (ExecutionException e) {
-            Throwable cause = e.cause ?: e
+            Throwable cause = e.getCause()
             if (cause instanceof Exception) {
                 throw (Exception) cause
             }

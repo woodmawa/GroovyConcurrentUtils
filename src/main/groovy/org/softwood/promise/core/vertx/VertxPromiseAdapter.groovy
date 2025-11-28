@@ -165,9 +165,15 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
             log.warn("Cannot accept(T) on already completed / externally owned Vert.x Future")
             return this
         }
-        context.runOnContext({ Void v ->
+        // If we're already on a Vert.x context, complete directly
+        if (Vertx.currentContext() == context) {
             promise.tryComplete(value)
-        } as Handler<Void>)
+        } else {
+            context.runOnContext({ Void v ->
+                promise.tryComplete(value)
+            } as Handler<Void>)
+        }
+
         return this
     }
 

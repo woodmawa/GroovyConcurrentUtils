@@ -12,18 +12,20 @@ import java.util.function.Function
 import java.util.function.Supplier
 
 import static org.junit.jupiter.api.Assertions.*
+import static org.awaitility.Awaitility.await
+import static java.util.concurrent.TimeUnit.SECONDS
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VertxPromiseAdapterTest {
 
     Vertx vertx
 
-    @BeforeAll
+    @BeforeEach
     void setup() {
         vertx = Vertx.vertx()
     }
 
-    @AfterAll
+    @AfterEach
     void teardown() {
         vertx.close()
     }
@@ -127,6 +129,9 @@ class VertxPromiseAdapterTest {
         assertFalse(p.isDone())
 
         p.accept("done")
+
+        //there can be delay before the thread schedules the accept
+        await().atMost(1, SECONDS).until { p.isDone() }
 
         assertTrue(p.isDone())
     }

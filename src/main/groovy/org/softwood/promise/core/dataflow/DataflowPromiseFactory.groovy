@@ -48,7 +48,7 @@ class DataflowPromiseFactory implements PromiseFactory {
 
     /** {@inheritDoc} */
     <T> Promise<T> createFailedPromise(Throwable cause) {
-        def dv = new DataflowVariable<T>()
+        def dv = dataflowFactory.createDataflowVariable()
         dv.bindError(cause)
         return new DataflowPromise<T>(dv)
     }
@@ -56,7 +56,8 @@ class DataflowPromiseFactory implements PromiseFactory {
     /** {@inheritDoc} */
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
-        return new DataflowPromise<T>(DataflowFactory.task(task))
+        //use the instance factory
+        return new DataflowPromise<T>(dataflowFactory.task(task))
     }
 
     /** {@inheritDoc} */

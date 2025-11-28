@@ -87,6 +87,16 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
+     * Bind this variable to a value, synchronously notifying all listeners.
+     *
+     * @param val new value
+     * @return this variable
+     */
+    DataflowVariable<T> leftShift (T val) {
+        set (val)
+    }
+
+    /**
      * Alias for {@link #set(Object)} for Groovy convenience.
      */
     void bind(Object v) {
@@ -364,6 +374,17 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         }
 
         return then((Closure) closure)
+    }
+
+    /**
+     * Groovy right-shift operator support: dfv >> callback <=> {@link #whenAvailable(Consumer)}.
+     *
+     * @param callback A closure or Consumer to be invoked when the value is available.
+     * @return this DFV
+     */
+    DataflowVariable<T> rightShift(Object callback) {
+        // Groovy automatically coerces the Closure/Lambda into a Consumer for whenAvailable.
+        return whenAvailable(callback as Consumer)
     }
 
     /**

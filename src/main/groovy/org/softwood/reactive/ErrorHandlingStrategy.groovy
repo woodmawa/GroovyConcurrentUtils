@@ -1,5 +1,7 @@
 package org.softwood.reactive
 
+import java.time.Duration
+
 /**
  * Common error-handling strategy used by reactive components such as
  * DataflowTopic and DataflowWorkQueue.
@@ -15,4 +17,7 @@ interface ErrorHandlingStrategy {
  */
     void onError(Throwable t, Object item, ErrorMode mode)
     void onError(Throwable t, Object item)
+    boolean getLogErrors ()
+
+    Duration getPublishTimeout ()
 }

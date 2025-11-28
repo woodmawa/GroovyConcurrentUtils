@@ -10,113 +10,47 @@ import java.util.concurrent.ExecutorService
  */
 @Slf4j
 class DataflowFactory {
-    private static ConcurrentPool defaultPool
 
-    /**
-    * Maps threads/tasks to parallel groups they belong to
-    */
-    public static ConcurrentPool activePool
     private final ConcurrentPool pool
 
-    static  {
-        if (defaultPool == null) {
-            def newPool = new ConcurrentPool ()
-            activePool = newPool
-            defaultPool = newPool
-            log.debug "default pool was null - just created new active pool"
-        }
-        activePool
+    DataflowFactory() {
+        this.pool = new ConcurrentPool("dataflow")
     }
 
-
-    DataflowFactory() {}
-
-    /**
-     * if given new pool just use the one provided
-     *
-     * @param pool
-     */
     DataflowFactory(ConcurrentPool pool) {
         this.pool = pool
-        activePool = pool
     }
 
-    /**
-     * using passed in ExecutorService creat a Pool with that
-     *
-     * @param executor
-     */
-    DataflowFactory(ExecutorService executor ) {
-        this.pool = new ConcurrentPool (executor)
-        activePool = pool
+    DataflowFactory(ExecutorService executor) {
+        this.pool = new ConcurrentPool(executor)
     }
 
-
-    /**
-     * Sets the default executor to use for new DataFlow instances
-     * @param executor The executor to use
-     */
-    static void setDefaultPool(ConcurrentPool pool) {
-        defaultPool = pool
-        activePool = pool
-    }
-
-    /**
-     * Creates a new DataFlowVariable
-     * @return A new DataFlowVariable
-     */
     <T> DataflowVariable<T> createDataflowVariable() {
-        return new DataflowVariable<T>()
+        // Use the same pool for DFV so its async listeners share this pool
+        return new DataflowVariable<T>(pool)
     }
 
-    /**
-     * Creates a new DataFlowVariable with an initial value
-     * @param initialValue The initial value for the variable
-     * @return A new DataFlowVariable with the given initial value
-     */
     <T> DataflowVariable<T> createDataflowVariable(T initialValue) {
-        def variable = new DataflowVariable<T>()
+        def variable = new DataflowVariable<T>(pool)
         variable.set(initialValue)
         return variable
     }
 
-
-    /**
-     * Executes the given task asynchronously using the configured executor
-     * @param task The task to execute
-     * @return A DataFlowVariable that will contain the result of the task
-     */
-    static <T> DataflowVariable<T> task(Closure<T> task) {
-        DataflowVariable variable = new DataflowVariable<T>()
-        activePool.executor.submit {
+    <T> DataflowVariable<T> task(Closure<T> task) {
+        DataflowVariable<T> variable = new DataflowVariable<T>(pool)
+        pool.executor.submit {
             try {
-                //todo if call throws execption outside of the variable,
-                // then the value is never set to initialised and get will block ()
                 T result = task.call()
                 variable.set(result)
             } catch (Throwable e) {
-
-                variable.setError(e)
-
-                // Make sure the future is also completed exceptionally
-                if (!variable.isDone()) {
-                    variable.setError (e)
-                }
-
-                // Ensure the state is set to INITIALIZED
-                variable.state.set(DataFlowExpression.DataFlowState.INITIALIZED)
-
+                variable.bindError(e)
                 log.error("Task(): Task execution failed", e)
             }
         }
         return variable
     }
 
-    /**
-     * Returns the executor used by this DataFlow instance
-     * @return The executor
-     */
     ExecutorService getExecutor() {
-        return activePool.executor
+        return pool.executor
     }
 }

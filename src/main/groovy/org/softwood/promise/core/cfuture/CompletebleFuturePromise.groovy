@@ -10,193 +10,223 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
+import java.util.function.Predicate
 import java.util.function.Supplier
 
 /**
  * {@link Promise} implementation backed by {@link CompletableFuture}.
  *
- * <p>{@code CompletableFuturePromise} is a minimal adapter that forwards all
- * completion and composition operations to an underlying {@link CompletableFuture}.
- * It provides interoperability with Java's standard async abstraction while
- * conforming to the {@link Promise} API.</p>
+ * <p>This adapter provides a full compliance layer between the enriched
+ * {@link org.softwood.promise.Promise} API and Java's standard
+ * {@link CompletableFuture}.</p>
  *
- * @param <T> type of the promised value
+ * <h2>Supported operations:</h2>
+ * <ul>
+ *   <li>Direct completion ({@link #accept})</li>
+ *   <li>Lazy supplier completion ({@link #accept})</li>
+ *   <li>Completion via another Promise or CompletableFuture</li>
+ *   <li>Blocking {@link #get} and timed {@link #get}</li>
+ *   <li>Functional transforms: {@link #then}, {@link #map}, {@link #flatMap}, {@link #recover}</li>
+ *   <li>Filtering: {@link #filter}</li>
+ *   <li>Error observation via {@link #onError}</li>
+ * </ul>
+ *
+ * <p>This implementation performs no special threading behaviour—
+ * all async chaining uses the default execution rules of {@link CompletableFuture}.</p>
+ *
+ * @param <T> value type
  */
 @Slf4j
-@ToString
+@ToString(includeNames = true)
 class CompletableFuturePromise<T> implements Promise<T> {
 
-    /** Underlying Java {@link CompletableFuture}. */
+    /** Wrapped Java {@link CompletableFuture}. */
     private final CompletableFuture<T> future
 
-    /**
-     * Construct a new adapter over an existing {@link CompletableFuture}.
-     *
-     * @param future future to wrap; must not be null
-     */
     CompletableFuturePromise(CompletableFuture<T> future) {
         this.future = future
     }
 
-    /** {@inheritDoc} */
+    // -------------------------------------------------------------------------
+    // Completion
+    // -------------------------------------------------------------------------
+
     @Override
     Promise<T> accept(T value) {
         future.complete(value)
         return this
     }
 
-    /** {@inheritDoc} */
     @Override
     Promise<T> accept(Supplier<T> supplier) {
-        future.complete(supplier.get())
-        return this
-    }
-
-    /**
-     * Wire this promise to complete when the given {@link CompletableFuture} completes.
-     *
-     * <p>Success and failure are forwarded to this adapter's underlying future
-     * via {@link CompletableFuture#complete(Object)} and
-     * {@link CompletableFuture#completeExceptionally(Throwable)} respectively.</p>
-     *
-     * @param otherFuture source future
-     * @return this promise for fluent chaining
-     */
-    @Override
-    Promise<T> accept(CompletableFuture<T> otherFuture) {
-        otherFuture.whenComplete { T value, Throwable error ->
-            if (error != null) {
-                future.completeExceptionally(error)
-            } else {
-                future.complete(value)
-            }
-        }
-        return this
-    }
-
-    /**
-     * Wire this promise to complete when the given {@link Promise} completes.
-     *
-     * <p>Success is forwarded to {@link CompletableFuture#complete(Object)};
-     * failure is forwarded to {@link CompletableFuture#completeExceptionally(Throwable)}.</p>
-     *
-     * @param otherPromise source promise
-     * @return this promise for fluent chaining
-     */
-    @Override
-    Promise<T> accept(Promise<T> otherPromise) {
-        otherPromise.onComplete { T v ->
-            future.complete(v)
-        }
-        otherPromise.onError { Throwable e ->
+        try {
+            future.complete(supplier.get())
+        } catch (Throwable e) {
             future.completeExceptionally(e)
         }
         return this
     }
 
-    /** {@inheritDoc} */
+    @Override
+    Promise<T> accept(CompletableFuture<T> other) {
+        other.whenComplete { T val, Throwable err ->
+            if (err != null) future.completeExceptionally(err)
+            else future.complete(val)
+        }
+        return this
+    }
+
+    @Override
+    Promise<T> accept(Promise<T> other) {
+        other.onComplete { T v -> future.complete(v) }
+        other.onError { Throwable e -> future.completeExceptionally(e) }
+        return this
+    }
+
+    // -------------------------------------------------------------------------
+    // Blocking Getters
+    // -------------------------------------------------------------------------
+
     @Override
     T get() throws Exception {
         return future.get()
     }
 
-    /** {@inheritDoc} */
     @Override
     T get(long timeout, TimeUnit unit) throws TimeoutException {
-        // Note: underlying CompletableFuture.get may also throw checked exceptions
-        // such as ExecutionException or InterruptedException; those will be surfaced
-        // according to the Groovy/bytecode view of this signature.
-        return future.get(timeout, unit)
+        try {
+            return future.get(timeout, unit)
+        } catch (TimeoutException te) {
+            throw te
+        }
     }
 
-    /** {@inheritDoc} */
     @Override
     boolean isDone() {
         return future.isDone()
     }
 
-    /** {@inheritDoc} */
+    // -------------------------------------------------------------------------
+    // Callbacks
+    // -------------------------------------------------------------------------
+
     @Override
     Promise<T> onComplete(Consumer<T> callback) {
         future.thenAccept(callback)
         return this
     }
 
-    /**
-     * Transform the underlying {@link CompletableFuture} via {@link CompletableFuture#thenApply(Function)}.
-     *
-     * @param function transform from T to R
-     * @param <R> new result type
-     * @return a new {@link CompletableFuturePromise} wrapping the transformed future
-     */
     @Override
-    <R> Promise<R> then(Function<T, R> function) {
-        CompletableFuture<R> mapped = future.thenApply(function)
-        return new CompletableFuturePromise<R>(mapped)
-    }
-
-    /** {@inheritDoc} */
-    @Override
-    Promise<T> onError(Consumer<Throwable> errorHandler) {
-        // We attach an exceptionally stage that only invokes the handler;
-        // the returned future is ignored so as not to alter the main future's pipeline.
-        future.exceptionally { Throwable error ->
-            errorHandler.accept(error)
+    Promise<T> onError(Consumer<Throwable> callback) {
+        future.exceptionally { Throwable err ->
+            callback.accept(err)
             return null
         }
         return this
     }
 
-    /** {@inheritDoc} */
+    // -------------------------------------------------------------------------
+    // Basic transforms: then / recover
+    // -------------------------------------------------------------------------
+
+    @Override
+    <R> Promise<R> then(Function<T, R> fn) {
+        CompletableFuture<R> mapped = future.thenApply(fn)
+        return new CompletableFuturePromise<R>(mapped)
+    }
+
     @Override
     Promise<T> fail(Throwable error) {
         future.completeExceptionally(error)
         return this
     }
 
-    /**
-     * Recover from failure using {@code CompletableFuture#handle(BiFunction)} semantics.
-     *
-     * <p>If this promise completes successfully, the recovered promise completes with
-     * the same value (cast to {@code R}). If it completes with an error, the
-     * {@code recovery} function is invoked with that error (unwrapping
-     * {@link CompletionException} when present) and its result is used as the
-     * recovered value.</p>
-     *
-     * @param recovery mapping from {@link Throwable} to recovered value
-     * @param <R> recovered result type
-     * @return a new {@link CompletableFuturePromise} of {@code R}
-     */
     @Override
-    <R> Promise<R> recover(Function<Throwable, R> recovery) {
-        CompletableFuture<R> recovered = future.handle { T value, Throwable error ->
-            if (error == null) {
-                // Success path – pass through value, cast to R
-                return (R) value
+    <R> Promise<R> recover(Function<Throwable, R> fn) {
+        CompletableFuture<R> recovered = future.handle { T val, Throwable err ->
+            if (err == null) {
+                return (R) val
             } else {
-                // Unwrap CompletionException to expose underlying cause where possible
-                Throwable cause = (error instanceof CompletionException && error.cause != null)
-                        ? error.cause
-                        : error
-                return recovery.apply(cause)
+                Throwable cause = (err instanceof CompletionException && err.cause != null)
+                        ? err.cause
+                        : err
+                return fn.apply(cause)
             }
         }
         return new CompletableFuturePromise<R>(recovered)
     }
 
+    // -------------------------------------------------------------------------
+    // Functional API: map / flatMap / filter
+    // -------------------------------------------------------------------------
+
     /**
-     * Groovy coercion hook. Supports coercion to {@link CompletableFuture}.
-     *
-     * @param clazz requested coercion class; must be {@link CompletableFuture}.class
-     * @return the underlying {@link CompletableFuture}
-     * @throws RuntimeException if clazz is not {@link CompletableFuture}.class
+     * @see Promise#map(Function)
      */
+    @Override
+    <R> Promise<R> map(Function<? super T, ? extends R> mapper) {
+        CompletableFuture<R> mapped = future.thenApply { T v ->
+            mapper.apply(v)
+        }
+        return new CompletableFuturePromise<R>(mapped)
+    }
+
+    /**
+     * @see Promise#flatMap(Function)
+     */
+    @Override
+    <R> Promise<R> flatMap(Function<? super T, Promise<R>> mapper) {
+        CompletableFuture<R> chained = future.thenCompose { T v ->
+            Promise<R> inner
+            try {
+                inner = mapper.apply(v)
+                if (inner == null)
+                    throw new NullPointerException("flatMap mapper returned null Promise")
+            } catch (Throwable t) {
+                return CompletableFuture.failedFuture(t)
+            }
+
+            // Extract inner CompletableFuture
+            if (!(inner instanceof CompletableFuturePromise)) {
+                return CompletableFuture.failedFuture(
+                        new IllegalArgumentException("flatMap: Promise must be a CompletableFuturePromise")
+                )
+            }
+
+            CompletableFuturePromise<R> cfInner = (CompletableFuturePromise<R>) inner
+            return cfInner.future
+        }
+
+        return new CompletableFuturePromise<R>(chained)
+    }
+
+    /**
+     * @see Promise#filter(Predicate)
+     */
+    @Override
+    Promise<T> filter(Predicate<? super T> predicate) {
+        CompletableFuture<T> filtered = future.thenCompose { T v ->
+            try {
+                if (predicate.test(v))
+                    return CompletableFuture.completedFuture(v)
+                else
+                    return CompletableFuture.failedFuture(new NoSuchElementException("Predicate not satisfied"))
+            } catch (Throwable t) {
+                return CompletableFuture.failedFuture(t)
+            }
+        }
+        return new CompletableFuturePromise<T>(filtered)
+    }
+
+    // -------------------------------------------------------------------------
+    // asType
+    // -------------------------------------------------------------------------
+
     @Override
     CompletableFuture<T> asType(Class clazz) {
         if (clazz == CompletableFuture) {
-            return this.future
-        } else {
-            throw new RuntimeException("conversion to type $clazz not supported")
+            return future
         }
+        throw new RuntimeException("conversion to type $clazz not supported")
     }
 }

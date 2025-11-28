@@ -7,6 +7,7 @@ import java.util.concurrent.*
 import java.util.concurrent.atomic.*
 
 import static org.junit.jupiter.api.Assertions.*
+import static org.awaitility.Awaitility.await
 
 /**
  * Complete and corrected JUnit 5 test suite for Dataflows.
@@ -103,7 +104,10 @@ class DataflowsTest {
         df.result { v -> ref.set(v) }
         df.result = 123
 
-        Thread.sleep(50)
+        // whenBound is async now – wait for callback instead of sleeping
+        await()
+                .atMost(1, TimeUnit.SECONDS)
+                .until { ref.get() == 123 }
 
         assertEquals(123, ref.get())
     }

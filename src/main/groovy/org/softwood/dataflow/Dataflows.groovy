@@ -31,15 +31,31 @@ class Dataflows extends GroovyObjectSupport {
     /** Backing storage for propertyName → DataflowVariable. */
     private final ConcurrentMap<Object, DataflowVariable<?>> variables = new ConcurrentHashMap<>()
 
+    /** Factory used to create new DataflowVariables for this namespace. */
+    private final DataflowFactory factory
+
     // ---------------------------------------------------------------------
     // Constructors
     // ---------------------------------------------------------------------
 
     /**
-     * Creates an empty {@code Dataflows} container.
+     * Creates an empty {@code Dataflows} container backed by a default {@link DataflowFactory}.
      */
     Dataflows() {
-        log.debug "Dataflows instance created"
+        this(new DataflowFactory())
+    }
+
+    /**
+     * Creates an empty {@code Dataflows} container backed by the supplied {@link DataflowFactory}.
+     *
+     * @param factory factory used to create all underlying {@link DataflowVariable} instances
+     */
+    Dataflows(DataflowFactory factory) {
+        if (factory == null) {
+            throw new IllegalArgumentException("DataflowFactory must not be null")
+        }
+        this.factory = factory
+        log.debug "Dataflows instance created with factory $factory"
     }
 
     // ---------------------------------------------------------------------
@@ -194,7 +210,7 @@ class Dataflows extends GroovyObjectSupport {
         if (existing != null)
             return existing
 
-        DataflowVariable<?> created = new DataflowVariable<>()
+        DataflowVariable<?> created = factory.createDataflowVariable()
         existing = variables.putIfAbsent(key, created)
         return existing != null ? existing : created
     }
@@ -212,13 +228,13 @@ class Dataflows extends GroovyObjectSupport {
             DataflowVariable<?> source = (DataflowVariable<?>) newValue
             source.whenBound("Dataflows::bindToDFV") { v ->
                 try {
-                    target.set(v)
+                    target.bind(v)
                 } catch (DataflowException ignored) {
                     log.debug "DFV '$key' already bound during wiring completion"
                 }
             }
         } else {
-            target.set(newValue)
+            target.bind(newValue)
         }
     }
 
@@ -239,7 +255,7 @@ class Dataflows extends GroovyObjectSupport {
         DataflowVariable<?> dfv = variables.remove(name)
         if (dfv != null && !dfv.isBound()) {
             try {
-                dfv.set(null)
+                dfv.bind(null)
             } catch (DataflowException ignored) {
                 // may have been bound concurrently
             }
@@ -254,7 +270,7 @@ class Dataflows extends GroovyObjectSupport {
         variables.forEach { k, dfv ->
             if (!dfv.isBound()) {
                 try {
-                    dfv.set(null)
+                    dfv.bind(null)
                 } catch (ignored) {
                     // ignore concurrent binding
                 }

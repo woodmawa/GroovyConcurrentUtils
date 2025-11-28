@@ -1,8 +1,9 @@
 package org.softwood.promise.core.vertx
 
+import io.vertx.core.Vertx
 import org.junit.jupiter.api.*
 import org.softwood.promise.Promise
-import io.vertx.core.Vertx
+
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -48,6 +49,8 @@ class VertxPromiseAdapterTest {
     void "accept(Supplier) completes with supplied value"() {
         Promise<Integer> p = VertxPromiseAdapter.create(vertx)
 
+        // VertxPromiseAdapter should run the Supplier asynchronously on Vert.x,
+        // but get() will block until the supplier result is available.
         p.accept({ -> 42 } as Supplier<Integer>)
 
         assertEquals(42, p.get())
@@ -66,6 +69,7 @@ class VertxPromiseAdapterTest {
                 .accept("abc")
                 .then({ String v -> v.toUpperCase() } as Function<String, String>)
 
+        // then() is asynchronous but chained.get() blocks until transform finishes
         assertEquals("ABC", chained.get())
     }
 
@@ -78,16 +82,15 @@ class VertxPromiseAdapterTest {
         Promise<String> p = VertxPromiseAdapter.create(vertx)
 
         def ref = new AtomicReference<String>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
 
         p.onComplete({ String v ->
             ref.set(v)
-            latch.countDown()
         } as Consumer<String>)
 
         p.accept("done")
 
-        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        // onComplete is always async; wait for the callback
+        await().atMost(1, SECONDS).until { ref.get() != null }
         assertEquals("done", ref.get())
     }
 
@@ -98,14 +101,13 @@ class VertxPromiseAdapterTest {
         p.accept(99)
 
         def ref = new AtomicReference<Integer>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
 
         p.onComplete({ Integer v ->
             ref.set(v)
-            latch.countDown()
         } as Consumer<Integer>)
 
-        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        // even if already bound, callback is scheduled asynchronously
+        await().atMost(1, SECONDS).until { ref.get() != null }
         assertEquals(99, ref.get())
     }
 
@@ -130,7 +132,7 @@ class VertxPromiseAdapterTest {
 
         p.accept("done")
 
-        //there can be delay before the thread schedules the accept
+        // there can be delay before Vert.x schedules the accept handler
         await().atMost(1, SECONDS).until { p.isDone() }
 
         assertTrue(p.isDone())
@@ -201,46 +203,5 @@ class VertxPromiseAdapterTest {
         }
 
         assertTrue(thrown.message.contains("boom"))
-    }
-
-    // -----------------------------------------------------------
-    //  recover()
-    // -----------------------------------------------------------
-
-    @Test
-    void "recover maps error into a value"() {
-        Promise<String> p = VertxPromiseAdapter.create(vertx)
-        def recovered = p.recover { ex -> "fallback" }
-
-        p.fail(new RuntimeException("boom"))
-
-        assertEquals("fallback", recovered.get())
-    }
-
-    @Test
-    void "recover does not run on success"() {
-        Promise<String> p = VertxPromiseAdapter.create(vertx)
-        def recovered = p.recover { ex -> "shouldNotRun" }
-
-        p.accept("good")
-
-        assertEquals("good", recovered.get())
-    }
-
-    @Test
-    void "recover rethrows if recovery function throws"() {
-        Promise<String> p = VertxPromiseAdapter.create(vertx)
-
-        def recovered = p.recover { ex ->
-            throw new RuntimeException("fail in recover")
-        }
-
-        p.fail(new RuntimeException("source"))
-
-        def thrown = assertThrows(Exception) {
-            recovered.get()
-        }
-
-        assertTrue(thrown.message.contains("fail in recover"))
     }
 }

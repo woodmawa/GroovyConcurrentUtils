@@ -223,4 +223,132 @@ class CompletableFuturePromiseTest {
 
         assertTrue(thrown.message.contains("fail in recover"))
     }
+
+    // -----------------------------------------------------------
+//  map()
+// -----------------------------------------------------------
+
+    @Test
+    void "map transforms value"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def mapped = p.map { v -> v * 2 }
+
+        p.accept(10)
+
+        assertEquals(20, mapped.get())
+    }
+
+    @Test
+    void "map propagates error"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def mapped = p.map { v -> v * 2 }
+
+        p.fail(new RuntimeException("mapErr"))
+
+        def ex = assertThrows(Exception) { mapped.get() }
+        assertTrue(ex.message.contains("mapErr"))
+    }
+
+// -----------------------------------------------------------
+//  flatMap()
+// -----------------------------------------------------------
+
+    @Test
+    void "flatMap maps and flattens inner promise"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def chained = p.flatMap { v ->
+            def inner = new CompletableFuturePromise<>(new CompletableFuture<Integer>())
+            inner.accept(v + 5)
+            return inner
+        }
+
+        p.accept(10)
+
+        assertEquals(15, chained.get())
+    }
+
+    @Test
+    void "flatMap propagates inner error"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def chained = p.flatMap { v ->
+            def inner = new CompletableFuturePromise<>(new CompletableFuture<Integer>())
+            inner.fail(new RuntimeException("innerFail"))
+            return inner
+        }
+
+        p.accept(10)
+
+        def ex = assertThrows(Exception) { chained.get() }
+        assertTrue(ex.message.contains("innerFail"))
+    }
+
+    @Test
+    void "flatMap propagates outer error"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def chained = p.flatMap { v ->
+            new CompletableFuturePromise<>(new CompletableFuture<Integer>())
+        }
+
+        p.fail(new RuntimeException("outerFail"))
+
+        def ex = assertThrows(Exception) { chained.get() }
+        assertTrue(ex.message.contains("outerFail"))
+    }
+
+    @Test
+    void "flatMap null inner promise produces error"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def chained = p.flatMap { v -> null }
+
+        p.accept(10)
+
+        def ex = assertThrows(Exception) { chained.get() }
+        assertTrue(ex.message.contains("null"))
+    }
+
+// -----------------------------------------------------------
+//  filter()
+// -----------------------------------------------------------
+
+    @Test
+    void "filter passes value when predicate is true"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def filtered = p.filter { v -> v > 5 }
+
+        p.accept(10)
+
+        assertEquals(10, filtered.get())
+    }
+
+    @Test
+    void "filter fails when predicate is false"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def filtered = p.filter { v -> v > 5 }
+
+        p.accept(3)
+
+        def ex = assertThrows(Exception) { filtered.get() }
+        assertTrue(ex.message.contains("Predicate not satisfied"))
+    }
+
+    @Test
+    void "filter propagates source error"() {
+        Promise<Integer> p = new CompletableFuturePromise<>(new CompletableFuture<>())
+
+        def filtered = p.filter { v -> v > 5 }
+
+        p.fail(new RuntimeException("srcError"))
+
+        def ex = assertThrows(Exception) { filtered.get() }
+        assertTrue(ex.message.contains("srcError"))
+    }
+
 }

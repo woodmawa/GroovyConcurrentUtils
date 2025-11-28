@@ -1,69 +1,77 @@
-package org.softwood.dataflow;
+package org.softwood.dataflow
 
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Test
 
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.*
+import static org.awaitility.Awaitility.await
 
 class DataflowExpressionTest {
 
     @Test
     void testSetValueAndGetValue() throws Exception {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
+        DataflowVariable<Integer> df = new DataflowVariable<>()
 
-        df.setValue(42);
+        df.setValue(42)
 
-        Integer result = df.getValue();
+        Integer result = df.getValue()
 
-        assertEquals(42, result);
-        assertTrue(df.isBound());
+        assertEquals(42, result)
+        assertTrue(df.isBound())
     }
 
     @Test
     void testWhenBoundCallbackTriggered() throws Exception {
-        DataflowVariable<String> df = new DataflowVariable<>();
+        DataflowVariable<String> df = new DataflowVariable<>()
 
-        AtomicBoolean callbackCalled = new AtomicBoolean(false);
+        AtomicBoolean callbackCalled = new AtomicBoolean(false)
 
-        df.whenBound("test", (value, msg) -> {
-            callbackCalled.set(true);
-            assertEquals("hello", value);
-            assertEquals("test", msg);
-        });
+        df.whenBound("test", { value, msg ->
+            callbackCalled.set(true)
+            assertEquals("hello", value)
+            assertEquals("test", msg)
+        })
 
-        df.setValue("hello");
+        df.setValue("hello")
 
-        assertTrue(callbackCalled.get(), "whenBound callback was not invoked");
+        // callback is scheduled asynchronously now, so wait for it
+        await()
+                .atMost(1, TimeUnit.SECONDS)
+                .until { callbackCalled.get() }
+
+        assertTrue(callbackCalled.get(), "whenBound callback was not invoked")
     }
 
     @Test
     void testThenTransformation() throws Exception {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
+        DataflowVariable<Integer> df = new DataflowVariable<>()
 
-        var doubled = df.then(v -> v * 2);
+        def doubled = df.then { v -> v * 2 }
 
-        df.setValue(21);
+        df.setValue(21)
 
-        assertEquals(42, doubled.getValue());
+        assertEquals(42, doubled.getValue())
     }
 
     @Test
     void testSetErrorPropagates() {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
+        DataflowVariable<Integer> df = new DataflowVariable<>()
 
-        df.setError(new DataflowException("boom"));
+        df.setError(new DataflowException("boom"))
 
-        DataflowException ex = assertThrows(DataflowException.class, df::getValue);
-        assertEquals("boom", ex.getMessage());
-        assertTrue(df.hasError());
+        DataflowException ex = assertThrows(DataflowException.class, df::getValue)
+        assertEquals("boom", ex.getMessage())
+        assertTrue(df.hasError())
     }
 
     @Test
     void testTimeoutGet() throws Exception {
-        DataflowVariable<String> df = new DataflowVariable<>();
+        DataflowVariable<String> df = new DataflowVariable<>()
 
-        assertThrows(Exception.class, () -> df.getValue(100, TimeUnit.MILLISECONDS));
+        assertThrows(Exception.class) {
+            df.getValue(100, TimeUnit.MILLISECONDS)
+        }
     }
 }

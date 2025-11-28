@@ -47,16 +47,22 @@ class DataflowPromiseFactory implements PromiseFactory {
     }
 
     /** {@inheritDoc} */
+    @Override
     <T> Promise<T> createFailedPromise(Throwable cause) {
-        def dv = dataflowFactory.createDataflowVariable()
+        DataflowVariable<T> dv = dataflowFactory.createDataflowVariable()
         dv.bindError(cause)
         return new DataflowPromise<T>(dv)
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The supplied closure is executed asynchronously on the {@link DataflowFactory}'s worker pool
+     * via {@link DataflowFactory#task(groovy.lang.Closure)}, and the resulting {@link DataflowVariable}
+     * is wrapped in a {@link DataflowPromise}.</p>
+     */
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
-        //use the instance factory
         return new DataflowPromise<T>(dataflowFactory.task(task))
     }
 

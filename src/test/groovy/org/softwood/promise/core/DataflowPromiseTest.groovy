@@ -1,9 +1,12 @@
 package org.softwood.promise.core
 
-import org.junit.jupiter.api.*
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import org.softwood.dataflow.DataflowFactory
 import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
 import org.softwood.promise.core.dataflow.DataflowPromise
+import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -14,6 +17,8 @@ import java.util.function.Function
 import java.util.function.Supplier
 
 import static org.junit.jupiter.api.Assertions.*
+import static org.awaitility.Awaitility.await
+import static java.util.concurrent.TimeUnit.SECONDS
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DataflowPromiseTest {
@@ -38,6 +43,8 @@ class DataflowPromiseTest {
         def dfv = new DataflowVariable<Integer>()
         Promise<Integer> promise = new DataflowPromise<>(dfv)
 
+        // accept(Supplier) now runs the supplier asynchronously on the DFV's executor,
+        // but promise.get() will block until the supplier completes.
         promise.accept({ -> 42 } as Supplier<Integer>)
 
         assertEquals(42, promise.get())
@@ -57,6 +64,7 @@ class DataflowPromiseTest {
                 .accept("abc")
                 .then({ String v -> v.toUpperCase() } as Function<String, String>)
 
+        // then() is asynchronous, but chained.get() will block until the transform finishes
         assertEquals("ABC", chained.get())
     }
 
@@ -70,16 +78,15 @@ class DataflowPromiseTest {
         Promise<String> p = new DataflowPromise<>(dfv)
 
         def ref = new AtomicReference<String>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
 
         p.onComplete({ String v ->
             ref.set(v)
-            latch.countDown()
         } as Consumer<String>)
 
         p.accept("done")
 
-        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        // onComplete is always asynchronous now; wait for the callback
+        await().atMost(1, SECONDS).until { ref.get() != null }
         assertEquals("done", ref.get())
     }
 
@@ -91,14 +98,13 @@ class DataflowPromiseTest {
         p.accept(99)
 
         def ref = new AtomicReference<Integer>()
-        def latch = new java.util.concurrent.CountDownLatch(1)
 
         p.onComplete({ Integer v ->
             ref.set(v)
-            latch.countDown()
         } as Consumer<Integer>)
 
-        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        // Even when the value was already bound, the callback is scheduled asynchronously
+        await().atMost(1, SECONDS).until { ref.get() != null }
         assertEquals(99, ref.get())
     }
 
@@ -125,6 +131,7 @@ class DataflowPromiseTest {
 
         p.accept("done")
 
+        // accept(T) completes synchronously, so isDone should immediately become true
         assertTrue(p.isDone())
     }
 
@@ -238,5 +245,64 @@ class DataflowPromiseTest {
         assertTrue(thrown.message.contains("fail in recover"))
     }
 
+    // =============================================================================================
+    // Promise API Enhancement Tests (map, flatMap, filter)
+    // =============================================================================================
 
+    @Test
+    void "flatMap maps value into another promise and flattens the result"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+
+        DataflowPromise<Integer> p = factory.createPromise(10)
+
+        def chained = p.flatMap { v ->
+            factory.createPromise(v + 5)
+        }
+
+        assertEquals(15, chained.get())
+    }
+
+    @Test
+    void "flatMap propagates errors from the outer promise"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+
+        DataflowPromise<Integer> p = factory.createPromise()
+        def chained = p.flatMap { v ->
+            factory.createPromise(v + 1)
+        }
+
+        p.fail(new RuntimeException("outer-fail"))
+
+        def ex = assertThrows(Exception) { chained.get() }
+        assertTrue(ex.message.contains("outer-fail"))
+    }
+
+    @Test
+    void "flatMap propagates errors from the inner promise"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+
+        DataflowPromise<Integer> p = factory.createPromise(10)
+
+        def chained = p.flatMap { v ->
+            def inner = factory.createPromise()
+            inner.fail(new RuntimeException("inner-fail"))
+            return inner
+        }
+
+        def ex = assertThrows(Exception) { chained.get() }
+        assertTrue(ex.message.contains("inner-fail"))
+    }
+
+    @Test
+    void "flatMap handles null inner promise as error"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+        DataflowPromise<Integer> p = factory.createPromise(10)
+
+        def chained = p.flatMap { v -> null }
+
+        def ex = assertThrows(Exception) { chained.get() }
+
+        assertTrue(ex instanceof NullPointerException)
+        assertTrue(ex.message.contains("null promise"))
+    }
 }

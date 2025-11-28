@@ -75,32 +75,43 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     // =============================================================================================
 
     /**
-     * Bind this variable to a value, synchronously notifying all listeners.
+     * Bind this variable to a value.
+     *
+     * <p>This is the primary API for completing a {@code DataflowVariable}. It delegates to
+     * {@link DataflowExpression#setValue(Object)} and triggers asynchronous listener
+     * notification.</p>
+     *
+     * @param v new value
+     */
+    void bind(Object v) {
+        setValue((T) v)
+        log.debug "df now set to $v"
+    }
+
+    /**
+     * Legacy alias for {@link #bind(Object)}.
      *
      * @param val new value
      * @return this variable
+     * @deprecated use {@link #bind(Object)} instead
      */
+    @Deprecated
     DataflowVariable<T> set(T val) {
-        setValue(val)     // synchronous notification
-        log.debug "df now set to $val"
+        bind(val)
         return this
     }
 
     /**
-     * Bind this variable to a value, synchronously notifying all listeners.
+     * Groovy left-shift operator alias for {@link #bind(Object)}.
      *
      * @param val new value
      * @return this variable
+     * @deprecated use {@link #bind(Object)} instead
      */
-    DataflowVariable<T> leftShift (T val) {
-        set (val)
-    }
-
-    /**
-     * Alias for {@link #set(Object)} for Groovy convenience.
-     */
-    void bind(Object v) {
-        set((T) v)
+    @Deprecated
+    DataflowVariable<T> leftShift(T val) {
+        bind(val)
+        return this
     }
 
     /**
@@ -133,12 +144,11 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     /**
      * Get the value with timeout.
      *
-     * <p>DataflowVariable semantics:
+     * <p>DataflowVariable semantics:</p>
      * <ul>
-     *     <li>If timeout elapses, return {@code null}</li>
-     *     <li>Record a timeout error in the DFV</li>
+     *     <li>If timeout elapses, return {@code null}.</li>
+     *     <li>Record a timeout error in the DFV.</li>
      * </ul>
-     * </p>
      */
     T get(long timeout, TimeUnit unit) {
         try {
@@ -157,7 +167,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
-     * Non-blocking read: returns null if pending or if error.
+     * Non-blocking read: returns {@code null} if pending or if error.
      */
     T getNonBlocking() {
         if (isSuccess()) return get()
@@ -165,7 +175,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
-     * Groovy call-operator support: {@code dfv()} <=> {@link #get()}.
+     * Groovy call-operator support: {@code dfv()} &lt;=&gt; {@link #get()}.
      */
     T call() { return get() }
 
@@ -181,7 +191,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
-     * A DFV is successful if:
+     * A DFV is successful if:</n>
      * <ul>
      *     <li>It is bound</li>
      *     <li>It has no error</li>
@@ -263,22 +273,29 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     /**
      * Register a success listener.
      *
-     * <p>Guarantees:</p>
+     * <p>Semantics:</p>
      * <ul>
-     *     <li>If already successful → invoked immediately</li>
-     *     <li>If pending → invoked when value binds</li>
-     *     <li>If error → never invoked</li>
+     *     <li>If already successful &rarr; the callback is scheduled asynchronously on this
+     *         variable's worker pool.</li>
+     *     <li>If pending &rarr; the callback is scheduled when the value binds.</li>
+     *     <li>If error &rarr; the callback is never invoked.</li>
      * </ul>
+     *
+     * <p>The callback is always invoked asynchronously (never on the caller thread) to
+     * avoid surprising re-entrancy.</p>
      *
      * @return this DFV
      */
     DataflowVariable<T> whenAvailable(Consumer<? super T> callback) {
-        if (isSuccess()) {
-            callback.accept(get())
-        } else if (!hasError()) {
-            whenBound { T v ->
-                if (!hasError()) {
+        if (callback == null) return this
+
+        // Always asynchronous via whenBoundAsync
+        whenBoundAsync { T v ->
+            if (isSuccess()) {
+                try {
                     callback.accept(v)
+                } catch (Throwable t) {
+                    log.error("Error in whenAvailable callback", t)
                 }
             }
         }
@@ -288,20 +305,25 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     /**
      * Register an error listener (Groovy Closure version).
      *
-     * <p>Guarantees:</p>
+     * <p>Semantics:</p>
      * <ul>
-     *     <li>If already in error → invoked immediately</li>
-     *     <li>If pending → invoked when error binds</li>
-     *     <li>If success → never invoked</li>
+     *     <li>If already in error &rarr; the callback is scheduled asynchronously on this
+     *         variable's worker pool.</li>
+     *     <li>If pending &rarr; the callback is scheduled when an error binds.</li>
+     *     <li>If success &rarr; the callback is never invoked.</li>
      * </ul>
+     *
+     * <p>The callback is always invoked asynchronously (never on the caller thread).</p>
      */
     DataflowVariable<T> whenError(Closure<?> handler) {
-        if (hasError()) {
-            handler.call(getError())
-        } else {
-            whenBound {
-                if (hasError()) {
+        if (handler == null) return this
+
+        whenBoundAsync {
+            if (hasError()) {
+                try {
                     handler.call(getError())
+                } catch (Throwable t) {
+                    log.error("Error in whenError callback", t)
                 }
             }
         }
@@ -309,7 +331,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
-     * Java Consumer variant of {@link #whenError(Closure)}.
+     * Java {@link Consumer} variant of {@link #whenError(Closure)}.
      */
     DataflowVariable<T> whenError(Consumer<Throwable> handler) {
         return whenError { Throwable t -> handler.accept(t) }
@@ -331,7 +353,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
                 R r = (xform.maximumNumberOfParameters == 0 ?
                         (R) xform.call() :
                         (R) xform.call(v))
-                out.set(r)
+                out.bind(r)
             } catch (Throwable t) {
                 out.bindError(t)
             }
@@ -377,7 +399,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     }
 
     /**
-     * Groovy right-shift operator support: dfv >> callback <=> {@link #whenAvailable(Consumer)}.
+     * Groovy right-shift operator support: {@code dfv >> callback} &lt;=&gt; {@link #whenAvailable(Consumer)}.
      *
      * @param callback A closure or Consumer to be invoked when the value is available.
      * @return this DFV
@@ -394,12 +416,12 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         DataflowVariable<T> out = new DataflowVariable<T>(pool)
 
         // success path
-        whenAvailable { T v -> out.set(v) }
+        whenAvailable { T v -> out.bind(v) }
 
         // error path
         whenError { Throwable ex ->
             try {
-                out.set(fn.apply(ex))
+                out.bind(fn.apply(ex))
             } catch (Throwable t) {
                 out.bindError(t)
             }
@@ -413,57 +435,112 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     // =============================================================================================
 
     /**
-     * Ensure any constant operand is wrapped as a DVF.
+     * Ensure any constant operand is wrapped as a DFV using this variable's pool.
      */
     private DataflowVariable wrapOperand(Object operand) {
-        if (operand instanceof DataflowVariable) return operand
+        if (operand instanceof DataflowVariable) {
+            return (DataflowVariable) operand
+        }
         DataflowVariable dfv = new DataflowVariable(pool)
-        dfv.set(operand)
+        dfv.bind(operand)
         return dfv
     }
 
     /**
+     * Internal helper for binary operations between this DFV and another operand.
+     *
+     * @param other  scalar value or another {@link DataflowVariable}
+     * @param op     closure taking (leftValue, rightValue) and producing the result
+     * @return new {@link DataflowVariable} representing the asynchronous result
+     */
+    private DataflowVariable binaryOp(Object other, Closure op) {
+        DataflowVariable rhs = wrapOperand(other)
+        DataflowVariable result = new DataflowVariable(pool)
+
+        // this success path
+        this.whenAvailable { av ->
+            // rhs success path
+            rhs.whenAvailable { bv ->
+                try {
+                    result.bind(op.call(av, bv))
+                } catch (Throwable t) {
+                    result.bindError(t)
+                }
+            }
+            // rhs error path
+            rhs.whenError { Throwable t ->
+                result.bindError(t)
+            }
+        }
+
+        // this error path
+        this.whenError { Throwable t ->
+            result.bindError(t)
+        }
+
+        return result
+    }
+
+    /**
+     * Groovy {@code +} operator: {@code dfv1 + dfv2}, {@code dfv + 10}.
+     */
+    @CompileDynamic
+    DataflowVariable plus(Object other) {
+        return binaryOp(other) { a, b -> a + b }
+    }
+
+    /**
+     * Groovy {@code -} operator: {@code dfv1 - dfv2}, {@code dfv - 10}.
+     */
+    @CompileDynamic
+    DataflowVariable minus(Object other) {
+        return binaryOp(other) { a, b -> a - b }
+    }
+
+    /**
+     * Groovy {@code *} operator: {@code dfv1 * dfv2}, {@code dfv * 10}.
+     */
+    @CompileDynamic
+    DataflowVariable multiply(Object other) {
+        return binaryOp(other) { a, b -> a * b }
+    }
+
+    /**
+     * Groovy {@code /} operator: {@code dfv1 / dfv2}, {@code dfv / 10}.
+     */
+    @CompileDynamic
+    DataflowVariable div(Object other) {
+        return binaryOp(other) { a, b -> a / b }
+    }
+
+
+    /**
      * Dynamic operator handling for Groovy DSL expressions.
      *
-     * Supported ops:
-     * <ul>
-     *     <li>"plus"</li>
-     *     <li>"minus"</li>
-     *     <li>"multiply"</li>
-     *     <li>"div"</li>
-     * </ul>
+     * <p>For the standard arithmetic operators ({@code plus}, {@code minus},
+     * {@code multiply}, {@code div}) the explicit operator overloads above are
+     * preferred and will normally be used by the Groovy compiler. This method
+     * remains as a generic fallback hook for any future DSL operations.</p>
      */
     @CompileDynamic
     def methodMissing(String name, Object args) {
         Object[] arr = (Object[]) args
         Object rawOther = arr.length > 0 ? arr[0] : null
 
-        DataflowVariable rhs = wrapOperand(rawOther)
-
-        Closure op
         switch (name) {
-            case "plus":     op = { a, b -> a + b }; break
-            case "minus":    op = { a, b -> a - b }; break
-            case "multiply": op = { a, b -> a * b }; break
-            case "div":      op = { a, b -> a / b }; break
+            case "plus":
+                return plus(rawOther)
+            case "minus":
+                return minus(rawOther)
+            case "multiply":
+                return multiply(rawOther)
+            case "div":
+                return div(rawOther)
             default:
                 throw new MissingMethodException(name, this.class, args)
         }
-
-        DataflowVariable result = new DataflowVariable(pool)
-
-        this.whenAvailable { av ->
-            rhs.whenAvailable { bv ->
-                try { result.set(op.call(av, bv)) }
-                catch (Throwable t) { result.bindError(t) }
-            }
-            rhs.whenError { Throwable t -> result.bindError(t) }
-        }
-
-        this.whenError { Throwable t -> result.bindError(t) }
-
-        return result
     }
+
 
     // =============================================================================================
     // toString

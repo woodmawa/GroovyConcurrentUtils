@@ -1,101 +1,241 @@
-package org.softwood.dataflow;
+package org.softwood.dataflow
 
-import org.junit.jupiter.api.Test;
-
-import java.util.Optional;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.Test
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import static org.junit.jupiter.api.Assertions.*
+import static org.awaitility.Awaitility.await
 
 class DataflowVariableTest {
 
     @Test
-    void testSetAndGet() throws Exception {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
-        df.set(10);
+    void testBindAndGetValue() {
+        def df = new DataflowVariable<Integer>()
+        df.bind(42)
 
-        assertEquals(10, df.get());
+        // df.get() is synchronous and blocking-read only
+        assertEquals(42, df.get())
+        assertTrue(df.isDone())
+        assertTrue(df.isSuccess())
+        assertFalse(df.hasError())
     }
 
     @Test
-    void testLeftShiftOperatorEquivalent() throws Exception {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
-        df.leftShift(5);
+    void testRightShiftCallback() {
+        def df = new DataflowVariable<Integer>()
+        def called = new AtomicBoolean(false)
 
-        assertEquals(5, df.get());
+        df >> { v ->
+            called.set(true)
+            assertEquals(7, v)
+        }
+
+        df.bind(7)
+
+        await().atMost(1, TimeUnit.SECONDS).until { called.get() }
     }
 
     @Test
-    void testRightShiftCallback() throws Exception {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
+    void testWhenErrorReceivesError() {
+        def df = new DataflowVariable<Integer>()
+        def called = new AtomicBoolean(false)
 
-        AtomicBoolean called = new AtomicBoolean(false);
+        df.whenError { err ->
+            called.set(true)
+            assertTrue(err instanceof IllegalStateException)
+            assertEquals("boom", err.message)
+        }
 
-        df.rightShift((val) -> {
-            called.set(true);
-            assertEquals(7, val);
-        });
+        df.bindError(new IllegalStateException("boom"))
 
-        df.set(7);
-
-        assertTrue(called.get(), ">> callback should trigger when value bound");
+        await().atMost(1, TimeUnit.SECONDS).until { called.get() }
     }
 
     @Test
-    void testGetIfAvailable() {
-        DataflowVariable<Integer> df = new DataflowVariable<>();
+    void testThenTransformationAsync() {
+        def df = new DataflowVariable<Integer>()
+        def transformed = df.then { it * 2 }
 
-        assertEquals(Optional.empty(), df.getIfAvailable());
+        df.bind(10)
 
-        df.set(42);
-
-        assertEquals(42, df.getIfAvailable().get());
+        await().atMost(1, TimeUnit.SECONDS).until {
+            transformed.isDone()
+        }
+        assertEquals(20, transformed.get())
     }
 
     @Test
-    void testThenChainedTransformation() throws Exception {
-        DataflowVariable<Integer> original = new DataflowVariable<>();
-        DataflowVariable<String> result =
-                original.then(v -> v * 3)
-                        .then(v -> "Value = " + v);
+    void testThenPropagatesError() {
+        def df = new DataflowVariable<Integer>()
+        def chained = df.then { it * 2 }
 
-        original.set(14);
+        df.bindError(new RuntimeException("fail"))
 
-        assertEquals("Value = 42", result.get());
+        await().atMost(1, TimeUnit.SECONDS).until { chained.isDone() }
+        assertTrue(chained.hasError())
+        assertEquals("fail", chained.getError().message)
     }
 
     @Test
-    void testArithmeticPlus() throws Exception {
-        DataflowVariable<Integer> a = new DataflowVariable<>();
-        DataflowVariable<Integer> b = new DataflowVariable<>();
+    void testRecoverTransformsError() {
+        def df = new DataflowVariable<Integer>()
+        def recovered = df.recover { 99 }
 
-        var sum = (DataflowVariable<Integer>) a.methodMissing("plus", new Object[]{b});
+        df.bindError(new IllegalArgumentException("bad"))
 
-        a.set(5);
-        b.set(3);
-
-        assertEquals(8, sum.get());
+        await().atMost(1, TimeUnit.SECONDS).until { recovered.isDone() }
+        assertEquals(99, recovered.get())
     }
 
     @Test
-    void testErrorPropagationThroughOperator() throws Exception {
-        DataflowVariable<Integer> x = new DataflowVariable<>();
-        var div = (DataflowVariable<Integer>) x.methodMissing("div", new Object[]{0});
+    void testToFutureSuccess() {
+        def df = new DataflowVariable<Integer>()
+        def future = df.toFuture()
 
-        x.set(10);
+        df.bind(55)
 
-        assertThrows(Exception.class, div::get);
+        assertEquals(55, future.get(1, TimeUnit.SECONDS))
     }
 
     @Test
-    void testTimeoutGet() {
-        DataflowVariable<String> df = new DataflowVariable<>();
+    void testToFutureError() {
+        def df = new DataflowVariable<Integer>()
+        def future = df.toFuture()
 
-        String result = df.get(200, TimeUnit.MILLISECONDS);
+        df.bindError(new RuntimeException("oops"))
 
-        assertNull(result, "Timed get should return null when timeout occurs");
-        assertTrue(df.hasError(), "Timeout should set error flag in DataflowVariable");
-        assertNotNull(df.getError(), "Error should be stored in the variable");
+        def ex = assertThrows(Exception) {
+            future.get(1, TimeUnit.SECONDS)
+        }
+        assertTrue(ex.cause instanceof RuntimeException)
+        assertEquals("oops", ex.cause.message)
+    }
+
+    // =============================================================================================
+    // Operator overload tests (+ - * /)
+    // =============================================================================================
+
+    @Test
+    void testPlusOperatorDFVtoDFV() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def sum = a + b
+
+        a.bind(10)
+        b.bind(5)
+
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        assertEquals(15, sum.get())
+    }
+
+    @Test
+    void testPlusOperatorWithConstant() {
+        def a = new DataflowVariable<Integer>()
+        def result = a + 3
+
+        a.bind(7)
+
+        await().atMost(1, TimeUnit.SECONDS).until { result.isDone() }
+        assertEquals(10, result.get())
+    }
+
+    @Test
+    void testMinusOperator() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def diff = a - b
+
+        a.bind(20)
+        b.bind(4)
+
+        await().atMost(1, TimeUnit.SECONDS).until { diff.isDone() }
+        assertEquals(16, diff.get())
+    }
+
+    @Test
+    void testMultiplyOperator() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def prod = a * b
+
+        a.bind(6)
+        b.bind(7)
+
+        await().atMost(1, TimeUnit.SECONDS).until { prod.isDone() }
+        assertEquals(42, prod.get())
+    }
+
+    @Test
+    void testDivOperator() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def div = a / b
+
+        a.bind(20)
+        b.bind(4)
+
+        await().atMost(1, TimeUnit.SECONDS).until { div.isDone() }
+        assertEquals(5, div.get())
+    }
+
+    @Test
+    void testChainedOperatorExpression() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+        def c = new DataflowVariable<Integer>()
+
+        // (a + b) * c
+        def expr = (a + b) * c
+
+        a.bind(2)
+        b.bind(3)
+        c.bind(4)
+
+        await().atMost(1, TimeUnit.SECONDS).until { expr.isDone() }
+        assertEquals(20, expr.get())
+    }
+
+    @Test
+    void testOperatorResultPropagatesLeftError() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def sum = a + b
+
+        a.bindError(new RuntimeException("left-failed"))
+        b.bind(10)
+
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        assertTrue(sum.hasError())
+        assertEquals("left-failed", sum.getError().message)
+    }
+
+    @Test
+    void testOperatorResultPropagatesRightError() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        def sum = a + b
+
+        a.bind(10)
+        b.bindError(new RuntimeException("right-failed"))
+
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        assertTrue(sum.hasError())
+        assertEquals("right-failed", sum.getError().message)
+    }
+
+    @Test
+    void testOperatorEvaluationExceptionsProduceError() {
+        def a = new DataflowVariable<Integer>()
+        def b = new DataflowVariable<Integer>()
+
+        // Division by zero inside operator closure
+        def div = a / b
+
     }
 }

@@ -80,10 +80,10 @@ class DataflowExpression<T> {
     /** Property change support for frameworks / tooling. */
     private final PropertyChangeSupport pcs = new PropertyChangeSupport(this)
 
-    /** Synchronous listeners invoked on completion (on the calling thread or pool). */
+    /** Listeners invoked when the expression is bound (scheduled on the pool). */
     private final List<Closure> whenBoundListeners = new CopyOnWriteArrayList<Closure>()
 
-    /** Asynchronous listeners invoked on the pool. */
+    /** Asynchronous listeners invoked on the pool (legacy alias). */
     private final List<Closure> asyncWhenBoundListeners = new CopyOnWriteArrayList<Closure>()
 
     /**
@@ -104,6 +104,18 @@ class DataflowExpression<T> {
     DataflowExpression(ConcurrentPool pool, Class<T> type) {
         this.pool = pool
         this.type = type
+    }
+
+    /**
+     * Expose the underlying {@link ConcurrentPool} used to schedule asynchronous listeners.
+     *
+     * <p>This is intended for advanced integrations that need to coordinate their own tasks
+     * with the dataflow execution context backing this expression.</p>
+     *
+     * @return the {@link ConcurrentPool} backing this expression
+     */
+    ConcurrentPool getPool() {
+        return pool
     }
 
     // --------------------------------------------------------------------------------------------
@@ -250,7 +262,11 @@ class DataflowExpression<T> {
     /**
      * Register a listener to be invoked when the expression is bound (successfully or with error).
      *
-     * <p>If already bound, the listener is invoked immediately on the backing pool.</p>
+     * <p>If already bound, the listener is invoked asynchronously on the backing pool. If pending,
+     * the listener is queued and will be scheduled on the pool once a value or error is recorded.</p>
+     *
+     * <p>Listeners are always invoked asynchronously to avoid surprising re-entrancy on the caller
+     * thread.</p>
      *
      * @param listener closure receiving the bound value (or {@code null} if error occurred)
      * @return this expression (for fluent chaining)
@@ -268,6 +284,10 @@ class DataflowExpression<T> {
 
     /**
      * Register a listener to be invoked asynchronously when the expression is bound.
+     *
+     * <p>This is a legacy alias for {@link #whenBound(Closure)} that preserves the
+     * intent of explicitly asynchronous callbacks. Both methods schedule callbacks on
+     * the same backing pool.</p>
      *
      * @param listener closure receiving the bound value (or {@code null} if error occurred)
      * @return this expression
@@ -329,8 +349,9 @@ class DataflowExpression<T> {
         def sync = new ArrayList<Closure>(whenBoundListeners)
         def async = new ArrayList<Closure>(asyncWhenBoundListeners)
 
+        // All listeners are scheduled asynchronously on the backing pool.
         sync.each { Closure c ->
-            invokeListener(c, value, "whenBound")
+            scheduleListener(c, value, "whenBound")
         }
         async.each { Closure c ->
             scheduleListener(c, value, "whenBoundAsync")
@@ -387,8 +408,20 @@ class DataflowExpression<T> {
     }
 
     // --------------------------------------------------------------------------------------------
-    // Property change support
+    // Executor / property change support
     // --------------------------------------------------------------------------------------------
+
+    /**
+     * Expose the underlying executor used to schedule asynchronous listeners.
+     *
+     * <p>This is intended for advanced integrations that need to coordinate their own tasks
+     * with the dataflow execution context backing this expression.</p>
+     *
+     * @return the executor used by this expression's {@link ConcurrentPool}
+     */
+    ExecutorService getExecutor() {
+        return pool.executor
+    }
 
     /**
      * Adds a property change listener.

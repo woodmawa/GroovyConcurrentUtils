@@ -1,245 +1,257 @@
 package org.softwood.promise.core
 
+import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
-import org.softwood.config.ConfigLoader
-import org.softwood.promise.PromiseFactory
+import io.vertx.core.Vertx
+
 import org.softwood.promise.PromiseImplementation
+import org.softwood.promise.PromiseFactory
 import org.softwood.promise.core.cfuture.CompletableFuturePromiseFactory
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 import org.softwood.promise.core.vertx.VertxPromiseFactory
+import org.softwood.config.ConfigLoader
 import org.softwood.dataflow.DataflowFactory
-import io.vertx.core.Vertx
 
-import java.util.concurrent.ConcurrentHashMap
+import java.util.EnumMap
+import java.util.Map
 
 /**
- * Central configuration point for resolving and selecting the default
- * {@link PromiseImplementation} used by the Promise subsystem.
+ * Central configuration, bootstrap, and factory registry for the Promises library.
  *
  * <h2>Overview</h2>
  * <p>
- * This class determines the default promise implementation at application startup.
- * It reads configuration via {@link ConfigLoader}, looking for the key:
+ * The {@code PromiseConfiguration} class is responsible for:
  * </p>
- *
- * <pre>
- *     promises.defaultImplementation
- * </pre>
- *
- * <p>
- * The value should be a string matching one of the {@link PromiseImplementation} enum
- * constants (e.g. <code>DATAFLOW</code>, <code>VERTX</code>, <code>COMPLETABLE_FUTURE</code>).
- * Leading/trailing whitespace is trimmed and the lookup is case-insensitive.
- * </p>
- *
- * <h2>Resolution Rules</h2>
- * <ol>
- *   <li>If the configuration key exists, it is trimmed and resolved to an enum value.</li>
- *   <li>If the value is invalid or unresolvable, a warning is logged and the system
- *       falls back to {@link PromiseImplementation#DATAFLOW}.</li>
- *   <li>If the configuration key is absent entirely, DATAFLOW is used as the fallback.</li>
- * </ol>
- *
- * <h2>Factory Registration</h2>
- * <p>
- * During static initialization, factories for all known implementations are registered.
- * The resolved default implementation may be selected immediately, but factories for
- * all implementations remain available and can be swapped at runtime via
- * {@link #setDefaultImplementation}.
- * </p>
- *
- * <h2>Behavioral Guarantees</h2>
  * <ul>
- *     <li>Initialization occurs exactly once at class-load time.</li>
- *     <li>Enum resolution is safe and never throws; invalid values log a warning.</li>
- *     <li>The default implementation always has a corresponding registered factory.</li>
- *     <li>Factories are lazily created for VERTX.</li>
+ *     <li>Determining the default async implementation (DATAFLOW, VERTX, COMPLETABLE_FUTURE).</li>
+ *     <li>Registering and exposing all available {@link PromiseFactory} implementations.</li>
+ *     <li>Lazy-loading and instantiating the Vert.x runtime only when requested.</li>
+ *     <li>Loading configuration from {@link ConfigLoader} (config.yml/json/groovy/properties).</li>
+ *     <li>Supporting an override from configuration / environment / system properties.</li>
  * </ul>
  *
- * @author Will Woodman
- * @since 2025
+ * <h2>Configuration Sources</h2>
+ * <p>
+ * The default promise implementation may be set via:
+ * </p>
+ * <ul>
+ *     <li>{@code promises.defaultImplementation} in any config file loaded by {@link ConfigLoader}</li>
+ *     <li>Environment variables that ConfigLoader maps into this key</li>
+ *     <li>System properties mapped into this key</li>
+ *     <li>Or defaults to {@code DATAFLOW} if nothing else is provided</li>
+ * </ul>
+ *
+ * <h2>Lazy VERTX Initialization</h2>
+ * <p>
+ * Vert.x cannot be constructed during class-load time because it requires a valid event-loop,
+ * and scripts running Promises without Vert.x must not pay that cost or trigger failures.
+ * For this reason, the Vert.x factory is registered as a {@code null} placeholder and created
+ * lazily on first use.
+ * </p>
+ *
+ * <h2>Error Prevention</h2>
+ * <p>
+ * This design prevents the original issue where {@code new VertxPromiseFactory(null)} caused
+ * an {@link ExceptionInInitializerError}. With the lazy strategy, Vert.x is instantiated only
+ * when specifically requested via:
+ * </p>
+ * <pre>
+ *     Promises.newPromise(PromiseImplementation.VERTX)
+ * </pre>
  */
 @Slf4j
+@CompileStatic
 class PromiseConfiguration {
 
-    /** The resolved default implementation (falls back to DATAFLOW). */
+    /**
+     * Registry mapping each {@link PromiseImplementation} to a {@link PromiseFactory}.
+     * <p>
+     * The map may contain {@code null} entries, particularly for VERTX, which is intentionally
+     * lazily initialized.
+     * </p>
+     */
+    private static final Map<PromiseImplementation, PromiseFactory> factories =
+            new EnumMap<>(PromiseImplementation)
+
+    /**
+     * The default promise implementation to be used when callers do not choose one explicitly.
+     * <p>
+     * This value is resolved during static initialization based on application configuration.
+     * </p>
+     */
     private static PromiseImplementation defaultImplementation = PromiseImplementation.DATAFLOW
 
-    /** Registry of factories keyed by implementation type. */
-    private static final Map<PromiseImplementation, PromiseFactory> factories = new ConcurrentHashMap<>()
+    /**
+     * Lazily created Vert.x instance used by {@link VertxPromiseFactory}.
+     * <p>
+     * The instance remains {@code null} until a Vert.x-based Promise is requested.
+     * </p>
+     */
+    private static Vertx vertxInstance = null
 
-    /** Lazily created Vertx instance used by VertxPromiseFactory. */
-    private static Vertx vertxInstance
+    // =========================================================================
+    // Static Initialization
+    // =========================================================================
 
     /**
-     * Static initialization block.
+     * Initializes the configuration system:
+     * <ol>
+     *     <li>Loads configuration via {@link ConfigLoader}</li>
+     *     <li>Determines default implementation</li>
+     *     <li>Registers built-in factories (lazy Vert.x)</li>
+     * </ol>
      *
-     * <h3>Responsibilities</h3>
-     * <ul>
-     *     <li>Load merged configuration via {@link ConfigLoader}.</li>
-     *     <li>Attempt to resolve <code>promises.defaultImplementation</code>.</li>
-     *     <li>Trim, normalize, and safely map string to enum.</li>
-     *     <li>Fall through to DATAFLOW if missing or invalid.</li>
-     *     <li>Register all known factories (DATAFLOW, COMPLETABLE_FUTURE, VERTX).</li>
-     * </ul>
-     *
-     * <h3>Example Config</h3>
-     * <pre>
-     * # config.yml
-     * promises:
-     *   defaultImplementation: VERTX
-     * </pre>
-     *
-     * <p>
-     * Note: The string lookup is case-insensitive and tolerant of surrounding whitespace.
-     * </p>
+     * @throws Throwable if initialization fails
      */
     static {
+        try {
+            loadConfiguration()
+            registerDefaultFactories()
+        } catch (Throwable t) {
+            log.error("Failed to initialize PromiseConfiguration: ${t.message}", t)
+            throw t
+        }
+    }
 
-        // 1. Load configuration from all supported sources.
-        Map config = ConfigLoader.loadConfig()
 
-        // 2. Extract user-specified default implementation string.
-        String rawValue = config.get("promises.defaultImplementation")
+    // =========================================================================
+    // Configuration Loader
+    // =========================================================================
 
-        if (rawValue) {
-            String trimmed = rawValue.toString().trim()
-            PromiseImplementation resolved = resolveEnum(trimmed)
+    /**
+     * Loads the promise configuration from {@link ConfigLoader}.
+     * <p>
+     * Reads the key {@code promises.defaultImplementation} and attempts to resolve it to
+     * a {@link PromiseImplementation} enum constant. Unknown values fall back to DATAFLOW.
+     * </p>
+     */
+    private static void loadConfiguration() {
+        Map cfg = ConfigLoader.loadConfig()
 
-            if (resolved) {
-                log.info "Resolved default promise implementation from configuration: $resolved"
-                defaultImplementation = resolved
-            } else {
-                log.warn "Invalid promises.defaultImplementation '${trimmed}', falling back to DATAFLOW"
+        String raw = cfg.get("promises.defaultImplementation") as String
+        if (raw) {
+            raw = raw.trim()
+            try {
+                defaultImplementation = PromiseImplementation.valueOf(raw.toUpperCase())
+                log.info("PromiseConfiguration: default implementation set to ${defaultImplementation}")
+            }
+            catch (IllegalArgumentException e) {
+                log.warn("Invalid promises.defaultImplementation '${raw}', falling back to DATAFLOW")
                 defaultImplementation = PromiseImplementation.DATAFLOW
             }
-
-        } else {
-            log.info "No promises.defaultImplementation found – using DATAFLOW"
-            defaultImplementation = PromiseImplementation.DATAFLOW
         }
-
-        // 3. Register the standard factories.
-        registerFactory(PromiseImplementation.DATAFLOW,
-                new DataflowPromiseFactory(new DataflowFactory()))
-
-        registerFactory(PromiseImplementation.COMPLETABLE_FUTURE,
-                new CompletableFuturePromiseFactory())
-
-        registerFactory(PromiseImplementation.VERTX,
-                new VertxPromiseFactory(vertxInstance))
-    }
-
-    /**
-     * Safely convert a string to a {@link PromiseImplementation}, ignoring case.
-     *
-     * @param name the raw string from configuration
-     * @return matching enum or null if invalid
-     */
-    private static PromiseImplementation resolveEnum(String name) {
-        try {
-            return PromiseImplementation.valueOf(name.toUpperCase())
-        } catch (Exception ignored) {
-            return null
+        else {
+            log.info("PromiseConfiguration: using fallback default implementation = DATAFLOW")
         }
     }
 
+
+    // =========================================================================
+    // Factory Registration
+    // =========================================================================
+
     /**
-     * Set the default implementation programmatically.
+     * Registers built-in implementations:
+     * <ul>
+     *     <li>{@link PromiseImplementation#DATAFLOW}</li>
+     *     <li>{@link PromiseImplementation#COMPLETABLE_FUTURE}</li>
+     *     <li>{@link PromiseImplementation#VERTX} (lazy-loaded)</li>
+     * </ul>
      *
      * <p>
-     * If the implementation is not currently registered, its corresponding
-     * factory is created lazily and inserted into the registry.
+     * Vert.x factory is deliberately stored as {@code null} so that the runtime may initialize
+     * it safely on first demand.
      * </p>
-     *
-     * @param impl the implementation to make default
      */
-    static void setDefaultImplementation(PromiseImplementation impl) {
-        log.info "Setting default promise implementation to: $impl"
-        defaultImplementation = impl
+    private static void registerDefaultFactories() {
 
-        // Ensure the correct factory exists.
-        if (!factories.containsKey(impl)) {
-            switch (impl) {
-                case PromiseImplementation.VERTX:
-                    if (!vertxInstance) vertxInstance = Vertx.vertx()
-                    registerFactory(impl, new VertxPromiseFactory(vertxInstance))
-                    break
+        factories.put(
+                PromiseImplementation.DATAFLOW,
+                new DataflowPromiseFactory(new DataflowFactory())
+        )
 
-                case PromiseImplementation.COMPLETABLE_FUTURE:
-                    registerFactory(impl, new CompletableFuturePromiseFactory())
-                    break
+        factories.put(
+                PromiseImplementation.COMPLETABLE_FUTURE,
+                new CompletableFuturePromiseFactory()
+        )
 
-                case PromiseImplementation.DATAFLOW:
-                    registerFactory(impl, new DataflowPromiseFactory(new DataflowFactory()))
-                    break
-            }
-        }
+        // Lazy VERTX initialization (factory will be constructed on demand)
+        factories.put(
+                PromiseImplementation.VERTX,
+                null
+        )
+
+        log.debug("PromiseConfiguration: registered DATAFLOW, COMPLETABLE_FUTURE, and lazy VERTX")
     }
 
+
+    // =========================================================================
+    // Factory Resolution
+    // =========================================================================
+
     /**
-     * Returns the active default implementation.
+     * Returns the {@link PromiseFactory} for the specified or default implementation.
      *
-     * @return the resolved {@link PromiseImplementation}
+     * <p>
+     * VERTX is created lazily — its factory is constructed only when requested.
+     * </p>
+     *
+     * @param impl the desired implementation, or {@code null} to use the default
+     * @return the resolved {@link PromiseFactory}
+     * @throws IllegalStateException if no factory exists for the implementation
+     */
+    static PromiseFactory getFactory(PromiseImplementation impl = null) {
+
+        PromiseImplementation target = impl ?: defaultImplementation
+        PromiseFactory factory = factories.get(target)
+
+        // Already loaded (DATAFLOW or COMPLETABLE_FUTURE or previously initialized VERTX)
+        if (factory != null) {
+            return factory
+        }
+
+        // Handle LAZY VERTX
+        switch (target) {
+
+            case PromiseImplementation.VERTX:
+                if (vertxInstance == null) {
+                    vertxInstance = Vertx.vertx()
+                    log.info("PromiseConfiguration: created lazy Vertx instance")
+                }
+
+                factory = new VertxPromiseFactory(vertxInstance)
+                factories.put(PromiseImplementation.VERTX, factory)
+
+                log.info("PromiseConfiguration: VERTX factory initialized lazily")
+                break
+
+            default:
+                throw new IllegalStateException(
+                        "No promise factory registered for implementation: $target"
+                )
+        }
+
+        return factory
+    }
+
+
+    // =========================================================================
+    // Default Implementation Accessors
+    // =========================================================================
+
+    /**
+     * @return the default promise implementation currently in use
      */
     static PromiseImplementation getDefaultImplementation() {
         return defaultImplementation
     }
 
     /**
-     * Register a factory for a given implementation.
+     * Manually override the default promise implementation.
      *
-     * <p>
-     * Factories are stored only if no entry exists for that key,
-     * allowing late registration without overwriting earlier entries.
-     * </p>
-     *
-     * @param impl    implementation family key
-     * @param factory the new factory to register
+     * @param impl the new default
      */
-    static void registerFactory(PromiseImplementation impl, PromiseFactory factory) {
-        log.info "Registering factory for implementation: $impl"
-        factories.putIfAbsent(impl, factory)
-    }
-
-    /**
-     * Retrieve the factory for the specified implementation.
-     *
-     * @param impl optional, defaults to current default implementation
-     * @return the associated {@link PromiseFactory}
-     * @throws IllegalStateException if no factory has been registered
-     */
-    static PromiseFactory getFactory(PromiseImplementation impl = null) {
-        PromiseImplementation target = impl ?: defaultImplementation
-        PromiseFactory factory = factories.get(target)
-
-        if (!factory)
-            throw new IllegalStateException("No factory registered for implementation: $target")
-
-        return factory
-    }
-
-    /**
-     * Obtain the shared Vertx instance, creating one if needed.
-     *
-     * @return a lazily initialized {@link Vertx} instance
-     */
-    static Vertx getVertxInstance() {
-        if (!vertxInstance) {
-            vertxInstance = Vertx.vertx()
-        }
-        return vertxInstance
-    }
-
-    /**
-     * Shutdown hook for releasing Vert.x resources.
-     *
-     * <p>Calling this will close the Vert.x instance and clear its reference.</p>
-     */
-    static void shutdown() {
-        if (vertxInstance) {
-            vertxInstance.close()
-            vertxInstance = null
-        }
+    static void setDefaultImplementation(PromiseImplementation impl) {
+        defaultImplementation = impl
     }
 }

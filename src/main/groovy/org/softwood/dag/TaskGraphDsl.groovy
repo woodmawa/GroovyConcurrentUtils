@@ -6,15 +6,8 @@ import org.softwood.dag.task.TaskEvent
 import org.softwood.dag.task.TaskListener
 
 /**
- * DSL builder for TaskGraph.
- *
- * Supports:
- *   globals { ... }
- *   task("id", ServiceTask) { ... }
- *   serviceTask("id") { ... }
- *   fork("name") { from "..."; to "...","..." }
- *   join("id", JoinStrategy) { from "...","..."; action { ... } }
- *   onTaskEvent { event -> ... }
+ * DSL builder for TaskGraph with enhanced @DelegatesTo annotations
+ * for better IDE support.
  */
 class TaskGraphDsl {
 
@@ -35,11 +28,19 @@ class TaskGraphDsl {
     }
 
     // ----------------------------------------------------------------------
-    // Task creation DSL
+    // Task creation DSL with proper delegation
     // ----------------------------------------------------------------------
 
-    def task(String id, Class<? extends Task> type = ServiceTask,
-             @DelegatesTo(strategy = Closure.DELEGATE_FIRST) Closure cl) {
+    /**
+     * Generic task creation with explicit delegation to the Task type.
+     * The IDE will now resolve methods like maxRetries, dependsOn, etc.
+     */
+    def task(String id,
+             Class<? extends Task> type = ServiceTask,
+             @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
+                     genericTypeIndex = 0,
+                     type = "T extends org.softwood.dag.task.Task")
+                     Closure cl) {
 
         Task t = type.getConstructor(String).newInstance(id)
         cl.delegate = t
@@ -50,8 +51,14 @@ class TaskGraphDsl {
         return t
     }
 
+    /**
+     * ServiceTask-specific helper with explicit ServiceTask delegation.
+     * This ensures the IDE knows about both Task methods AND ServiceTask.action().
+     */
     def serviceTask(String id,
-                    @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ServiceTask) Closure cl) {
+                    @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
+                            value = ServiceTask)
+                            Closure cl) {
 
         task(id, ServiceTask, cl)
     }
@@ -60,43 +67,36 @@ class TaskGraphDsl {
     // Fork DSL
     // ----------------------------------------------------------------------
 
-    void fork(String name, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ForkDsl) Closure cl) {
+    void fork(String name,
+              @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
+                      value = ForkDsl)
+                      Closure cl) {
         def dsl = new ForkDsl(graph)
         cl.delegate = dsl
         cl.resolveStrategy = Closure.DELEGATE_FIRST
         cl.call()
+        // Relationships are now applied immediately in ForkDsl.to()
     }
 
     // ----------------------------------------------------------------------
-    // Join DSL (FULLY FIXED)
+    // Join DSL
     // ----------------------------------------------------------------------
 
-    /**
-     * Corrected join DSL:
-     *
-     * join("summary", JoinStrategy.ALL_COMPLETED) {
-     *     from "loadOrders", "loadInvoices"
-     *
-     *     action { ctx, promises -> ... }
-     * }
-     */
     void join(String id,
               JoinStrategy strategy = JoinStrategy.ALL_COMPLETED,
-              @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = JoinDsl) Closure cl) {
+              @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
+                      value = JoinDsl)
+                      Closure cl) {
 
-        // Create the underlying task that performs the join action
         ServiceTask joinTask = new ServiceTask(id)
         joinTask.metaClass.joinStrategy = strategy
 
-        // Build join-routing structure
         JoinDsl dsl = new JoinDsl(graph, joinTask)
 
-        // Delegate user DSL to JoinDsl FIRST
         cl.delegate = dsl
         cl.resolveStrategy = Closure.DELEGATE_FIRST
         cl.call()
 
-        // Add the fully configured join task to the graph
         graph.addTask(joinTask)
     }
 
@@ -108,6 +108,3 @@ class TaskGraphDsl {
         graph.addListener({ TaskEvent ev -> listener.call(ev) } as TaskListener)
     }
 }
-
-
-

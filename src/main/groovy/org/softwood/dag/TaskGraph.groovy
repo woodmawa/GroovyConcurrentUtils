@@ -52,15 +52,16 @@ class TaskGraph {
     Promise<?> run() {
         Promise<Object> completion = Promises.newPromise()
 
-        // simple topological scheduling loop – can be improved
         Map<String, Optional<Promise<?>>> results = [:].withDefault { Optional.empty() }
+
+        // Store results map in context so join tasks can access it
+        ctx.globals.__taskResults = results
 
         Closure<TaskEvent> emit = { TaskEvent ev ->
             ev.graphId = this.id
             listeners.each { it.onEvent(ev) }
         }
 
-        // queue of tasks whose predecessors are satisfied
         def ready = { ->
             tasks.values().findAll { t ->
                 t.state in [TaskState.PENDING, TaskState.SCHEDULED] &&
@@ -70,7 +71,6 @@ class TaskGraph {
             }
         }
 
-        // Kick off scheduling on pool
         ctx.pool.execute {
             def activePromises = [] as List<Promise<?>>
 
@@ -79,12 +79,15 @@ class TaskGraph {
                 if (!toRun && activePromises.isEmpty()) break
 
                 toRun.each { Task t ->
-                    // compute previous aggregated result for join
                     Optional<Promise<?>> prevOpt = Optional.empty()
-                    if (t.predecessors.size() == 1) {
-                        prevOpt = Optional.ofNullable(results[t.predecessors.first()]?.orElse(null))
+
+                    // For non-join tasks with single predecessor, pass that promise
+                    boolean isJoinTask = t.metaClass.hasProperty(t, 'isJoinTask') && t.metaClass.isJoinTask
+
+                    if (!isJoinTask && t.predecessors.size() == 1) {
+                        prevOpt = results[t.predecessors.first()]
                     }
-                    // for multi-predecessor join, you could pass a Promise<List<?>> etc.
+                    // Join tasks will access results via ctx.globals.__taskResults
 
                     def optPromise = t.execute(ctx, prevOpt, emit)
                     if (optPromise.isPresent()) {
@@ -99,11 +102,10 @@ class TaskGraph {
                 }
 
                 if (toRun.isEmpty()) {
-                    Thread.sleep(10) // crude wait; in reality better coordination
+                    Thread.sleep(10)
                 }
             }
 
-            // for now: graph result = last task’s result or null
             def last = tasks.values().last()
             def lastRes = results[last.id]?.orElse(null)
             completion.accept(lastRes)

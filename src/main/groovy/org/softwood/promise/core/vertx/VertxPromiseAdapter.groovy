@@ -23,25 +23,75 @@ import java.util.function.Predicate
 import java.util.function.Supplier
 
 /**
- * Vert.x-backed implementation of the SoftPromise API.
+ * Vert.x-backed implementation of the {@link SoftPromise} interface.
  *
- * Runs blocking work via Vert.x worker pool and always returns results on
- * the original captured Vert.x Context.
+ * <h2>Overview</h2>
+ * <p>
+ * This adapter wraps a Vert.x {@link Future} and/or {@link VertxPromise},
+ * providing a SoftPromise-compatible API while respecting Vert.x's execution model:
+ * </p>
+ *
+ * <ul>
+ *   <li>All callbacks and completions are <b>hop-returned</b> onto the original
+ *       creation {@link Context}.</li>
+ *   <li>Blocking work is executed using Vert.x's <b>worker pool</b>
+ *       via {@code executeBlocking}.</li>
+ *   <li>The adapter supports both "owning" mode (with a backing {@link VertxPromise})
+ *       and "non-owning" mode (wrapping an external {@link Future}).</li>
+ * </ul>
+ *
+ * <h2>Key Behaviours</h2>
+ * <ul>
+ *   <li>A non-owning adapter (wrapping only a {@link Future}) cannot be completed
+ *       by user code; completion methods become no-ops.</li>
+ *   <li>All chaining operations ({@code then}, {@code map}, {@code recover},
+ *       {@code flatMap}) allocate new VertxPromiseAdapter instances.</li>
+ *   <li>Blocking calls ({@code get}, {@code get(timeout)}) are emulated using
+ *       {@link CountDownLatch} since Vert.x Futures are non-blocking.</li>
+ * </ul>
+ *
+ * <h2>Intended Usage</h2>
+ * <pre>
+ * def p = PromiseFactory.vertx().createPromise()
+ * p.accept(42)
+ * p.then { it * 2 }.onComplete { println it }
+ * </pre>
+ *
+ * @param <T> value type for this promise
  */
 @Slf4j
 @CompileStatic
 @ToString(includeNames = true, excludes = ["vertx", "context"])
 class VertxPromiseAdapter<T> implements SoftPromise<T> {
 
+    /** Vert.x runtime instance (shared). */
     private final Vertx vertx
+
+    /** Vert.x context captured at creation time. */
     private final Context context
-    private final VertxPromise<T> promise       // null when wrapping external Future
+
+    /**
+     * Backing Vert.x promise (null when wrapping external Future only).
+     *
+     * If non-null, this instance "owns" completion.
+     * If null, completion methods become no-ops.
+     */
+    private final VertxPromise<T> promise
+
+    /** Underlying Vert.x Future that represents the async result. */
     private final Future<T> future
+
 
     // -------------------------------------------------------------------------
     // Constructors
     // -------------------------------------------------------------------------
 
+    /**
+     * Construct an "owning" adapter from a new Vert.x Promise.
+     *
+     * @param promise Vert.x promise to wrap
+     * @param vertx   Vert.x instance
+     */
     VertxPromiseAdapter(VertxPromise<T> promise, Vertx vertx) {
         this.promise = promise
         this.future = promise.future()
@@ -49,6 +99,12 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         this.context = vertx.getOrCreateContext()
     }
 
+    /**
+     * Construct a "non-owning" adapter that wraps an external Vert.x Future.
+     *
+     * @param future external future
+     * @param vertx  Vert.x instance
+     */
     VertxPromiseAdapter(Future<T> future, Vertx vertx) {
         this.promise = null
         this.future = future
@@ -56,27 +112,60 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         this.context = vertx.getOrCreateContext()
     }
 
+
     // -------------------------------------------------------------------------
     // Factories
     // -------------------------------------------------------------------------
 
+    /**
+     * Create a new, empty "owning" promise adapter.
+     *
+     * @param vertx Vert.x instance
+     * @param <T>   value type
+     * @return new owning adapter
+     */
     static <T> VertxPromiseAdapter<T> create(Vertx vertx) {
         VertxPromise<T> p = VertxPromise.promise()
         return new VertxPromiseAdapter<>(p, vertx)
     }
 
+    /**
+     * Create a pre-succeeded promise adapter from a value.
+     *
+     * @param vertx Vert.x instance
+     * @param value success value
+     * @param <T>   value type
+     * @return succeeded adapter
+     */
     static <T> VertxPromiseAdapter<T> succeededPromise(Vertx vertx, T value) {
         return new VertxPromiseAdapter<>(Future.succeededFuture(value), vertx)
     }
 
+    /**
+     * Create a pre-failed promise adapter from an error.
+     *
+     * @param vertx Vert.x instance
+     * @param t     error cause
+     * @param <T>   value type
+     * @return failed adapter
+     */
     static <T> VertxPromiseAdapter<T> failedPromise(Vertx vertx, Throwable t) {
         return new VertxPromiseAdapter<>(Future.failedFuture(t), vertx)
     }
+
 
     // -------------------------------------------------------------------------
     // Completion API
     // -------------------------------------------------------------------------
 
+    /**
+     * Complete this promise with a value.
+     *
+     * <p>If this adapter is "non-owning", this is a no-op.</p>
+     *
+     * @param value value to complete with
+     * @return this promise
+     */
     @Override
     SoftPromise<T> accept(T value) {
         if (promise == null) return this
@@ -89,25 +178,26 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return this
     }
 
+    /**
+     * Complete this promise by executing a Supplier asynchronously.
+     *
+     * <p>Executes via Vert.x worker pool, completes on original Context.</p>
+     *
+     * @param supplier blocking supplier for the value
+     * @return this promise
+     */
     @Override
     SoftPromise<T> accept(Supplier<T> supplier) {
-        if (promise == null) return this
-
         if (promise == null) {
             log.warn("accept(Supplier) called on non-owning adapter – ignoring")
             return this
         }
 
-        // Vert.x 5: executeBlocking(Callable<T>) -> Future<T>
         Future<T> f = vertx.executeBlocking(
-                { ->
-                    // This runs on a Vert.x worker thread, NOT the event loop
-                    supplier.get()
-                } as Callable<T>
+                { -> supplier.get() } as Callable<T>
         )
 
-        // Hop the result back onto our captured context (event loop or worker)
-        f.onComplete { AsyncResult<T> ar ->
+        f.onComplete({ AsyncResult<T> ar ->
             context.runOnContext { Void v ->
                 if (ar.succeeded()) {
                     promise.tryComplete(ar.result())
@@ -115,24 +205,39 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                     promise.tryFail(ar.cause())
                 }
             }
-        }
+        } as Handler<AsyncResult<T>>)
 
         return this
     }
 
+    /**
+     * Complete this promise by adopting the result of a {@link CompletableFuture}.
+     *
+     * @param external external future
+     * @return this promise
+     */
     @Override
     SoftPromise<T> accept(CompletableFuture<T> external) {
         if (promise == null) return this
 
         external.whenComplete { T val, Throwable err ->
             context.runOnContext { Void v ->
-                if (err != null) promise.tryFail(err)
-                else promise.tryComplete(val)
+                if (err != null) {
+                    promise.tryFail(err)
+                } else {
+                    promise.tryComplete(val)
+                }
             }
         }
         return this
     }
 
+    /**
+     * Complete this promise by adopting another SoftPromise's completion.
+     *
+     * @param other another promise
+     * @return this promise
+     */
     @Override
     SoftPromise<T> accept(SoftPromise<T> other) {
         if (promise == null) return this
@@ -147,6 +252,12 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return this
     }
 
+    /**
+     * Fail this promise with an error.
+     *
+     * @param error failure cause
+     * @return this promise
+     */
     @Override
     SoftPromise<T> fail(Throwable error) {
         if (promise == null) return this
@@ -154,10 +265,20 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return this
     }
 
+
     // -------------------------------------------------------------------------
     // Blocking get
     // -------------------------------------------------------------------------
 
+    /**
+     * Block until the promise is complete, then return the result or throw the error.
+     *
+     * <p>Vert.x Futures do not support blocking operations, so a countdown latch
+     * is used to simulate blocking semantics.</p>
+     *
+     * @return value
+     * @throws Exception propagated error
+     */
     @Override
     T get() throws Exception {
         if (!future.isComplete()) {
@@ -166,10 +287,13 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
             AtomicReference<Throwable> err = new AtomicReference<>()
 
             future.onComplete({ AsyncResult<T> ar ->
-                if (ar.succeeded()) result.set(ar.result())
-                else err.set(ar.cause())
+                if (ar.succeeded()) {
+                    result.set(ar.result())
+                } else {
+                    err.set(ar.cause())
+                }
                 latch.countDown()
-            })
+            } as Handler<AsyncResult<T>>)
 
             latch.await()
 
@@ -190,6 +314,14 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return future.result()
     }
 
+    /**
+     * Block until the promise is complete or the timeout expires.
+     *
+     * @param timeout duration
+     * @param unit    time unit
+     * @return value
+     * @throws TimeoutException if timeout reached
+     */
     @Override
     T get(long timeout, TimeUnit unit) throws TimeoutException {
         CountDownLatch latch = new CountDownLatch(1)
@@ -197,10 +329,13 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         AtomicReference<Throwable> err = new AtomicReference<>()
 
         future.onComplete({ AsyncResult<T> ar ->
-            if (ar.succeeded()) result.set(ar.result())
-            else err.set(ar.cause())
+            if (ar.succeeded()) {
+                result.set(ar.result())
+            } else {
+                err.set(ar.cause())
+            }
             latch.countDown()
-        })
+        } as Handler<AsyncResult<T>>)
 
         if (!latch.await(timeout, unit)) {
             throw new TimeoutException("Promise timed out after $timeout $unit")
@@ -210,66 +345,140 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return result.get()
     }
 
+
     // -------------------------------------------------------------------------
     // State / Callbacks
     // -------------------------------------------------------------------------
 
+    /**
+     * Whether the promise is already resolved (success or failure).
+     *
+     * @return true if completed
+     */
     @Override
     boolean isDone() {
         return future.isComplete()
     }
 
+    /**
+     * Register a success callback.
+     *
+     * @param callback consumer receiving the successful value
+     * @return this promise
+     */
     @Override
     SoftPromise<T> onComplete(Consumer<T> callback) {
         future.onSuccess({ T v -> callback.accept(v) })
         return this
     }
 
+    /**
+     * Register an error callback.
+     *
+     * @param callback consumer receiving the failure
+     * @return this promise
+     */
     @Override
     SoftPromise<T> onError(Consumer<Throwable> callback) {
         future.onFailure({ Throwable e -> callback.accept(e) })
         return this
     }
 
+
     // -------------------------------------------------------------------------
     // then / recover
     // -------------------------------------------------------------------------
 
+    /**
+     * Transform the successful value into another value.
+     *
+     * @param fn mapping function
+     * @param <R> new value type
+     * @return new transformed promise
+     */
     @Override
     <R> SoftPromise<R> then(Function<T, R> fn) {
-        Future<R> mapped = future.map({ T v -> fn.apply(v) })
-        return new VertxPromiseAdapter<>(mapped, vertx)
+        VertxPromiseAdapter<R> out = VertxPromiseAdapter.<R>create(vertx)
+
+        this.onComplete { T v ->
+            try {
+                out.accept(fn.apply(v))
+            } catch (Throwable t) {
+                out.fail(t)
+            }
+        }
+
+        this.onError { Throwable e -> out.fail(e) }
+
+        return out
     }
 
+    /**
+     * Recover from a failure by computing a replacement value.
+     *
+     * @param recovery error → new value function
+     * @param <R> new value type
+     * @return recovered promise
+     */
     @Override
     <R> SoftPromise<R> recover(Function<Throwable, R> recovery) {
-        Future<R> rec = future.transform({ AsyncResult<T> ar ->
-            if (ar.succeeded()) {
-                Future.succeededFuture((R) ar.result())
-            } else {
-                try {
-                    Future.succeededFuture(recovery.apply(ar.cause()))
-                } catch (Throwable t) {
-                    Future.failedFuture(t)
-                }
+        VertxPromiseAdapter<R> out = VertxPromiseAdapter.<R>create(vertx)
+
+        this.onComplete { T v ->
+            out.accept((R) v)
+        }
+
+        this.onError { Throwable e ->
+            try {
+                out.accept(recovery.apply(e))
+            } catch (Throwable t) {
+                out.fail(t)
             }
-        })
-        return new VertxPromiseAdapter<>(rec, vertx)
+        }
+
+        return out
     }
+
 
     // -------------------------------------------------------------------------
     // Functional API: map / flatMap / filter
     // -------------------------------------------------------------------------
 
+    /**
+     * Pure functional transform of the successful value.
+     *
+     * @param mapper mapping function
+     * @param <R> new value type
+     * @return mapped promise
+     */
     @Override
     <R> SoftPromise<R> map(Function<? super T, ? extends R> mapper) {
-        Future<R> mapped = future.map({ T v -> mapper.apply(v) })
-        return new VertxPromiseAdapter<>(mapped, vertx)
+        VertxPromiseAdapter<R> out = VertxPromiseAdapter.<R>create(vertx)
+
+        this.onComplete { T v ->
+            try {
+                R mapped = (R) mapper.apply(v)
+                out.accept(mapped)
+            } catch (Throwable t) {
+                out.fail(t)
+            }
+        }
+
+        this.onError { Throwable e -> out.fail(e) }
+
+        return out
     }
 
+    /**
+     * Flat-map continuation for sequencing async computations.
+     *
+     * @param mapper value → next Promise
+     * @param <R> new value type
+     * @return chained promise
+     */
     @Override
     <R> SoftPromise<R> flatMap(Function<? super T, SoftPromise<R>> mapper) {
-        VertxPromiseAdapter<R> out = VertxPromiseAdapter.create(vertx)
+        VertxPromiseAdapter<R> out = VertxPromiseAdapter.<R>create(vertx)
 
         this.onComplete { T v ->
             SoftPromise<R> inner
@@ -292,14 +501,24 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return out
     }
 
+    /**
+     * Filter the successful value using a predicate.
+     * If predicate fails, this promise fails with {@link NoSuchElementException}.
+     *
+     * @param predicate predicate to test
+     * @return filtered promise
+     */
     @Override
     SoftPromise<T> filter(Predicate<? super T> predicate) {
-        VertxPromiseAdapter<T> out = VertxPromiseAdapter.create(vertx)
+        VertxPromiseAdapter<T> out = VertxPromiseAdapter.<T>create(vertx)
 
         this.onComplete { T v ->
             try {
-                if (predicate.test(v)) out.accept(v)
-                else out.fail(new NoSuchElementException("Predicate not satisfied"))
+                if (predicate.test(v)) {
+                    out.accept(v)
+                } else {
+                    out.fail(new NoSuchElementException("Predicate not satisfied"))
+                }
             } catch (Throwable t) {
                 out.fail(t)
             }
@@ -309,10 +528,19 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return out
     }
 
+
     // -------------------------------------------------------------------------
     // asType / interoperability
     // -------------------------------------------------------------------------
 
+    /**
+     * Convert to another asynchronous type.
+     *
+     * <p>Currently supports {@link CompletableFuture} only.</p>
+     *
+     * @param clazz target type
+     * @return converted instance
+     */
     @Override
     CompletableFuture<T> asType(Class clazz) {
         if (clazz == CompletableFuture) {
@@ -321,11 +549,23 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         throw new RuntimeException("conversion to type $clazz not supported")
     }
 
+
     // -------------------------------------------------------------------------
     // Accessors
     // -------------------------------------------------------------------------
 
+    /**
+     * Access underlying Vert.x Future.
+     */
     Future<T> getFuture() { future }
+
+    /**
+     * Vert.x runtime used by this promise.
+     */
     Vertx getVertx() { vertx }
+
+    /**
+     * Original Vert.x context on which callbacks run.
+     */
     Context getContext() { context }
 }

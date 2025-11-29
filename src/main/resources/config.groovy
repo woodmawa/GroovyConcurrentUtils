@@ -15,6 +15,9 @@ database {
     password = ''
 }
 
+//one of "DATAFLOW" | "VERTX" | "COMPLETABLE_FUTURE"
+promises.defaultImplementation = "DATAFLOW"
+
 // Profile-specific overrides
 environments {
     dev {

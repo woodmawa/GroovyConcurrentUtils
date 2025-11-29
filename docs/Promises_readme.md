@@ -71,20 +71,20 @@ A pluggable, implementation-agnostic Promise API for Groovy that provides a cons
 ### Design Philosophy
 
 1. **Separation of Concerns**
-   - `Promise<T>` - User-facing interface defining the contract
-   - `PromiseFactory` - Creation and lifecycle management
-   - `PromiseConfiguration` - Registry and implementation selection
-   - `Promises` - Static facade for convenient access
+    - `Promise<T>` - User-facing interface defining the contract
+    - `PromiseFactory` - Creation and lifecycle management
+    - `PromiseConfiguration` - Registry and implementation selection
+    - `Promises` - Static facade for convenient access
 
 2. **Single-Assignment Semantics**
-   - A promise completes exactly once
-   - Completion can be a value or an error
-   - Subsequent completion attempts are ignored or logged
+    - A promise completes exactly once
+    - Completion can be a value or an error
+    - Subsequent completion attempts are ignored or logged
 
 3. **Error Propagation**
-   - Errors flow through transformation chains automatically
-   - `recover()` allows transforming errors into values
-   - Callbacks are type-specific (success vs error)
+    - Errors flow through transformation chains automatically
+    - `recover()` allows transforming errors into values
+    - Callbacks are type-specific (success vs error)
 
 ---
 

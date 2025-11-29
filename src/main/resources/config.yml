@@ -13,3 +13,6 @@ database:
 
 logging:
   level: INFO
+
+promises:
+  defaultImplementation: DATAFLOW

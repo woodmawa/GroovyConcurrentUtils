@@ -4,7 +4,9 @@ import groovy.transform.stc.ClosureParams
 import groovy.transform.stc.FromString
 import org.softwood.dag.task.ServiceTask
 import org.softwood.dag.task.TaskContext
+import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
+import org.softwood.promise.Promises
 
 class JoinDsl {
 
@@ -72,7 +74,56 @@ class JoinDsl {
             }
 
             // Call user's join action with collected promises
-            return userAction.call(ctx, predecessorPromises) as Promise
+            // CRITICAL: Do NOT use "as Promise" - it triggers type coercion which can leak DataflowVariable
+            def result = userAction.call(ctx, predecessorPromises)
+
+            // CRITICAL FIX: Ensure the result is always a Promise
+            // If the user accidentally returned a DataflowVariable or other type,
+            // wrap it properly to maintain the Promise abstraction layer
+            return ensurePromise(result)        }
+    }
+
+    /**
+     * Ensure the given result is a proper Promise.
+     *
+     * This method handles cases where user code might accidentally return:
+     * - A raw DataflowVariable (wrap it in a Promise)
+     * - Already a Promise (return as-is)
+     * - A plain value (wrap in a completed Promise)
+     * - null (return a failed Promise)
+     */
+    private Promise<?> ensurePromise(Object result) {
+        // Already a Promise? Good!
+        if (result instanceof Promise) {
+            return (Promise<?>) result
         }
+
+        // Raw DataflowVariable leaked out? Wrap it!
+        if (result instanceof DataflowVariable) {
+            DataflowVariable dfv = (DataflowVariable) result
+            Promise promise = Promises.newPromise()
+
+            // Wire the DFV to the Promise
+            dfv.whenAvailable { value ->
+                promise.accept(value)
+            }
+            dfv.whenError { error ->
+                promise.fail(error)
+            }
+
+            return promise
+        }
+
+        // Plain value? Wrap in completed Promise
+        if (result != null) {
+            Promise promise = Promises.newPromise()
+            promise.accept(result)
+            return promise
+        }
+
+        // null? Return failed Promise
+        Promise promise = Promises.newPromise()
+        promise.fail(new NullPointerException("Join action returned null"))
+        return promise
     }
 }

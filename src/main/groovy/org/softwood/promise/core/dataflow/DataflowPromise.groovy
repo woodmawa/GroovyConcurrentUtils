@@ -366,26 +366,30 @@ class DataflowPromise<T> implements Promise<T> {
     }
 
     @Override
-    DataflowPromise<T> filter(Predicate<? super T> predicate) {
-        DataflowPromise<T> out = new DataflowPromise<T>(pool)
+    Promise<T> filter(Predicate<? super T> predicate) {  // Return Promise<T> instead of DataflowPromise<T>
+        if (predicate == null) {
+            return this
+        }
+
+        DataflowVariable<T> nextVar = new DataflowVariable<T>(variable.pool)
 
         this.onComplete { T v ->
             try {
                 if (predicate.test(v)) {
-                    out.accept(v)
+                    nextVar.bind(v)  // Could use bind() directly on nextVar
                 } else {
-                    out.fail(new NoSuchElementException("Predicate not satisfied"))
+                    nextVar.bindError(new NoSuchElementException("Predicate not satisfied"))
                 }
             } catch (Throwable t) {
-                out.fail(t)
+                nextVar.bindError(t)
             }
         }
 
         this.onError { Throwable e ->
-            out.fail(e)
+            nextVar.bindError(e)
         }
 
-        return out
+        return new DataflowPromise<T>(nextVar)
     }
 
     // -------------------------------------------------------------------------

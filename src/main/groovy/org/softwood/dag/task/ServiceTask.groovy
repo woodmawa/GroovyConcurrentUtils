@@ -19,7 +19,10 @@ class ServiceTask<T> extends Task<T> {
     ServiceTask<T> action(Closure closure) {
         // closure: { ctx, prevOpt -> Promise<T> }
         this.action = { TaskContext ctx, Optional prev ->
-            closure.call(ctx, prev)
+            def result = closure.call(ctx, prev)
+            // Do NOT use "as Promise<T>" - it triggers unwanted type coercion
+            Promise<T> promiseResult = (Promise<T>) ensurePromise(result)
+
         } as BiFunction<TaskContext, Optional<Promise<?>>, Promise<T>>
         return this
     }

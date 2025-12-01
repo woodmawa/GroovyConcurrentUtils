@@ -361,6 +361,17 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     }
 
     /**
+     * Alias for is Done, Whether the promise is already resolved (success or failure).
+     *
+     * @return true if completed
+     */
+    @Override
+    boolean isCompleted() {
+        return future.isComplete()
+    }
+
+
+    /**
      * Register a success callback.
      *
      * @param callback consumer receiving the successful value

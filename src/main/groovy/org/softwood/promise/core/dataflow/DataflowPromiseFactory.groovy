@@ -91,4 +91,15 @@ class DataflowPromiseFactory implements PromiseFactory {
 
         return promise
     }
+
+    /**
+     * Wrap an existing DataflowVariable into a DataflowPromise.
+     *
+     * This is used when user code accidentally returns a DataflowVariable
+     * instead of a Promise.  This method gives Promises.ensurePromise()
+     * a canonical way to convert DFVs into Promises without duplicating logic.
+     */
+    <T> Promise<T> wrapDataflowVariable(DataflowVariable<T> variable) {
+        return new DataflowPromise<T>(variable)
+    }
 }

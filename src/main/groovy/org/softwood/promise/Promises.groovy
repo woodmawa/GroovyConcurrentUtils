@@ -1,7 +1,9 @@
 package org.softwood.promise
 
 import groovy.util.logging.Slf4j
+import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.core.PromiseConfiguration
+import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
 import java.util.function.Supplier
@@ -224,5 +226,51 @@ class Promises {
      */
     static <T> Promise<T> from(Promise<T> otherPromise) {
         return PromiseConfiguration.getFactory().from(otherPromise)
+    }
+
+    /**
+     * static helper method  - will check the result and ensure that the returned value is a
+     * promise and that we have no leakage of implementation abstractions for consumers
+     *
+     *
+     * @param result
+     * @return
+     */
+    static Promise<?> ensurePromise(Object result) {
+        // 1. Already a Promise? Good.
+        if (result instanceof Promise) {
+            return (Promise<?>) result
+        }
+
+        // 2. if result is a DataflowVariable? Adapt via DataflowPromiseFactory / DATAFLOW impl
+        if (result instanceof org.softwood.dataflow.DataflowVariable) {
+            // Use the DATAFLOW implementation factory to wrap it
+            def implFactory = PromiseConfiguration.getFactory(PromiseImplementation.DATAFLOW)
+            if (implFactory instanceof DataflowPromiseFactory) {
+                DataflowPromiseFactory dfPromFactory = (DataflowPromiseFactory) implFactory
+                return dfPromFactory.wrapDataflowVariable((DataflowVariable) result)
+            }
+
+            // Fallback: generic wrapping
+            Promise promise = newPromise()
+            ((DataflowVariable) result).whenAvailable { v -> promise.accept(v) }
+            ((DataflowVariable) result).whenError { e -> promise.fail(e) }
+            return promise
+        }
+
+        // 3. CompletableFuture? Use existing adapter
+        if (result instanceof CompletableFuture) {
+            return from((CompletableFuture) result)
+        }
+
+        // 4. Plain value? Wrap in completed Promise
+        if (result != null) {
+            return newPromise(result)
+        }
+
+        // 5. null? Failed Promise
+        Promise p = newPromise()
+        p.fail(new NullPointerException("Action returned null"))
+        return p
     }
 }

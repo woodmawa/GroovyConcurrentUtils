@@ -1,229 +1,132 @@
 package org.softwood.dag.task
 
-import groovy.transform.stc.ClosureParams
-import groovy.transform.stc.SimpleType
 import groovy.util.logging.Slf4j
-import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
 
-import java.time.Duration
-import java.time.LocalDateTime
-import java.util.concurrent.TimeUnit
-
 /**
- * Base abstract Task that participates in a DAG-based TaskGraph.
+ * Abstract base class for all DAG tasks.
  *
- * Enhanced with @DelegatesTo annotations for better IDE support.
+ * Implements:
+ *  - retryPolicy (maxRetries, backoff, delay)
+ *  - timeoutMillis
+ *  - state handling
+ *  - promise-based async execution
  */
 @Slf4j
 abstract class Task<T> {
 
     final String id
-    String name
 
-    LocalDateTime startTime
-    LocalDateTime finishTime
-    LocalDateTime scheduleAt
+    /** predecessor → successor wiring */
+    final List<String> predecessors = []
+    final List<String> successors   = []
 
-    final Set<String> predecessors = [] as Set
-    final Set<String> successors = [] as Set
-
+    /** Current state */
     TaskState state = TaskState.PENDING
-    RetryPolicy retryPolicy = new RetryPolicy()
 
-    protected Task(String id, String name = null) {
+    /** Retry support */
+    final RetryPolicy retryPolicy = new RetryPolicy()
+
+    /** Timeout support (null → no timeout) */
+    Long timeoutMillis = null
+    void setTimeoutMillis(Number n) { timeoutMillis = n?.longValue() }
+
+    /** Execution hook implemented in subclasses */
+    abstract Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prevOpt)
+
+    Task(String id) {
         this.id = id
-        this.name = name ?: id
     }
 
-    // -------------------------------------------------------------------------
-    // DSL SUPPORT (with type hints for IDE)
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------
+    // Retry + backoff setters (DSL-friendly)
+    // -----------------------------------------------------------
 
-    Task<T> maxRetries(int n) {
-        retryPolicy.maxAttempts = n
-        return this
-    }
+    Task<T> maxRetries(int n)               { retryPolicy.maxAttempts = n; return this }
+    void setMaxRetries(Number n)            { retryPolicy.maxAttempts = n?.intValue() }
 
-    Task<T> maxRetries(Number n) {
-        return maxRetries(n.intValue())
-    }
+    Task<T> retryDelay(long millis)         { retryPolicy.initialDelayMillis = millis; return this }
+    void setRetryDelay(Number n)            { retryPolicy.initialDelayMillis = n?.longValue() }
 
-    Task<T> retryDelay(Duration d) {
-        retryPolicy.initialDelay = d
-        return this
-    }
+    Task<T> retryBackoff(double factor)     { retryPolicy.backoffMultiplier = factor; return this }
+    void setRetryBackoff(Number n)          { retryPolicy.backoffMultiplier = n?.doubleValue() }
 
-    Task<T> retryDelay(Number millis) {
-        return retryDelay(Duration.ofMillis(millis.longValue()))
-    }
+    // -----------------------------------------------------------
+    // Execution entry point
+    // -----------------------------------------------------------
 
-    Task<T> backoffMultiplier(double m) {
-        retryPolicy.backoffMultiplier = m
-        return this
-    }
+    Optional<Promise<?>> execute(TaskContext ctx,
+                                 Optional<Promise<?>> prevOpt,
+                                 Closure emitEvent) {
 
-    Task<T> backoffMultiplier(Number n) {
-        return backoffMultiplier(n.doubleValue())
-    }
+        this.state = TaskState.SCHEDULED
+        emitEvent(new TaskEvent(id, state))
 
-    Task<T> circuitOpenFor(Duration d) {
-        retryPolicy.circuitOpenDuration = d
-        return this
-    }
-
-    Task<T> scheduledAt(LocalDateTime time) {
-        this.scheduleAt = time
-        return this
-    }
-
-    Task<T> scheduleAt(LocalDateTime time) {
-        return scheduledAt(time)
-    }
-
-    Task<T> dependsOn(String... ids) {
-        predecessors.addAll(ids)
-        return this
-    }
-
-    // -------------------------------------------------------------------------
-    // ABSTRACT WORK METHOD
-    // -------------------------------------------------------------------------
-
-    protected abstract Promise<T> doRun(TaskContext ctx, Optional<Promise<?>> previous)
-
-    // -------------------------------------------------------------------------
-    // EXECUTION ENGINE
-    // -------------------------------------------------------------------------
-
-    Optional<Promise<T>> execute(TaskContext ctx,
-                                 Optional<Promise<?>> previous,
-                                 Closure<TaskEvent> eventEmitter) {
-
-        if (retryPolicy.isCircuitOpen()) {
-            state = TaskState.CIRCUIT_OPEN
-            log.warn("Circuit open for task ${id}, skipping execution")
-            eventEmitter.call(new TaskEvent(taskId: id, type: TaskEventType.SKIP))
+        // If predecessors failed → skip
+        boolean anyFailed = predecessors.any { pid ->
+            ctx.graph.tasks[pid].state == TaskState.FAILED
+        }
+        if (anyFailed) {
+            this.state = TaskState.SKIPPED
+            emitEvent(new TaskEvent(id, state))
             return Optional.empty()
         }
 
-        state = TaskState.SCHEDULED
+        // Submit async execution
+        Promise<T> p = runAttempt(ctx, prevOpt, emitEvent)
 
-        Promise<T> resultPromise = Promises.newPromise()
+        return Optional.of(p)
+    }
 
-        Runnable attempt = null
-        attempt = {
+    // -----------------------------------------------------------
+    // Internal run + retry loop
+    // -----------------------------------------------------------
 
-            state = TaskState.RUNNING
-            startTime = LocalDateTime.now()
+    Promise<T> runAttempt(TaskContext ctx,
+                          Optional<Promise<?>> prevOpt,
+                          Closure emitEvent) {
 
-            eventEmitter.call(new TaskEvent(taskId: id, type: TaskEventType.START))
+        return Promises.future(ctx.pool.executor, {
+            int attempt = 1
+            long delay  = retryPolicy.initialDelayMillis
 
-            try {
-                Promise<T> work = doRun(ctx, previous)
+            while (true) {
+                try {
+                    this.state = TaskState.RUNNING
+                    emitEvent(new TaskEvent(id, state))
 
-                work.onComplete { T value ->
-                    finishTime = LocalDateTime.now()
-                    retryPolicy.recordSuccess()
-                    state = TaskState.COMPLETED
+                    // Run user action (implemented in subclass)
+                    Promise<T> result = runTask(ctx, prevOpt)
 
-                    resultPromise.accept(value)
-                    eventEmitter.call(new TaskEvent(
-                            taskId: id,
-                            type: TaskEventType.SUCCESS,
-                            result: value
-                    ))
-                }.onError { Throwable e ->
-                    handleFailure(e, ctx, previous, resultPromise, eventEmitter)
+                    // Apply timeout if configured
+                    if (timeoutMillis != null) {
+                        result = result.orTimeout(timeoutMillis)
+                    }
+
+                    // Success path
+                    this.state = TaskState.COMPLETED
+                    emitEvent(new TaskEvent(id, state))
+                    return result.get()
+
+                } catch (Throwable err) {
+
+                    // Out of retries? → fail task
+                    if (attempt >= retryPolicy.maxAttempts) {
+                        this.state = TaskState.FAILED
+                        emitEvent(new TaskEvent(id, state, err))
+                        throw err
+                    }
+
+                    // Retry allowed → wait + retry
+                    log.warn("Task ${id} failed on attempt ${attempt}: ${err.message} → retrying")
+
+                    Thread.sleep(delay)
+                    delay = (long)(delay * retryPolicy.backoffMultiplier)
+                    attempt++
                 }
             }
-            catch (Throwable t) {
-                handleFailure(t, ctx, previous, resultPromise, eventEmitter)
-            }
-        }
-
-        if (scheduleAt != null && scheduleAt.isAfter(LocalDateTime.now())) {
-            long delayMillis = Duration.between(LocalDateTime.now(), scheduleAt).toMillis()
-            ctx.pool.scheduleExecution(delayMillis as int, TimeUnit.MILLISECONDS, attempt)
-        } else {
-            ctx.pool.execute(attempt)
-        }
-
-        return Optional.of(resultPromise)
+        })
     }
 
-    private void handleFailure(Throwable e,
-                               TaskContext ctx,
-                               Optional<Promise<?>> previous,
-                               Promise<T> promise,
-                               Closure<TaskEvent> events) {
-
-        retryPolicy.recordFailure()
-
-        if (retryPolicy.attemptCount <= retryPolicy.maxAttempts) {
-            def delay = retryPolicy.nextDelay()
-            log.warn("Task ${id} failed: ${e.message} – retrying in ${delay.toMillis()}ms " +
-                    "(${retryPolicy.attemptCount}/${retryPolicy.maxAttempts})")
-
-            ctx.pool.scheduleExecution(delay.toMillis() as int, TimeUnit.MILLISECONDS, {
-                execute(ctx, previous, events)
-            })
-        }
-        else {
-            finishTime = LocalDateTime.now()
-            state = TaskState.FAILED
-            promise.fail(e)
-
-            events.call(new TaskEvent(
-                    taskId: id,
-                    type: TaskEventType.ERROR,
-                    error: e
-            ))
-        }
-    }
-
-    /**
-     * Ensure the given result is a proper Promise.
-     *
-     * This method handles cases where user code might accidentally return:
-     * - A raw DataflowVariable (wrap it in a Promise)
-     * - Already a Promise (return as-is)
-     * - A plain value (wrap in a completed Promise)
-     * - null (return a failed Promise)
-     */
-    protected Promise<?> ensurePromise(Object result) {
-        // Already a Promise? Good!
-        if (result instanceof Promise) {
-            return (Promise<?>) result
-        }
-
-        // Raw DataflowVariable leaked out? Wrap it!
-        if (result instanceof DataflowVariable) {
-            DataflowVariable dfv = (DataflowVariable) result
-            Promise promise = Promises.newPromise()
-
-            // Wire the DFV to the Promise
-            dfv.whenAvailable { value ->
-                promise.accept(value)
-            }
-            dfv.whenError { error ->
-                promise.fail(error)
-            }
-
-            return promise
-        }
-
-        // Plain value? Wrap in completed Promise
-        if (result != null) {
-            Promise promise = Promises.newPromise()
-            promise.accept(result)
-            return promise
-        }
-
-        // null? Return failed Promise
-        Promise promise = Promises.newPromise()
-        promise.fail(new NullPointerException("Join action returned null"))
-        return promise
-    }
 }

@@ -10,6 +10,53 @@ import org.softwood.dag.task.TaskState
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
 
+/**
+ * TaskGraph represents a Directed Acyclic Graph (DAG) of executable tasks with promise-based
+ * asynchronous execution capabilities.
+ *
+ * <p>The TaskGraph provides a declarative DSL for defining complex task workflows with dependencies,
+ * fork/join patterns, and conditional routing. Tasks are executed asynchronously using a thread pool,
+ * with automatic dependency resolution and state management.</p>
+ *
+ * <h3>Architecture Overview</h3>
+ * <ul>
+ *   <li><b>Task Management:</b> Maintains a registry of tasks and their relationships</li>
+ *   <li><b>Execution Engine:</b> Promise-based asynchronous execution with dependency tracking</li>
+ *   <li><b>Event System:</b> Pluggable listener architecture for monitoring task lifecycle</li>
+ *   <li><b>Context Propagation:</b> Shared context for passing data between tasks</li>
+ * </ul>
+ *
+ * <h3>Usage Pattern</h3>
+ * <pre>
+ * def graph = TaskGraph.build {
+ *     globals {
+ *         apiKey = "secret"
+ *     }
+ *
+ *     serviceTask("fetchData") {
+ *         action { ctx, prev ->
+ *             // fetch data
+ *             return dataPromise
+ *         }
+ *     }
+ *
+ *     serviceTask("processData") {
+ *         dependsOn("fetchData")
+ *         action { ctx, prev ->
+ *             def data = prev.get().get()
+ *             // process data
+ *         }
+ *     }
+ * }
+ *
+ * graph.run().get() // Execute and wait for completion
+ * </pre>
+ *
+ * @author Softwood
+ * @see TaskGraphDsl
+ * @see Task
+ * @see Promise
+ */
 @Slf4j
 class TaskGraph {
 
@@ -24,9 +71,9 @@ class TaskGraph {
         this.ctx = ctx
     }
 
-    // ───────────────────────────────
+    // ---------------------------------------------------------------------
     // DSL entry point
-    // ───────────────────────────────
+    // ---------------------------------------------------------------------
 
     static TaskGraph build(@DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = TaskGraphDsl) Closure cl) {
         def graph = new TaskGraph()
@@ -45,70 +92,113 @@ class TaskGraph {
         listeners << l
     }
 
-    // ───────────────────────────────
+    // ---------------------------------------------------------------------
     // Execution
-    // ───────────────────────────────
+    // ---------------------------------------------------------------------
 
     Promise<?> run() {
+
         Promise<Object> completion = Promises.newPromise()
 
-        Map<String, Optional<Promise<?>>> results = [:].withDefault { Optional.empty() }
+        // taskId -> Optional<Promise<?>>
+        Map<String, Optional<Promise<?>>> results =
+                new LinkedHashMap<String, Optional<Promise<?>>>().withDefault {
+                    Optional.<Promise<?>>empty()
+                }
 
-        // Store results map in context so join tasks can access it
+        // Expose to JoinDsl and general diagnostics
         ctx.globals.__taskResults = results
 
-        Closure<TaskEvent> emit = { TaskEvent ev ->
+        // Event emitter wrapper
+        Closure<Void> emit = { TaskEvent ev ->
             ev.graphId = this.id
-            listeners.each { it.onEvent(ev) }
+            listeners.each { TaskListener l -> l.onEvent(ev) }
+            null
         }
 
-        def ready = { ->
-            tasks.values().findAll { t ->
+        // "Ready" tasks: PENDING/SCHEDULED whose predecessors are all terminal
+        Closure<List<Task>> ready = {
+            tasks.values().findAll { Task t ->
                 t.state in [TaskState.PENDING, TaskState.SCHEDULED] &&
                         t.predecessors.every { pid ->
-                            tasks[pid].state in [TaskState.COMPLETED, TaskState.FAILED, TaskState.SKIPPED]
+                            tasks[pid].state in [
+                                    TaskState.COMPLETED,
+                                    TaskState.FAILED,
+                                    TaskState.SKIPPED
+                            ]
                         }
             }
         }
 
+        // Run scheduler on the pool
         ctx.pool.execute {
-            def activePromises = [] as List<Promise<?>>
 
-            while (true) {
-                def toRun = ready()
-                if (!toRun && activePromises.isEmpty()) break
+            try {
+                while (true) {
+                    def toRun = ready()
 
-                toRun.each { Task t ->
-                    Optional<Promise<?>> prevOpt = Optional.empty()
+                    // Schedule all ready tasks
+                    toRun.each { Task t ->
+                        Optional<Promise<?>> prevOpt = Optional.empty()
 
-                    // For non-join tasks with single predecessor, pass that promise
-                    boolean isJoinTask = t.metaClass.hasProperty(t, 'isJoinTask') && t.metaClass.isJoinTask
+                        boolean isJoinTask =
+                                t.metaClass.hasProperty(t, 'isJoinTask') &&
+                                        t.metaClass.isJoinTask
 
-                    if (!isJoinTask && t.predecessors.size() == 1) {
-                        prevOpt = results[t.predecessors.first()]
+                        // 1-predecessor passthrough (non-join)
+                        if (!isJoinTask && t.predecessors.size() == 1) {
+                            prevOpt = results[t.predecessors.first()]
+                        }
+
+                        Optional<Promise<?>> optPromise = t.execute(ctx, prevOpt, emit)
+
+                        if (optPromise.isPresent()) {
+                            Promise<?> p = optPromise.get()
+                            results[t.id] = Optional.of(p)
+                        } else {
+                            // Represent "no promise" as a completed-null promise
+                            Promise<Object> p = Promises.newPromise()
+                            p.accept(null)
+                            results[t.id] = Optional.of(p)
+                        }
                     }
-                    // Join tasks will access results via ctx.globals.__taskResults
 
-                    def optPromise = t.execute(ctx, prevOpt, emit)
-                    if (optPromise.isPresent()) {
-                        Promise<?> p = optPromise.get()
-                        results[t.id] = Optional.of(p)
-                        activePromises << p
-                        p.onComplete { activePromises.remove(p) }
-                        p.onError    { activePromises.remove(p) }
-                    } else {
-                        results[t.id] = Optional.empty()
+                    if (toRun.isEmpty()) {
+                        boolean allDone = tasks.values().every { Task t ->
+                            t.state in [
+                                    TaskState.COMPLETED,
+                                    TaskState.FAILED,
+                                    TaskState.SKIPPED
+                            ]
+                        }
+
+                        if (allDone) {
+                            break
+                        }
+
+                        Thread.sleep(10)
                     }
                 }
 
-                if (toRun.isEmpty()) {
-                    Thread.sleep(10)
+                // Choose "last" task as graph result
+                def lastTask = tasks.values().last()
+                Optional<Promise<?>> opt = results[lastTask.id]
+                Promise<?> lastPromise = opt?.orElse(null)
+
+                if (lastPromise == null) {
+                    lastPromise = Promises.newPromise()
+                    lastPromise.accept(null)
                 }
+
+                lastPromise.onComplete { value ->
+                    completion.accept(value)
+                }.onError { err ->
+                    completion.fail(err)
+                }
+
+            } catch (Throwable e) {
+                completion.fail(e)
             }
-
-            def last = tasks.values().last()
-            def lastRes = results[last.id]?.orElse(null)
-            completion.accept(lastRes)
         }
 
         return completion

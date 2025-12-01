@@ -68,6 +68,9 @@ interface Promise<T> {
     /** Whether the promise is complete (success or error). */
     boolean isDone()
 
+    /** Alias for is done, Whether the promise is complete (success or error). */
+    boolean isCompleted()
+
     /** Register a callback for successful completion. */
     Promise<T> onComplete(Consumer<T> callback)
 

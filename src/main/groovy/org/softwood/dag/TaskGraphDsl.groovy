@@ -28,13 +28,9 @@ class TaskGraphDsl {
     }
 
     // ----------------------------------------------------------------------
-    // Task creation DSL with proper delegation
+    // Task creation DSL
     // ----------------------------------------------------------------------
 
-    /**
-     * Generic task creation with explicit delegation to the Task type.
-     * The IDE will now resolve methods like maxRetries, dependsOn, etc.
-     */
     def task(String id,
              Class<? extends Task> type = ServiceTask,
              @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
@@ -51,10 +47,6 @@ class TaskGraphDsl {
         return t
     }
 
-    /**
-     * ServiceTask-specific helper with explicit ServiceTask delegation.
-     * This ensures the IDE knows about both Task methods AND ServiceTask.action().
-     */
     def serviceTask(String id,
                     @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
                             value = ServiceTask)
@@ -75,7 +67,9 @@ class TaskGraphDsl {
         cl.delegate = dsl
         cl.resolveStrategy = Closure.DELEGATE_FIRST
         cl.call()
-        // Relationships are now applied immediately in ForkDsl.to()
+
+        // Apply any dynamic routing wiring (router task) after user config
+        dsl.build()
     }
 
     // ----------------------------------------------------------------------
@@ -91,12 +85,16 @@ class TaskGraphDsl {
         ServiceTask joinTask = new ServiceTask(id)
         joinTask.metaClass.joinStrategy = strategy
 
-        JoinDsl dsl = new JoinDsl(graph, joinTask)
+        JoinDsl jdsl = new JoinDsl(graph, joinTask)
 
-        cl.delegate = dsl
+        cl.delegate = jdsl
         cl.resolveStrategy = Closure.DELEGATE_FIRST
         cl.call()
 
+        // finish configuring joinTask
+        jdsl.build()
+
+        // then add to graph
         graph.addTask(joinTask)
     }
 

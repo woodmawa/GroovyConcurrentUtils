@@ -106,6 +106,11 @@ class CompletableFuturePromise<T> implements Promise<T> {
         return future.isDone()
     }
 
+    @Override
+    boolean isCompleted() {
+        return future.isDone()
+    }
+
     // -------------------------------------------------------------------------
     // Callbacks
     // -------------------------------------------------------------------------

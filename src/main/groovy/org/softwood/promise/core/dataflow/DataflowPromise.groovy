@@ -153,6 +153,12 @@ class DataflowPromise<T> implements Promise<T> {
         return variable.isDone()
     }
 
+    /** {@inheritDoc} */
+    @Override
+    boolean isCompleted() {
+        return variable.isDone()
+    }
+
     // -------------------------------------------------------------------------
     // Callback Registration
     // -------------------------------------------------------------------------
@@ -174,6 +180,7 @@ class DataflowPromise<T> implements Promise<T> {
         }
         return this
     }
+
 
     // -------------------------------------------------------------------------
     // Transformations

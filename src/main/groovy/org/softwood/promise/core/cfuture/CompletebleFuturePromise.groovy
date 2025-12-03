@@ -3,11 +3,14 @@ package org.softwood.promise.core.cfuture
 import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.promise.core.PromiseState
 
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Consumer
 import java.util.function.Function
 import java.util.function.Predicate
@@ -43,8 +46,21 @@ class CompletableFuturePromise<T> implements Promise<T> {
     /** Wrapped Java {@link CompletableFuture}. */
     private final CompletableFuture<T> future
 
+    /** CRITICAL: Explicitly manage the promise lifecycle state. */
+    private final AtomicReference<PromiseState> state = new AtomicReference<>(PromiseState.PENDING) // New Field
+
     CompletableFuturePromise(CompletableFuture<T> future) {
         this.future = future
+        // Initialize state for already resolved futures (optional, but robust)
+        if (future.isDone()) {
+            if (future.isCancelled()) {
+                state.set(PromiseState.CANCELLED)
+            } else if (future.isCompletedExceptionally()) {
+                state.set(PromiseState.FAILED)
+            } else {
+                state.set(PromiseState.COMPLETED)
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -53,33 +69,52 @@ class CompletableFuturePromise<T> implements Promise<T> {
 
     @Override
     Promise<T> accept(T value) {
-        future.complete(value)
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)) {
+            // Complete the underlying CompletableFuture
+            future.complete(value)
+        }
         return this
     }
 
     @Override
     Promise<T> accept(Supplier<T> supplier) {
-        try {
-            future.complete(supplier.get())
-        } catch (Throwable e) {
-            future.completeExceptionally(e)
+        // Execute only if PENDING (the base accept/fail handles the final state transition)
+        if (state.get() == PromiseState.PENDING) {
+            try {
+                T value = supplier.get()
+                accept(value) // Calls state-managed accept(T value)
+            } catch (Throwable error) {
+                fail(error) // Calls state-managed fail(Throwable error)
+            }
         }
         return this
     }
 
     @Override
     Promise<T> accept(CompletableFuture<T> other) {
-        other.whenComplete { T val, Throwable err ->
-            if (err != null) future.completeExceptionally(err)
-            else future.complete(val)
+        // Register callbacks that call this Promise's state-managed methods.
+        other.whenComplete { value, error ->
+            if (error != null) {
+                // Unwrap error and call fail, which handles CancellationException
+                Throwable actualError = (error instanceof CompletionException)
+                        ? error.cause ?: error : error
+                fail(actualError)
+            } else {
+                accept(value)
+            }
         }
         return this
     }
 
     @Override
     Promise<T> accept(Promise<T> other) {
-        other.onComplete { T v -> future.complete(v) }
-        other.onError { Throwable e -> future.completeExceptionally(e) }
+        // Register callbacks that call this Promise's state-managed methods.
+        other.onComplete { T v ->
+            accept(v) // Calls state-managed accept(T value)
+        }
+        other.onError { Throwable e ->
+            fail(e)   // Calls state-managed fail(Throwable error), which correctly handles cancellation
+        }
         return this
     }
 
@@ -101,19 +136,44 @@ class CompletableFuturePromise<T> implements Promise<T> {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Cancellation and State Check Operations (NEW)
+    // -------------------------------------------------------------------------
+
+    @Override
+    boolean cancel(boolean mayInterruptIfRunning) {
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)) {
+            // Cancel the underlying CompletableFuture
+            future.cancel(mayInterruptIfRunning)
+            return true
+        }
+
+        // Return true if already cancelled, false otherwise (COMPLETED/FAILED)
+        return isCancelled()
+    }
+
+    @Override
+    boolean isCancelled() {
+        // Check the explicit state, which is guaranteed to be set by cancel() or fail() interception
+        return state.get() == PromiseState.CANCELLED
+    }
+
     @Override
     boolean isDone() {
-        return future.isDone()
+        return state.get() != PromiseState.PENDING
     }
 
     @Override
     boolean isCompleted() {
-        return future.isDone()
+        return state.get() == PromiseState.COMPLETED
     }
 
+    // ... all other methods (then, map, flatMap, get, etc.) remain the same,
+    // relying on the underlying `future` or the new state checks (`isDone`, `isCancelled`)
     // -------------------------------------------------------------------------
     // Callbacks
     // -------------------------------------------------------------------------
+
 
     @Override
     Promise<T> onComplete(Consumer<T> callback) {
@@ -142,7 +202,16 @@ class CompletableFuturePromise<T> implements Promise<T> {
 
     @Override
     Promise<T> fail(Throwable error) {
-        future.completeExceptionally(error)
+        // CRITICAL CHECK: If the error is CancellationException, delegate to cancel()
+        if (error instanceof CancellationException) {
+            cancel(false)
+            return this
+        }
+
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
+            // Complete the underlying CompletableFuture with an exception
+            future.completeExceptionally(error)
+        }
         return this
     }
 
@@ -188,18 +257,18 @@ class CompletableFuturePromise<T> implements Promise<T> {
                 if (inner == null)
                     throw new NullPointerException("flatMap mapper returned null Promise")
             } catch (Throwable t) {
-                return CompletableFuture.failedFuture(t)
+                return CompletableFuture.failedFuture(t) as CompletableFuture<T>
             }
 
             // Extract inner CompletableFuture
             if (!(inner instanceof CompletableFuturePromise)) {
                 return CompletableFuture.failedFuture(
                         new IllegalArgumentException("flatMap: Promise must be a CompletableFuturePromise")
-                )
+                ) as CompletableFuture<T>
             }
 
             CompletableFuturePromise<R> cfInner = (CompletableFuturePromise<R>) inner
-            return cfInner.future
+            return cfInner.future as CompletableFuture<T>
         }
 
         return new CompletableFuturePromise<R>(chained)
@@ -213,11 +282,11 @@ class CompletableFuturePromise<T> implements Promise<T> {
         CompletableFuture<T> filtered = future.thenCompose { T v ->
             try {
                 if (predicate.test(v))
-                    return CompletableFuture.completedFuture(v)
+                    return CompletableFuture.completedFuture(v) as CompletableFuture<T>
                 else
-                    return CompletableFuture.failedFuture(new NoSuchElementException("Predicate not satisfied"))
+                    return CompletableFuture.failedFuture(new NoSuchElementException("Predicate not satisfied")) as CompletableFuture<T>
             } catch (Throwable t) {
-                return CompletableFuture.failedFuture(t)
+                return CompletableFuture.failedFuture(t) as CompletableFuture<T>
             }
         }
         return new CompletableFuturePromise<T>(filtered)

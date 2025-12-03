@@ -1,8 +1,11 @@
 package org.softwood.dataflow
 
 import org.junit.jupiter.api.Test
+
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+
 import static org.junit.jupiter.api.Assertions.*
 import static org.awaitility.Awaitility.await
 
@@ -13,9 +16,8 @@ class DataflowVariableTest {
         def df = new DataflowVariable<Integer>()
         df.bind(42)
 
-        // df.get() is synchronous and blocking-read only
         assertEquals(42, df.get())
-        assertTrue(df.isDone())
+        assertTrue(df.isBound())
         assertTrue(df.isSuccess())
         assertFalse(df.hasError())
     }
@@ -58,9 +60,7 @@ class DataflowVariableTest {
 
         df.bind(10)
 
-        await().atMost(1, TimeUnit.SECONDS).until {
-            transformed.isDone()
-        }
+        await().atMost(1, TimeUnit.SECONDS).until { transformed.isBound() }
         assertEquals(20, transformed.get())
     }
 
@@ -71,7 +71,7 @@ class DataflowVariableTest {
 
         df.bindError(new RuntimeException("fail"))
 
-        await().atMost(1, TimeUnit.SECONDS).until { chained.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { chained.isBound() }
         assertTrue(chained.hasError())
         assertEquals("fail", chained.getError().message)
     }
@@ -83,7 +83,7 @@ class DataflowVariableTest {
 
         df.bindError(new IllegalArgumentException("bad"))
 
-        await().atMost(1, TimeUnit.SECONDS).until { recovered.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { recovered.isBound() }
         assertEquals(99, recovered.get())
     }
 
@@ -125,7 +125,7 @@ class DataflowVariableTest {
         a.bind(10)
         b.bind(5)
 
-        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isBound() }
         assertEquals(15, sum.get())
     }
 
@@ -136,7 +136,7 @@ class DataflowVariableTest {
 
         a.bind(7)
 
-        await().atMost(1, TimeUnit.SECONDS).until { result.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { result.isBound() }
         assertEquals(10, result.get())
     }
 
@@ -150,7 +150,7 @@ class DataflowVariableTest {
         a.bind(20)
         b.bind(4)
 
-        await().atMost(1, TimeUnit.SECONDS).until { diff.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { diff.isBound() }
         assertEquals(16, diff.get())
     }
 
@@ -164,7 +164,7 @@ class DataflowVariableTest {
         a.bind(6)
         b.bind(7)
 
-        await().atMost(1, TimeUnit.SECONDS).until { prod.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { prod.isBound() }
         assertEquals(42, prod.get())
     }
 
@@ -178,7 +178,7 @@ class DataflowVariableTest {
         a.bind(20)
         b.bind(4)
 
-        await().atMost(1, TimeUnit.SECONDS).until { div.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { div.isBound() }
         assertEquals(5, div.get())
     }
 
@@ -188,14 +188,13 @@ class DataflowVariableTest {
         def b = new DataflowVariable<Integer>()
         def c = new DataflowVariable<Integer>()
 
-        // (a + b) * c
         def expr = (a + b) * c
 
         a.bind(2)
         b.bind(3)
         c.bind(4)
 
-        await().atMost(1, TimeUnit.SECONDS).until { expr.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { expr.isBound() }
         assertEquals(20, expr.get())
     }
 
@@ -209,7 +208,7 @@ class DataflowVariableTest {
         a.bindError(new RuntimeException("left-failed"))
         b.bind(10)
 
-        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isBound() }
         assertTrue(sum.hasError())
         assertEquals("left-failed", sum.getError().message)
     }
@@ -224,18 +223,40 @@ class DataflowVariableTest {
         a.bind(10)
         b.bindError(new RuntimeException("right-failed"))
 
-        await().atMost(1, TimeUnit.SECONDS).until { sum.isDone() }
+        await().atMost(1, TimeUnit.SECONDS).until { sum.isBound() }
         assertTrue(sum.hasError())
         assertEquals("right-failed", sum.getError().message)
     }
 
+    // NEW – division by zero must be treated as an operator error
     @Test
     void testOperatorEvaluationExceptionsProduceError() {
         def a = new DataflowVariable<Integer>()
         def b = new DataflowVariable<Integer>()
 
-        // Division by zero inside operator closure
-        def div = a / b
+        def div = a / b   // mapping closure performs a / b
 
+        a.bind(10)
+        b.bind(0)
+
+        await().atMost(1, TimeUnit.SECONDS).until { div.isBound() }
+        assertTrue(div.hasError())
+    }
+
+    // NEW – cancellation test
+    @Test
+    void testCancellationHandledCorrectly() {
+        def df = new DataflowVariable<Integer>()
+
+        df.bindCancelled()
+
+        assertTrue(df.isBound())
+        assertTrue(df.hasError())
+        assertTrue(df.getError() instanceof CancellationException)
+
+        def cf = df.toFuture()
+        assertThrows(CancellationException) {
+            cf.get(1, TimeUnit.SECONDS)
+        }
     }
 }

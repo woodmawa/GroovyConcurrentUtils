@@ -273,4 +273,103 @@ class Promises {
         p.fail(new NullPointerException("Action returned null"))
         return p
     }
+
+    /**
+     * Wait for any of the given promises to complete successfully.
+     *
+     * <p>Returns a Promise that completes with the value of the first
+     * Promise in the iterable to complete successfully.
+     * If all promises fail, this promise will fail with an aggregation
+     * of errors or the error of the last promise to fail.</p>
+     *
+     * @param promises iterable of promises to wait on
+     * @param <T> value type
+     * @return new Promise
+     */
+    static <T> Promise<T> any(Iterable<Promise<T>> promises) {
+        Promise<T> resultPromise = newPromise()
+        def errorCount = 0
+        def totalPromises = 0
+        // Simple list to collect errors, but typically you'd want a more
+        // robust structure or just the last error for 'any' failure.
+        def errors = []
+
+        // 1. Convert to a list to count and iterate safely
+        def promiseList = promises.collect()
+        totalPromises = promiseList.size()
+
+        if (totalPromises == 0) {
+            // Resolve immediately if there are no promises
+            return newPromise(null) // or newPromise(T) if T is non-void
+        }
+
+        // 2. Iterate and register completion handlers
+        promiseList.each { Promise<T> p ->
+            p.onComplete { T v ->
+                // Fulfills immediately on first success
+                resultPromise.accept(v)
+            }
+
+            p.onError { Throwable e ->
+                errors.add(e)
+                errorCount++
+
+                // If all promises have failed, fail the resultPromise
+                if (errorCount == totalPromises) {
+                    // For simplicity, we'll fail with a generic exception wrapping the errors.
+                    // A production version might use a specific 'AggregateException'.
+                    resultPromise.fail(new RuntimeException("All promises failed: " + errors))
+                }
+            }
+        }
+
+        return resultPromise
+    }
+
+    /**
+     * Wait for all of the given promises to complete successfully.
+     *
+     * <p>Returns a Promise that completes with a List of all successful
+     * values in the same order as the input. If any promise fails,
+     * the resulting promise fails immediately with that promise's error.</p>
+     *
+     * @param promises iterable of promises to wait on
+     * @param <T> value type
+     * @return new Promise<List<T>>
+     */
+    static <T> Promise<List<T>> all(Iterable<Promise<T>> promises) {
+        Promise<List<T>> resultPromise = newPromise()
+
+        // 1. Convert to a list and set up result storage
+        def promiseList = promises.collect()
+        def totalPromises = promiseList.size()
+        def results = new ArrayList(Collections.nCopies(totalPromises, null))
+        def successCount = 0
+
+        if (totalPromises == 0) {
+            // Resolve immediately if there are no promises
+            return newPromise(Collections.emptyList())
+        }
+
+        // 2. Register failure and success handlers
+        promiseList.eachWithIndex { Promise<T> p, int index ->
+            // Failure: Fail the result immediately
+            p.onError { Throwable e ->
+                resultPromise.fail(e)
+            }
+
+            // Success: Store result and check if all are complete
+            p.onComplete { T v ->
+                results[index] = v // Store result in the correct position
+                successCount++
+
+                // If all have succeeded, fulfill the resultPromise
+                if (successCount == totalPromises) {
+                    resultPromise.accept(results)
+                }
+            }
+        }
+
+        return resultPromise
+    }
 }

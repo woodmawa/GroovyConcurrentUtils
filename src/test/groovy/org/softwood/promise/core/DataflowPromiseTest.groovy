@@ -19,6 +19,7 @@ import java.util.function.Supplier
 import static org.junit.jupiter.api.Assertions.*
 import static org.awaitility.Awaitility.await
 import static java.util.concurrent.TimeUnit.SECONDS
+import java.util.concurrent.CancellationException
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DataflowPromiseTest {
@@ -305,4 +306,122 @@ class DataflowPromiseTest {
         assertTrue(ex instanceof NullPointerException)
         assertTrue(ex.message.contains("null promise"))
     }
+
+    @Test
+    void "cancel() cancels the promise"() {
+        def dfv = new DataflowVariable<Integer>()
+        Promise<Integer> p = new DataflowPromise<>(dfv)
+
+        p.cancel(true)
+
+        assertTrue(p.isCancelled())
+        assertTrue(p.isDone())
+
+        assertThrows(CancellationException) {
+            p.get()
+        }
+    }
+
+    @Test
+    void "cancellation of underlying DataflowVariable propagates to promise"() {
+        def dfv = new DataflowVariable<Integer>()
+        Promise<Integer> p = new DataflowPromise<>(dfv)
+
+        dfv.bindCancelled()
+
+        assertTrue(p.isCancelled())
+        assertTrue(p.isDone())
+
+        assertThrows(CancellationException) { p.get() }
+    }
+
+    @Test
+    void "accept(Promise) propagates cancellation"() {
+        def srcVar = new DataflowVariable<Integer>()
+        Promise<Integer> source = new DataflowPromise<>(srcVar)
+
+        def tgtVar = new DataflowVariable<Integer>()
+        Promise<Integer> target = new DataflowPromise<>(tgtVar)
+
+        target.accept(source)
+
+        source.cancel(true)
+
+        assertTrue(target.isCancelled())
+        assertTrue(target.isDone())
+
+        assertThrows(CancellationException) { target.get() }
+    }
+
+    @Test
+    void "cancellation propagates through then()"() {
+        def dfv = new DataflowVariable<Integer>()
+        Promise<Integer> p = new DataflowPromise<>(dfv)
+
+        def chained = p.then { v -> v * 2 }
+
+        p.cancel(true)
+
+        assertTrue(chained.isCancelled())
+        assertTrue(chained.isDone())
+
+        assertThrows(CancellationException) { chained.get() }
+    }
+
+    @Test
+    void "then() transform does not run after cancellation"() {
+        def dfv = new DataflowVariable<Integer>()
+        Promise<Integer> p = new DataflowPromise<>(dfv)
+
+        def flag = new AtomicReference(false)
+
+        def chained = p.then { v ->
+            flag.set(true)
+            return v * 2
+        }
+
+        p.cancel(true)
+
+        assertTrue(chained.isCancelled())
+        assertFalse(flag.get())  // transform must NOT run
+
+        assertThrows(CancellationException) { chained.get() }
+    }
+
+    @Test
+    void "cancellation propagates through flatMap()"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+        DataflowPromise<Integer> p = factory.createPromise()  // Empty promise
+
+        def chained = p.flatMap { v ->
+            factory.createPromise(v + 5)
+        }
+
+        p.cancel(true)  // Cancel before any value is set
+
+        assertTrue(chained.isCancelled())
+        assertThrows(CancellationException) { chained.get() }
+    }
+
+    @Test
+    void "flatMap inner cancellation propagates"() {
+        def factory = new DataflowPromiseFactory(new DataflowFactory())
+
+        DataflowPromise<Integer> p = factory.createPromise()  // Empty promise
+
+        def chained = p.flatMap { v ->
+            def inner = factory.createPromise()  // Empty promise
+            inner.cancel(true)
+            return inner
+        }
+
+        p.accept(10)  // Trigger flatMap after setup
+
+        // Give async callbacks time to propagate
+        await().atMost(1, SECONDS).until { chained.isDone() }
+
+        assertTrue(chained.isCancelled())
+        assertThrows(CancellationException) { chained.get() }
+    }
+
 }

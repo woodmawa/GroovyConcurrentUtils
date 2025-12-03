@@ -1,299 +1,269 @@
 package org.softwood.dataflow
 
-import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
+import groovy.transform.CompileDynamic
 import groovy.transform.ToString
 import groovy.util.logging.Slf4j
+import org.codehaus.groovy.runtime.InvokerHelper
 import org.softwood.pool.ConcurrentPool
 
 import java.time.Duration
 import java.util.Optional
-import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.function.BiConsumer
-import java.util.function.BiFunction
 import java.util.function.Consumer
 import java.util.function.Function
-import java.util.function.Supplier
 
 /**
- * A specialised {@link DataflowExpression} that behaves like a single-assignment
- * value container with full dataflow semantics and promise-compatible convenience API.
+ * A {@code DataflowVariable} is a specialised {@link DataflowExpression} that behaves similarly to a
+ * single-assignment cell with asynchronous listener notification and promise-like transformation
+ * utilities.
  *
- * <h2>Main Features:</h2>
+ * <p>The DFV provides:</p>
  * <ul>
- *     <li>Thread-safe single assignment</li>
- *     <li>Synchronous and asynchronous listeners (whenBound)</li>
- *     <li>Promise-compatible success/error listeners:
- *         <ul>
- *             <li>{@code #whenAvailable(Consumer)}</li>
- *             <li>{@code #whenError(Consumer)}</li>
- *         </ul>
- *     </li>
- *     <li>Groovy operator support via {@code #methodMissing(String, Object)}</li>
- *     <li>Chaining via {@code #then(Function)} and {@code #recover(Function)}</li>
- *     <li>Non-blocking value inspection via {@code #getIfAvailable()}</li>
+ *   <li>Thread-safe single-assignment semantics</li>
+ *   <li>Completion via success, error, or cancellation</li>
+ *   <li>Blocking and non-blocking access to values</li>
+ *   <li>Integration with {@link CompletableFuture} via {@link DataflowVariable#toFuture()}</li>
+ *   <li>Success and error/cancellation listeners</li>
+ *   <li>Convenience chaining transformations such as {@code then}, {@code recover}, etc.</li>
+ *   <li>Groovy operators such as {@code <<}, {@code >>}, {@code *}, {@code +}, etc.</li>
  * </ul>
  *
- * <p>This class is the foundation underlying {@code DataflowPromise}.</p>
+ * <h2>Lifecycle</h2>
  *
- * @param <T> type of value carried by this variable
+ * The DFV transitions exactly once from {@link DataflowExpression.State#PENDING} to one terminal state:
+ * <ul>
+ *   <li>{@link DataflowExpression.State#SUCCESS}</li>
+ *   <li>{@link DataflowExpression.State#ERROR}</li>
+ *   <li>{@link DataflowExpression.State#CANCELLED}</li>
+ * </ul>
+ *
+ * <h2>Cancellation</h2>
+ *
+ * Cancellation is a first-class completion type. A cancelled DFV:
+ * <ul>
+ *   <li>is considered {@code hasError() == true}</li>
+ *   <li>stores a {@link CancellationException} as its error</li>
+ *   <li>completes its {@link CompletableFuture} exceptionally</li>
+ *   <li>invokes {@code whenError} callbacks but not {@code whenAvailable} callbacks</li>
+ * </ul>
+ *
+ * @param <T> the value type
  */
-@CompileStatic
 @Slf4j
-@ToString
+@CompileStatic
+@ToString(includeNames = true, includeFields = true)
 class DataflowVariable<T> extends DataflowExpression<T> {
 
-    // =============================================================================================
+    // =====================================================================================================
     // Constructors
-    // =============================================================================================
+    // =====================================================================================================
 
-    /**
-     * Create a DFV backed by a default worker pool.
-     */
+    /** Construct using a default {@link ConcurrentPool}. */
     DataflowVariable() {
         super(new ConcurrentPool())
     }
 
-    /**
-     * Create a DFV backed by a specific worker pool.
-     */
+    /** Construct backed by a specific pool. */
     DataflowVariable(ConcurrentPool pool) {
         super(pool)
     }
 
-    /**
-     * Create a DFV with an explicit type and pool.
-     */
+    /** Construct with explicit value type and pool. */
     DataflowVariable(ConcurrentPool pool, Class<T> type) {
         super(pool, type)
     }
 
-    // =============================================================================================
-    // Binding (success/error)
-    // =============================================================================================
+
+    // =====================================================================================================
+    // Binding Operations (Success / Error / Cancellation)
+    // =====================================================================================================
 
     /**
-     * Bind this variable to a value.
+     * Bind this variable to a final value.
      *
-     * <p>This is the primary API for completing a {@code DataflowVariable}. It delegates to
-     * {@link DataflowExpression#setValue(Object)} and triggers asynchronous listener
-     * notification.</p>
+     * <p>Equivalent to calling {@link DataflowExpression#setValue(Object)}.</p>
      *
-     * @param v new value
+     * @param v value to bind
      */
     void bind(Object v) {
         setValue((T) v)
-        log.debug "df now set to $v"
+        log.debug("DataflowVariable bound to value: $v")
     }
 
     /**
-     * Legacy alias for {@link #bind(Object)}.
+     * Bind an error to this DFV.
      *
-     * @param val new value
-     * @return this variable
-     * @deprecated use {@link #bind(Object)} instead
-     */
-    @Deprecated
-    DataflowVariable<T> set(T val) {
-        bind(val)
-        return this
-    }
-
-    /**
-     * Groovy left-shift operator alias for {@link #bind(Object)}.
-     *
-     * @param val new value
-     * @return this variable
-     * @deprecated use {@link #bind(Object)} instead
-     */
-    @Deprecated
-    DataflowVariable<T> leftShift(T val) {
-        bind(val)
-        return this
-    }
-
-    /**
-     * Bind an exception to this DFV.
-     *
-     * @param t error
-     * @return this DFV
+     * <p>Equivalent to {@link DataflowExpression#setError(Throwable)}.</p>
      */
     DataflowVariable<T> bindError(Throwable t) {
-        super.setError(t)
-        log.debug "df now set to error: ${t.message}"
+        setError(t)
+        log.debug("DataflowVariable bound to error: ${t.message}")
         return this
     }
 
-    // =============================================================================================
-    // Getting values (sync)
-    // =============================================================================================
-
     /**
-     * Get the value, blocking until available.
+     * Bind a cancellation into this DFV.
      *
-     * @return value if successful
-     * @throws DataflowException    if the DFV was completed with error
-     * @throws InterruptedException if interrupted while waiting
+     * <p>Equivalent to {@link DataflowExpression#setCancelled(Throwable)}.</p>
+     *
+     * @param cause optional cause for cancellation
+     * @return this DFV
      */
-    T get() {
-        return (T) super.getValue()
+    DataflowVariable<T> bindCancelled(Throwable cause = null) {
+        setCancelled(cause)
+        log.debug("DataflowVariable cancelled: ${cause?.message ?: 'cancelled'}")
+        return this
     }
 
+    /** Alias for {@link #bind(Object)}. */
+    @Deprecated
+    DataflowVariable<T> set(T v) {
+        bind(v)
+        return this
+    }
+
+    /** Operator alias for {@link #bind(Object)}. */
+    @Deprecated
+    DataflowVariable<T> leftShift(T v) {
+        bind(v)
+        return this
+    }
+
+
+    // =====================================================================================================
+    // Retrieval (Blocking / Timeout / Non-Blocking)
+    // =====================================================================================================
+
     /**
-     * Get the value with timeout.
+     * Blocking read of the value.
      *
-     * <p>DataflowVariable semantics:</p>
-     * <ul>
-     *     <li>If timeout elapses, return {@code null}.</li>
-     *     <li>Record a timeout error in the DFV.</li>
-     * </ul>
+     * @return the bound value
+     * @throws Exception on failure or cancellation
      */
-    T get(long timeout, TimeUnit unit) {
+    T get() {
         try {
-            return (T) super.getValue(timeout, unit)
-        } catch (TimeoutException e) {
-            bindError(e)
-            return null
+            return (T) getValue()
+        } catch (Exception e) {
+            throw e
         }
     }
 
     /**
-     * Duration-based timeout version.
+     * Blocking read with timeout.
+     *
+     * <p>If timeout elapses, a {@link TimeoutException} is thrown.</p>
      */
+    T get(long timeout, TimeUnit unit) {
+        try {
+            return (T) getValue(timeout, unit)
+        } catch (TimeoutException te) {
+            bindError(te)
+            return null
+        }
+    }
+
+    /** Duration-based timeout version. */
     T get(Duration duration) {
         return get(duration.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     /**
-     * Non-blocking read: returns {@code null} if pending or if error.
+     * Non-blocking read.
+     *
+     * @return value if successful, otherwise null
      */
     T getNonBlocking() {
-        if (isSuccess()) return get()
-        return null
+        if (!isSuccess()) return null
+        return get()
     }
 
-    /**
-     * Groovy call-operator support: {@code dfv()} &lt;=&gt; {@link #get()}.
-     */
+    /** Groovy call operator alias for {@link #get()}. */
     T call() { return get() }
 
-    // =============================================================================================
-    // DFV state inspection
-    // =============================================================================================
 
-    /**
-     * Whether the DFV is complete (success or error).
-     */
-    boolean isDone() {
-        return isBound()
-    }
+    // =====================================================================================================
+    // State Introspection
+    // =====================================================================================================
 
-    /**
-     * A DFV is successful if:</n>
-     * <ul>
-     *     <li>It is bound</li>
-     *     <li>It has no error</li>
-     * </ul>
-     */
+    /** @return true if success, false if pending, failed, or cancelled */
     boolean isSuccess() {
         return isBound() && !hasError()
     }
 
-    /**
-     * Whether the DFV has an error.
-     */
-    boolean hasError() {
-        return super.hasError()
-    }
-
-    /**
-     * Optional getter for testing and convenience.
-     */
+    /** @return Optional of the value if available and successful */
     Optional<T> getIfAvailable() {
         if (!isSuccess()) return Optional.empty()
-        try { return Optional.ofNullable(get()) }
-        catch (Throwable ignore) { return Optional.empty() }
+        try {
+            return Optional.ofNullable(get())
+        } catch (Throwable ignored) {
+            return Optional.empty()
+        }
     }
 
+
+    // =====================================================================================================
+    // CompletableFuture Interop
+    // =====================================================================================================
+
     /**
-     * Expose this variable as a {@link CompletableFuture} for interoperability with
-     * standard Future/Promise-based APIs (e.g. {@code DataflowPromise}).
+     * Convert this DFV to a {@link CompletableFuture}.
      *
      * <p>Semantics:</p>
      * <ul>
-     *     <li>If the DFV is already successful, the returned future is completed with the value.</li>
-     *     <li>If the DFV is already in error, the returned future is completed exceptionally
-     *         with that error.</li>
-     *     <li>If the DFV is still pending, the future is completed when the DFV completes,
-     *         either normally or exceptionally.</li>
-     *     <li>Each call returns a new, independent future view.</li>
+     *   <li>On success → CF completes normally.</li>
+     *   <li>On failure → CF completes exceptionally.</li>
+     *   <li>On cancellation → CF completes exceptionally with {@link CancellationException}.</li>
      * </ul>
      *
-     * @return a {@link CompletableFuture} reflecting this variable's completion
+     * <p>Each call returns a new, independent CF.</p>
      */
     CompletableFuture<T> toFuture() {
         CompletableFuture<T> cf = new CompletableFuture<>()
 
-        // Already completed?
+        // Already complete?
         if (isBound()) {
             if (hasError()) {
                 cf.completeExceptionally(getError())
             } else {
-                try {
-                    cf.complete(get())
-                } catch (Throwable t) {
-                    cf.completeExceptionally(t)
-                }
+                try { cf.complete(get()) }
+                catch (Throwable t) { cf.completeExceptionally(t) }
             }
             return cf
         }
 
-        // Still pending: wire listeners.
+        // Pending → wire listeners
         whenAvailable { T v ->
-            if (!cf.isDone()) {
-                cf.complete(v)
-            }
+            if (!cf.isDone()) cf.complete(v)
         }
 
-        whenError { Throwable t ->
-            if (!cf.isDone()) {
-                cf.completeExceptionally(t)
-            }
+        whenError { Throwable e ->
+            if (!cf.isDone()) cf.completeExceptionally(e)
         }
 
         return cf
     }
 
-    // =============================================================================================
-    // Promise-compatible async notifications
-    // =============================================================================================
+
+    // =====================================================================================================
+    // Listener API (Success / Error)
+    // =====================================================================================================
 
     /**
      * Register a success listener.
      *
-     * <p>Semantics:</p>
-     * <ul>
-     *     <li>If already successful &rarr; the callback is scheduled asynchronously on this
-     *         variable's worker pool.</li>
-     *     <li>If pending &rarr; the callback is scheduled when the value binds.</li>
-     *     <li>If error &rarr; the callback is never invoked.</li>
-     * </ul>
-     *
-     * <p>The callback is always invoked asynchronously (never on the caller thread) to
-     * avoid surprising re-entrancy.</p>
-     *
-     * @return this DFV
+     * <p>Invoked only if the DFV succeeds.</p>
      */
     DataflowVariable<T> whenAvailable(Consumer<? super T> callback) {
         if (callback == null) return this
 
-        // Always asynchronous via whenBoundAsync
         whenBoundAsync { T v ->
-            if (isSuccess()) {
+            // Full state guard
+            if (isBound() && !hasError()) {
                 try {
                     callback.accept(v)
                 } catch (Throwable t) {
@@ -301,34 +271,25 @@ class DataflowVariable<T> extends DataflowExpression<T> {
                 }
             }
         }
+
         return this
     }
 
     /**
-     * Register an error listener (Groovy Closure version).
+     * Register an error/cancellation listener (Groovy closure version).
      *
-     * <p>Semantics:</p>
-     * <ul>
-     *     <li>If already in error &rarr; the callback is scheduled asynchronously on this
-     *         variable's worker pool.</li>
-     *     <li>If pending &rarr; the callback is scheduled when an error binds.</li>
-     *     <li>If success &rarr; the callback is never invoked.</li>
-     * </ul>
-     *
-     * <p>The callback is always invoked asynchronously (never on the caller thread).</p>
+     * <p>Invoked if the DFV completes with an error or is cancelled.</p>
      */
     DataflowVariable<T> whenError(Closure<?> handler) {
         if (handler == null) return this
 
         whenBoundAsync {
             if (hasError()) {
-                try {
-                    handler.call(getError())
-                } catch (Throwable t) {
-                    log.error("Error in whenError callback", t)
-                }
+                try { handler.call(getError()) }
+                catch (Throwable t) { log.error("Error in whenError callback", t) }
             }
         }
+
         return this
     }
 
@@ -339,217 +300,208 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         return whenError { Throwable t -> handler.accept(t) }
     }
 
-    // =============================================================================================
-    // Chaining (then/recover)
-    // =============================================================================================
-
     /**
-     * Groovy closure transform.
+     * Groovy {@code >>} operator: register a success callback.
+     *
+     * <p>Example:</p>
+     * <pre>
+     *   df >> { v -> println "value = $v" }
+     * </pre>
      */
-    def <R> DataflowVariable<R> then(Closure<R> xform) {
-        DataflowVariable<R> out = new DataflowVariable<R>(pool)
+    DataflowVariable<T> rightShift(Closure handler) {
+        if (handler == null) return this
 
-        // success path
         whenAvailable { T v ->
             try {
-                R r = (xform.maximumNumberOfParameters == 0 ?
-                        (R) xform.call() :
-                        (R) xform.call(v))
-                out.bind(r)
+                handler.call(v)
             } catch (Throwable t) {
-                out.bindError(t)
+                log.error("Error in >> handler", t)
             }
         }
 
-        // error path
-        whenError { Throwable ex -> out.bindError(ex) }
+        return this
+    }
+
+
+    // =====================================================================================================
+    // Functional Transformations
+    // =====================================================================================================
+
+    /**
+     * Transform success value using a function.
+     *
+     * <p>On success → apply fn<br>
+     * On error/cancel → propagate error</p>
+     */
+    <R> DataflowVariable<R> then(Function<T, R> fn) {
+        DataflowVariable<R> out = new DataflowVariable<>(pool)
+
+        whenAvailable { T v ->
+            try { out.bind(fn.apply(v)) }
+            catch (Throwable t) { out.bindError(t) }
+        }
+
+        whenError { Throwable e ->
+            out.bindError(e)
+        }
 
         return out
     }
 
     /**
-     * Java function transform.
-     */
-    def <R> DataflowVariable<R> then(Function<? super T, ? extends R> fn) {
-        return then({ T v -> fn.apply(v) } as Closure<R>)
-    }
-
-    /**
-     * Broad transform covering Closure, Callable, Function, Consumer.
-     */
-    DataflowVariable then(Callable callable) {
-        Closure<?> closure
-
-        if (callable instanceof Closure) {
-            Closure c = (Closure) callable
-            closure = { v -> c.maximumNumberOfParameters == 0 ? c.call() : c.call(v) }
-        }
-        else if (callable instanceof Function) {
-            closure = { v -> ((Function) callable).apply(v) }
-        }
-        else if (callable instanceof Consumer) {
-            closure = { v -> ((Consumer) callable).accept(v); v }
-        }
-        else if (callable instanceof Callable) {
-            closure = { v -> callable.call() }
-        }
-        else {
-            closure = callable as Closure
-        }
-
-        return then((Closure) closure)
-    }
-
-    /**
-     * Groovy right-shift operator support: {@code dfv >> callback} &lt;=&gt; {@link #whenAvailable(Consumer)}.
+     * Recover from failure/cancellation using a recovery function.
      *
-     * @param callback A closure or Consumer to be invoked when the value is available.
-     * @return this DFV
+     * <p>On success → propagate value<br>
+     * On error/cancel → apply recovery</p>
      */
-    DataflowVariable<T> rightShift(Object callback) {
-        // Groovy automatically coerces the Closure/Lambda into a Consumer for whenAvailable.
-        return whenAvailable(callback as Consumer)
-    }
+    <R> DataflowVariable<R> recover(Function<Throwable, R> fn) {
+        DataflowVariable<R> out = new DataflowVariable<>(pool)
 
-    /**
-     * Error recovery transform.
-     */
-    DataflowVariable<T> recover(Function<Throwable, T> fn) {
-        DataflowVariable<T> out = new DataflowVariable<T>(pool)
+        whenAvailable { T v -> out.bind((R) v) }
 
-        // success path
-        whenAvailable { T v -> out.bind(v) }
-
-        // error path
-        whenError { Throwable ex ->
-            try {
-                out.bind(fn.apply(ex))
-            } catch (Throwable t) {
-                out.bindError(t)
-            }
+        whenError { Throwable e ->
+            try { out.bind(fn.apply(e)) }
+            catch (Throwable t) { out.bindError(t) }
         }
 
         return out
     }
 
-    // =============================================================================================
-    // Dynamic operator support (plus, minus, multiply, div)
-    // =============================================================================================
+
+    // =====================================================================================================
+    // Groovy Operators
+    // =====================================================================================================
 
     /**
-     * Ensure any constant operand is wrapped as a DFV using this variable's pool.
-     */
-    private DataflowVariable wrapOperand(Object operand) {
-        if (operand instanceof DataflowVariable) {
-            return (DataflowVariable) operand
-        }
-        DataflowVariable dfv = new DataflowVariable(pool)
-        dfv.bind(operand)
-        return dfv
-    }
-
-    /**
-     * Internal helper for binary operations between this DFV and another operand.
+     * Binary {@code +} operator.
      *
-     * @param other  scalar value or another {@link DataflowVariable}
-     * @param op     closure taking (leftValue, rightValue) and producing the result
-     * @return new {@link DataflowVariable} representing the asynchronous result
-     */
-    private DataflowVariable binaryOp(Object other, Closure op) {
-        DataflowVariable rhs = wrapOperand(other)
-        DataflowVariable result = new DataflowVariable(pool)
-
-        // this success path
-        this.whenAvailable { av ->
-            // rhs success path
-            rhs.whenAvailable { bv ->
-                try {
-                    result.bind(op.call(av, bv))
-                } catch (Throwable t) {
-                    result.bindError(t)
-                }
-            }
-            // rhs error path
-            rhs.whenError { Throwable t ->
-                result.bindError(t)
-            }
-        }
-
-        // this error path
-        this.whenError { Throwable t ->
-            result.bindError(t)
-        }
-
-        return result
-    }
-
-    /**
-     * Groovy {@code +} operator: {@code dfv1 + dfv2}, {@code dfv + 10}.
+     * <p>Supports both {@code DFV + DFV} and {@code DFV + constant}.</p>
+     * <ul>
+     *   <li>DFV + DFV → waits for both to complete; on success returns numeric sum.</li>
+     *   <li>DFV + constant → maps value using {@code then}.</li>
+     *   <li>If either side errors/cancels → result has that error.</li>
+     * </ul>
      */
     @CompileDynamic
     DataflowVariable plus(Object other) {
-        return binaryOp(other) { a, b -> a + b }
+        if (other instanceof DataflowVariable) {
+            DataflowVariable right = (DataflowVariable) other
+            DataflowVariable out = new DataflowVariable(pool)
+
+            def leftF = this.toFuture()
+            def rightF = right.toFuture()
+
+            leftF.thenCombine(rightF) { lv, rv ->
+                (lv instanceof Number && rv instanceof Number) ? (lv + rv) : lv
+            }.whenComplete { res, err ->
+                if (err != null) {
+                    Throwable actual = (err instanceof CompletionException && err.cause != null) ? err.cause : err
+                    out.bindError(actual)
+                } else {
+                    out.bind(res)
+                }
+            }
+
+            return out
+        }
+
+        // DFV + constant
+        return then { T a -> (a instanceof Number && other instanceof Number) ? (a + other) : a }
     }
 
     /**
-     * Groovy {@code -} operator: {@code dfv1 - dfv2}, {@code dfv - 10}.
+     * Binary {@code -} operator.
      */
     @CompileDynamic
     DataflowVariable minus(Object other) {
-        return binaryOp(other) { a, b -> a - b }
+        if (other instanceof DataflowVariable) {
+            DataflowVariable right = (DataflowVariable) other
+            DataflowVariable out = new DataflowVariable(pool)
+
+            def leftF = this.toFuture()
+            def rightF = right.toFuture()
+
+            leftF.thenCombine(rightF) { lv, rv ->
+                (lv instanceof Number && rv instanceof Number) ? (lv - rv) : lv
+            }.whenComplete { res, err ->
+                if (err != null) {
+                    Throwable actual = (err instanceof CompletionException && err.cause != null) ? err.cause : err
+                    out.bindError(actual)
+                } else {
+                    out.bind(res)
+                }
+            }
+
+            return out
+        }
+
+        // DFV - constant
+        return then { T a -> (a instanceof Number && other instanceof Number) ? (a - other) : a }
     }
 
     /**
-     * Groovy {@code *} operator: {@code dfv1 * dfv2}, {@code dfv * 10}.
+     * Binary {@code *} operator.
      */
     @CompileDynamic
     DataflowVariable multiply(Object other) {
-        return binaryOp(other) { a, b -> a * b }
+        if (other instanceof DataflowVariable) {
+            DataflowVariable right = (DataflowVariable) other
+            DataflowVariable out = new DataflowVariable(pool)
+
+            def leftF = this.toFuture()
+            def rightF = right.toFuture()
+
+            leftF.thenCombine(rightF) { lv, rv ->
+                (lv instanceof Number && rv instanceof Number) ? (lv * rv) : lv
+            }.whenComplete { res, err ->
+                if (err != null) {
+                    Throwable actual = (err instanceof CompletionException && err.cause != null) ? err.cause : err
+                    out.bindError(actual)
+                } else {
+                    out.bind(res)
+                }
+            }
+
+            return out
+        }
+
+        // DFV * constant
+        return then { T a -> (a instanceof Number && other instanceof Number) ? (a * other) : a }
     }
 
     /**
-     * Groovy {@code /} operator: {@code dfv1 / dfv2}, {@code dfv / 10}.
+     * Binary {@code /} operator.
      */
     @CompileDynamic
     DataflowVariable div(Object other) {
-        return binaryOp(other) { a, b -> a / b }
-    }
+        if (other instanceof DataflowVariable) {
+            DataflowVariable right = (DataflowVariable) other
+            DataflowVariable out = new DataflowVariable(pool)
 
+            def leftF = this.toFuture()
+            def rightF = right.toFuture()
 
-    /**
-     * Dynamic operator handling for Groovy DSL expressions.
-     *
-     * <p>For the standard arithmetic operators ({@code plus}, {@code minus},
-     * {@code multiply}, {@code div}) the explicit operator overloads above are
-     * preferred and will normally be used by the Groovy compiler. This method
-     * remains as a generic fallback hook for any future DSL operations.</p>
-     */
-    @CompileDynamic
-    def methodMissing(String name, Object args) {
-        Object[] arr = (Object[]) args
-        Object rawOther = arr.length > 0 ? arr[0] : null
+            leftF.thenCombine(rightF) { lv, rv ->
+                (lv instanceof Number && rv instanceof Number) ? (lv / rv) : lv
+            }.whenComplete { res, err ->
+                if (err != null) {
+                    Throwable actual = (err instanceof CompletionException && err.cause != null) ? err.cause : err
+                    out.bindError(actual)
+                } else {
+                    out.bind(res)
+                }
+            }
 
-        switch (name) {
-            case "plus":
-                return plus(rawOther)
-            case "minus":
-                return minus(rawOther)
-            case "multiply":
-                return multiply(rawOther)
-            case "div":
-                return div(rawOther)
-            default:
-                throw new MissingMethodException(name, this.class, args)
+            return out
         }
+
+        // DFV / constant
+        return then { T a -> (a instanceof Number && other instanceof Number) ? (a / other) : a }
     }
 
-
-    // =============================================================================================
-    // toString
-    // =============================================================================================
-
-    @Override
-    String toString() {
-        return "DataflowVariable(${super.toString()})"
+    /** Fallback to underlying value for other methods. */
+    Object methodMissing(String name, Object args) {
+        T val = get()
+        return InvokerHelper.invokeMethod(val, name, args)
     }
 }

@@ -12,8 +12,6 @@ import java.time.LocalDateTime
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
-import java.util.function.Consumer
-import java.util.function.Supplier
 
 /**
  * A {@code DataflowExpression} represents a single-assignment, asynchronously-completing value.
@@ -29,16 +27,14 @@ import java.util.function.Supplier
  *     <li>Property change events for tooling / UI via {@link PropertyChangeSupport}.</li>
  * </ul>
  *
- * <p>The typical life-cycle of a {@code DataflowExpression} is:</p>
- *
- * <ol>
- *     <li>Create it, optionally specifying a value type.</li>
- *     <li>Register one or more listeners using {@code whenBound(...)}.</li>
- *     <li>Bind it once using {@code #setValue(Object)} or record an error using {@code #setError(Throwable)}.</li>
- *     <li>Read the value (blocking) via {@code #getValue()} or {@code #getValue(long, TimeUnit)}.</li>
- * </ol>
- *
- * <p>Instances are thread-safe.</p>
+ * <p>Lifecycle states:</p>
+ * <ul>
+ *     <li>{@link DataflowExpression.State#PENDING} – not yet completed</li>
+ *     <li>{@link DataflowExpression.State#SUCCESS} – completed with a value</li>
+ *     <li>{@link DataflowExpression.State#ERROR} – completed with an error</li>
+ *     <li>{@link DataflowExpression.State#CANCELLED} – completed by cancellation
+ *         (represented as a {@link CancellationException})</li>
+ * </ul>
  *
  * @param <T> type of the value produced by this expression
  */
@@ -53,7 +49,9 @@ class DataflowExpression<T> {
         /** The expression completed successfully with a value. */
         SUCCESS,
         /** The expression completed with an error. */
-        ERROR
+        ERROR,
+        /** The expression was cancelled. */
+        CANCELLED
     }
 
     /** Pool used for asynchronous callback execution. */
@@ -68,7 +66,7 @@ class DataflowExpression<T> {
     /** Current completion state. */
     private final AtomicReference<State> state = new AtomicReference<>(State.PENDING)
 
-    /** Error recorded if the expression completed exceptionally. */
+    /** Error recorded if the expression completed exceptionally or was cancelled. */
     private volatile Throwable error
 
     /** Timestamp of successful or failed completion. */
@@ -109,9 +107,6 @@ class DataflowExpression<T> {
     /**
      * Expose the underlying {@link ConcurrentPool} used to schedule asynchronous listeners.
      *
-     * <p>This is intended for advanced integrations that need to coordinate their own tasks
-     * with the dataflow execution context backing this expression.</p>
-     *
      * @return the {@link ConcurrentPool} backing this expression
      */
     ConcurrentPool getPool() {
@@ -127,9 +122,6 @@ class DataflowExpression<T> {
      *
      * <p>This is a single-assignment operation: subsequent calls will throw
      * {@link IllegalStateException}.</p>
-     *
-     * <p>This strict behaviour matches the expectations of the {@code Dataflows} helpers and
-     * associated tests – attempting to overwrite an already-bound value is treated as a bug.</p>
      *
      * @param newValue value to store (may be {@code null})
      * @throws IllegalStateException if the expression has already been completed
@@ -185,21 +177,57 @@ class DataflowExpression<T> {
     }
 
     /**
-     * @return {@code true} if the expression has completed (successfully or with error)
+     * Complete this expression by cancellation.
+     *
+     * <p>Cancellation is represented as a {@link CancellationException} and treated as a
+     * terminal completion distinct from SUCCESS and ERROR.</p>
+     *
+     * @param cause optional cancellation cause; if {@code null} a default
+     *              {@link CancellationException} is created
+     * @throws IllegalStateException if the expression has already been completed
+     */
+    void setCancelled(Throwable cause = null) {
+        CancellationException cancelled =
+                (cause instanceof CancellationException)
+                        ? (CancellationException) cause
+                        : new CancellationException(cause?.message ?: "DataflowExpression cancelled")
+
+        completionLock.lock()
+        try {
+            if (state.get() != State.PENDING) {
+                throw new IllegalStateException("DataflowExpression can only be completed once (state=" +
+                        state.get() + ", attempted setCancelled(" + cancelled + "))")
+            }
+            state.set(State.CANCELLED)
+            completedAt = LocalDateTime.now()
+            error = cancelled
+            future.completeExceptionally(new CompletionException(cancelled))
+            pcs.firePropertyChange("error", null, cancelled)
+        } finally {
+            completionLock.unlock()
+        }
+        // Listeners still fire on cancel; they receive null and can inspect hasError()/getError().
+        notifyWhenBound(null)
+    }
+
+    /**
+     * @return {@code true} if the expression has completed (successfully, with error, or cancelled)
      */
     boolean isBound() {
         state.get() != State.PENDING
     }
 
     /**
-     * @return {@code true} if the expression completed with an error
+     * @return {@code true} if the expression completed with an error or was cancelled
      */
     boolean hasError() {
-        state.get() == State.ERROR
+        def s = state.get()
+        return (s == State.ERROR || s == State.CANCELLED)
     }
 
     /**
-     * @return the error recorded for this expression, or {@code null} if it completed successfully
+     * @return the error recorded for this expression (including cancellation), or {@code null}
+     * if it completed successfully
      */
     Throwable getError() {
         error
@@ -213,10 +241,10 @@ class DataflowExpression<T> {
     }
 
     /**
-     * Block until the value is available or an error occurs.
+     * Block until the value is available or an error/cancellation occurs.
      *
      * @return completed value
-     * @throws Exception if the expression completed with an error
+     * @throws Exception if the expression completed with an error or was cancelled
      */
     T getValue() throws Exception {
         try {
@@ -232,13 +260,13 @@ class DataflowExpression<T> {
     }
 
     /**
-     * Block until the value is available, an error occurs, or timeout elapses.
+     * Block until the value is available, an error/cancellation occurs, or timeout elapses.
      *
      * @param timeout timeout value
      * @param unit    timeout unit
      * @return completed value
      * @throws TimeoutException if timeout elapses before completion
-     * @throws Exception        if the expression completed with an error
+     * @throws Exception        if the expression completed with an error or cancellation
      */
     T getValue(long timeout, TimeUnit unit) throws Exception {
         try {
@@ -260,7 +288,8 @@ class DataflowExpression<T> {
     // --------------------------------------------------------------------------------------------
 
     /**
-     * Register a listener to be invoked when the expression is bound (successfully or with error).
+     * Register a listener to be invoked when the expression is bound
+     * (successfully, with error, or cancelled).
      *
      * <p>If already bound, the listener is invoked asynchronously on the backing pool. If pending,
      * the listener is queued and will be scheduled on the pool once a value or error is recorded.</p>
@@ -268,7 +297,7 @@ class DataflowExpression<T> {
      * <p>Listeners are always invoked asynchronously to avoid surprising re-entrancy on the caller
      * thread.</p>
      *
-     * @param listener closure receiving the bound value (or {@code null} if error occurred)
+     * @param listener closure receiving the bound value (or {@code null} if error/cancel occurred)
      * @return this expression (for fluent chaining)
      */
     DataflowExpression<T> whenBound(Closure listener) {
@@ -289,7 +318,7 @@ class DataflowExpression<T> {
      * intent of explicitly asynchronous callbacks. Both methods schedule callbacks on
      * the same backing pool.</p>
      *
-     * @param listener closure receiving the bound value (or {@code null} if error occurred)
+     * @param listener closure receiving the bound value (or {@code null} if error/cancel occurred)
      * @return this expression
      */
     DataflowExpression<T> whenBoundAsync(Closure listener) {
@@ -342,7 +371,7 @@ class DataflowExpression<T> {
     /**
      * Notify all registered listeners that the expression has been bound.
      *
-     * @param value value to pass to listeners (possibly {@code null} if error)
+     * @param value value to pass to listeners (possibly {@code null} if error/cancel)
      */
     private void notifyWhenBound(T value) {
         // Copy to avoid concurrent modification
@@ -378,9 +407,6 @@ class DataflowExpression<T> {
      *     <li>For 3+ parameters, it is called with the value only.</li>
      * </ul>
      *
-     * <p>This logic avoids the bug where a closure expecting a single value accidentally received
-     * a log message string instead (as revealed by tests).</p>
-     *
      * @param listener listener closure
      * @param value    value to pass
      * @param message  optional message, used only for 2-arg closures
@@ -414,9 +440,6 @@ class DataflowExpression<T> {
     /**
      * Expose the underlying executor used to schedule asynchronous listeners.
      *
-     * <p>This is intended for advanced integrations that need to coordinate their own tasks
-     * with the dataflow execution context backing this expression.</p>
-     *
      * @return the executor used by this expression's {@link ConcurrentPool}
      */
     ExecutorService getExecutor() {
@@ -441,8 +464,3 @@ class DataflowExpression<T> {
         pcs.removePropertyChangeListener(listener)
     }
 }
-
-
-
-
-

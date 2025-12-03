@@ -10,8 +10,10 @@ import io.vertx.core.Handler
 import io.vertx.core.Promise as VertxPromise
 import io.vertx.core.Vertx
 import org.softwood.promise.Promise as SoftPromise
+import org.softwood.promise.core.PromiseState
 
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -70,6 +72,9 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     /** Vert.x context captured at creation time. */
     private final Context context
 
+    /** CRITICAL: Explicitly manage the promise lifecycle state. */
+    private final AtomicReference<PromiseState> state = new AtomicReference<>(PromiseState.PENDING)
+
     /**
      * Backing Vert.x promise (null when wrapping external Future only).
      *
@@ -97,6 +102,26 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         this.future = promise.future()
         this.vertx = vertx
         this.context = vertx.getOrCreateContext()
+
+        // Use the Vertx Future to update the state when it completes
+        // Check initial state and set up handler for completion
+        if (future.isComplete()) {
+            if (future.succeeded()) { state.set(PromiseState.COMPLETED) }
+            else if (future.cause() instanceof CancellationException) { state.set(PromiseState.CANCELLED) }
+            else { state.set(PromiseState.FAILED) }
+        } else {
+            future.onComplete(
+                    ({ AsyncResult<T> ar ->
+                        if (ar.succeeded()) {
+                            state.set(PromiseState.COMPLETED)
+                        } else if (ar.cause() instanceof CancellationException) {
+                            state.set(PromiseState.CANCELLED)
+                        } else {
+                            state.set(PromiseState.FAILED)
+                        }
+                    } as Handler<AsyncResult<T>>)
+            )
+        }
     }
 
     /**
@@ -170,10 +195,12 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     SoftPromise<T> accept(T value) {
         if (promise == null) return this
 
-        if (Vertx.currentContext() == context) {
-            promise.tryComplete(value)
-        } else {
-            context.runOnContext { Void v -> promise.tryComplete(value) }
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)) {
+            if (Vertx.currentContext() == context) {
+                promise.tryComplete(value)
+            } else {
+                context.runOnContext { Void v -> promise.tryComplete(value) }
+            }
         }
         return this
     }
@@ -261,7 +288,28 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     @Override
     SoftPromise<T> fail(Throwable error) {
         if (promise == null) return this
-        context.runOnContext { Void v -> promise.tryFail(error) }
+        if (promise == null) return this
+
+        // CRITICAL: Intercept cancellation and route to the cancel method for state update
+        if (error instanceof java.util.concurrent.CancellationException) {
+            cancel(false)
+            return this
+        }
+
+        // 1. ATOMIC STATE CHECK: Only transition from PENDING to FAILED once
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
+
+            // 2. CONTEXT CHECK: Fail the VertxPromise on the correct context
+            if (io.vertx.core.Vertx.currentContext() == context) {
+                // Already on the correct context, fail immediately
+                promise.fail(error)
+            } else {
+                // Hop to the original context to fail
+                context.runOnContext {
+                    promise.fail(error)
+                }
+            }
+        }
         return this
     }
 
@@ -345,31 +393,70 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         return result.get()
     }
 
+    @Override
+    boolean cancel(boolean mayInterruptIfRunning) {
+        if (promise == null) return isCancelled()
+
+        // 1. ATOMIC STATE CHECK: Only transition from PENDING to CANCELLED once
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)) {
+
+            // 2. Vert.x Cancellation: Complete the Promise with CancellationException
+            // This is how Vert.x flags a Future as cancelled.
+            java.util.concurrent.CancellationException cancellationError =
+                    new java.util.concurrent.CancellationException("Promise was cancelled.")
+
+            if (Vertx.currentContext() == context) {
+                // Already on the correct context
+                promise.fail(cancellationError)
+            } else {
+                // Hop to the original context to fail
+                context.runOnContext {
+                    promise.fail(cancellationError)
+                }
+            }
+            // Return true if the state transition was successful
+            return true
+        }
+
+        // Already completed/failed/cancelled
+        return isCancelled()
+    }
 
     // -------------------------------------------------------------------------
     // State / Callbacks
     // -------------------------------------------------------------------------
 
+    // ------------------------------------------------------------------------
+    // State Check Operations
+    // ------------------------------------------------------------------------
+
     /**
-     * Whether the promise is already resolved (success or failure).
-     *
-     * @return true if completed
+     * @see SoftPromise#isDone()
      */
     @Override
     boolean isDone() {
-        return future.isComplete()
+        // A promise is "done" if it's in any final state: COMPLETED, FAILED, or CANCELLED.
+        return state.get() != org.softwood.promise.core.PromiseState.PENDING
     }
 
     /**
-     * Alias for is Done, Whether the promise is already resolved (success or failure).
-     *
-     * @return true if completed
+     * @see SoftPromise#isCancelled()
+     */
+    @Override
+    boolean isCancelled() {
+        // A promise is cancelled if the state is specifically CANCELLED.
+        return state.get() == org.softwood.promise.core.PromiseState.CANCELLED
+    }
+
+    /**
+     * @see SoftPromise#isCompleted()
+     * Note: This usually means successfully completed (succeeded).
      */
     @Override
     boolean isCompleted() {
-        return future.isComplete()
+        // A promise is completed if the state is specifically COMPLETED (success).
+        return state.get() == org.softwood.promise.core.PromiseState.COMPLETED
     }
-
 
     /**
      * Register a success callback.

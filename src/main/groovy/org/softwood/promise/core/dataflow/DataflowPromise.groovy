@@ -1,111 +1,208 @@
 package org.softwood.promise.core.dataflow
 
-import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
+import org.softwood.promise.core.PromiseState
 
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
-import java.util.function.Consumer
-import java.util.function.Function
-import java.util.function.Predicate
-import java.util.function.Supplier
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicReference
+import java.util.function.*
 
 /**
- * {@link Promise} implementation backed by a {@link DataflowVariable}.
+ * Promise implementation backed by a Softwood {@link DataflowVariable}.
  *
- * <p>This class adapts Softwood Dataflow primitives to the general Promise API.</p>
+ * <p>This class adapts DataflowVariable (DFV) semantics to the generic Promise API:
+ * single-assignment, cancellation, completion, flatMap, chain propagation, and
+ * full cancellation/error propagation across dependent promises.</p>
  *
- * @param <T> value type of this promise
- * @see DataflowVariable
- * @see Promise
+ * <h2>Lifecycle</h2>
+ * <ul>
+ *   <li>{@link PromiseState#PENDING}</li>
+ *   <li>{@link PromiseState#COMPLETED}</li>
+ *   <li>{@link PromiseState#FAILED}</li>
+ *   <li>{@link PromiseState#CANCELLED}</li>
+ * </ul>
+ *
+ * All completions are mirrored onto the backing {@link DataflowVariable}, which
+ * controls the event delivery and produces the underlying {@link CompletableFuture}.
  */
 @Slf4j
-@ToString
 class DataflowPromise<T> implements Promise<T> {
 
-    /** Backing dataflow variable (single-assignment semantics). */
+    /** Backing single-assignment variable */
     private final DataflowVariable<T> variable
 
+    /** Cached lifecycle state for fast checks */
+    private final AtomicReference<PromiseState> state =
+            new AtomicReference<>(PromiseState.PENDING)
+
+    /** Async task handle created by accept(Supplier) (for cancellation) */
+    private volatile CompletableFuture<?> taskHandle = null
+
     /**
-     * Construct a Promise over a specific dataflow variable.
-     *
-     * @param variable dataflow backing variable (must not be null)
+     * Dependent promises that should be cancelled/failed immediately when
+     * this promise completes in a terminal state.
      */
+    private final CopyOnWriteArrayList<Promise<?>> dependents = new CopyOnWriteArrayList<>()
+
+    // -------------------------------------------------------------------------
+    // Constructor & DFV Listeners
+    // -------------------------------------------------------------------------
+
     DataflowPromise(DataflowVariable<T> variable) {
         this.variable = variable
+
+        // When DFV resolves successfully
+        variable.whenAvailable { T v ->
+            state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+        }
+
+        // When DFV resolves with an error
+        variable.whenError { Throwable err ->
+            if (err instanceof CancellationException) {
+                state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
+            } else {
+                state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
-    // Completion Operations
+    // Helper: Synchronize state from DFV
     // -------------------------------------------------------------------------
 
-    /** {@inheritDoc} */
+    private PromiseState deriveStateFromVariable() {
+        PromiseState s = state.get()
+        if (s != PromiseState.PENDING) return s
+
+        if (!variable.isBound()) return s
+
+        if (variable.hasError()) {
+            Throwable err = variable.getError()
+            if (err instanceof CancellationException) {
+                state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
+            } else {
+                state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+            }
+        } else {
+            state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+        }
+
+        return state.get()
+    }
+
+    private void registerDependent(Promise<?> other) {
+        if (other == null || other.is(this)) return
+
+        dependents.add(other)
+
+        // If already cancelled/failed → propagate immediately
+        PromiseState s = deriveStateFromVariable()
+        if (s == PromiseState.CANCELLED) {
+            other.cancel(false)
+        } else if (s == PromiseState.FAILED) {
+            if (other instanceof DataflowPromise) {
+                ((DataflowPromise<?>) other).fail(variable.getError())
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Accept (Completion)
+    // -------------------------------------------------------------------------
+
     @Override
     Promise<T> accept(T value) {
-        variable.bind(value)
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)) {
+            try {
+                variable.bind(value)
+            } catch (IllegalStateException e) {
+                log.debug("DFV already bound in accept(T): ${e.message}")
+            }
+        }
         return this
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * <p>The supplier is always executed asynchronously on the executor associated with the
-     * backing {@link DataflowVariable}, and its result is bound to this promise.</p>
-     */
     @Override
     Promise<T> accept(Supplier<T> supplier) {
         if (supplier == null) return this
 
-        // Execute supplier asynchronously to avoid blocking the caller thread.
-        variable.executor.submit({
-            try {
-                T value = supplier.get()
-                variable.bind(value)
-            } catch (Throwable error) {
-                variable.bindError(error)
+        taskHandle = CompletableFuture.supplyAsync(
+                { supplier.get() } as Supplier<T>,
+                variable.executor
+        )
+
+        taskHandle.whenComplete { T value, Throwable error ->
+            if (error != null) {
+                Throwable actual = (error instanceof CompletionException && error.cause != null)
+                        ? error.cause : error
+                if (actual instanceof CancellationException) {
+                    cancel(false)
+                } else {
+                    fail(actual)
+                }
+            } else {
+                accept(value)
             }
-        } as Runnable)
+        }
+
         return this
     }
 
-    /** {@inheritDoc} */
     @Override
     Promise<T> accept(CompletableFuture<T> future) {
         if (future == null) return this
 
         future.whenComplete { T value, Throwable error ->
             if (error != null) {
-                variable.bindError(error)
+                Throwable actual = (error instanceof CompletionException && error.cause != null)
+                        ? error.cause : error
+                if (actual instanceof CancellationException) {
+                    cancel(false)
+                } else {
+                    fail(actual)
+                }
             } else {
-                variable.bind(value)
+                accept(value)
             }
         }
+
         return this
     }
 
-    /** {@inheritDoc} */
     @Override
-    Promise<T> accept(Promise<T> otherPromise) {
-        if (otherPromise == null) return this
+    Promise<T> accept(Promise<T> other) {
+        if (other == null) return this
 
-        otherPromise.onComplete { T v ->
-            variable.bind(v)
+        if (other instanceof DataflowPromise) {
+            ((DataflowPromise<T>) other).registerDependent(this)
         }
-        otherPromise.onError { Throwable e ->
-            variable.bindError(e)
+
+        other.onSuccess { T v -> accept(v) }
+        other.onError { Throwable e ->
+            if (e instanceof CancellationException) cancel(false)
+            else fail(e)
         }
+
+        if (other.isCancelled()) cancel(false)
+
         return this
     }
 
-    /** {@inheritDoc} */
     @Override
     Promise<T> fail(Throwable error) {
-        if (error != null) {
-            variable.bindError(error)
+        if (error instanceof CancellationException) {
+            cancel(false)
+            return this
+        }
+
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
+            try {
+                variable.bindError(error)
+            } catch (IllegalStateException e) {
+                log.debug("DFV already bound in fail(): ${e.message}")
+            }
         }
         return this
     }
@@ -114,324 +211,425 @@ class DataflowPromise<T> implements Promise<T> {
     // Blocking Retrieval
     // -------------------------------------------------------------------------
 
-    /** {@inheritDoc} */
     @Override
     T get() throws Exception {
-        CompletableFuture<T> future = variable.toFuture()
+        CompletableFuture<T> f = variable.toFuture()
         try {
-            return future.get() as T
+            return f.get()
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause()
-            if (cause instanceof Exception) {
-                throw (Exception) cause
-            }
-            throw new RuntimeException(cause.message)
+            Throwable c = e.cause ?: e
+            if (c instanceof Exception) throw (Exception)c
+            throw new RuntimeException(c)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
-            throw new RuntimeException(e.message)
+            throw new RuntimeException(e)
         }
     }
 
-    /**
-     * Promise timeout semantics: unlike {@link org.softwood.dataflow.DataflowVariable#get(long, TimeUnit)},
-     * this method is required by the {@link Promise} API to throw {@link TimeoutException}
-     * when the timeout elapses.
-     *
-     * <p>We therefore delegate to a {@link CompletableFuture} view obtained via
-     * {@link DataflowVariable#toFuture()}, which preserves standard timeout behaviour.</p>
-     */
     @Override
     T get(long timeout, TimeUnit unit) throws TimeoutException {
-        CompletableFuture<T> future = variable.toFuture()
+        CompletableFuture<T> f = variable.toFuture()
         try {
-            return future.get(timeout, unit) as T
+            return f.get(timeout, unit)
         } catch (TimeoutException e) {
             throw e
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause()
-            if (cause instanceof Exception) {
-                throw (Exception) cause
-            }
-            throw new RuntimeException(cause.message)
+            Throwable c = e.cause ?: e
+            if (c instanceof RuntimeException) throw (RuntimeException)c
+            throw new RuntimeException(c)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
-            throw new RuntimeException(e.message)
+            throw new RuntimeException(e)
         }
     }
 
-    /** {@inheritDoc} */
-    @Override
-    boolean isDone() {
-        return variable.isDone()
-    }
-
-    /** {@inheritDoc} */
-    @Override
-    boolean isCompleted() {
-        return variable.isDone()
-    }
-
     // -------------------------------------------------------------------------
-    // Callback Registration
+    // Cancellation
     // -------------------------------------------------------------------------
 
-    /** {@inheritDoc} */
+    @Override
+    boolean cancel(boolean mayInterruptIfRunning) {
+        PromiseState s = deriveStateFromVariable()
+
+        // If already cancelled, just return true
+        if (s == PromiseState.CANCELLED) {
+            return true
+        }
+
+        // CRITICAL FIX: If already completed or failed, we can't change this promise's state,
+        // but we MUST still propagate cancellation to dependents
+        if (s == PromiseState.COMPLETED || s == PromiseState.FAILED) {
+            // Propagate cancellation to all dependents even though this promise is done
+            dependents.each { Promise<?> d -> d.cancel(mayInterruptIfRunning) }
+            return false  // Return false because THIS promise wasn't cancelled (it was already done)
+        }
+
+        // Only PENDING promises can transition to CANCELLED
+        if (!state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)) {
+            // Race condition: state changed between check and CAS
+            // Re-derive state and propagate if needed
+            s = deriveStateFromVariable()
+            if (s == PromiseState.COMPLETED || s == PromiseState.FAILED) {
+                dependents.each { Promise<?> d -> d.cancel(mayInterruptIfRunning) }
+            }
+            return isCancelled()
+        }
+
+        // Successfully transitioned to CANCELLED
+
+        // Cancel the underlying task if it exists
+        if (taskHandle != null) {
+            taskHandle.cancel(mayInterruptIfRunning)
+        }
+
+        // Bind the DFV to cancelled state
+        try {
+            variable.bindCancelled(new CancellationException("Promise was explicitly cancelled"))
+        } catch (IllegalStateException e) {
+            log.debug("DFV already bound in cancel(): ${e.message}")
+        }
+
+        // Propagate cancellation to all dependents
+        dependents.each { Promise<?> d -> d.cancel(mayInterruptIfRunning) }
+
+        return true
+    }
+
+
+    // -------------------------------------------------------------------------
+    // State Queries
+    // -------------------------------------------------------------------------
+
+    @Override boolean isDone()       { deriveStateFromVariable() != PromiseState.PENDING }
+    @Override boolean isCompleted()  { deriveStateFromVariable() == PromiseState.COMPLETED }
+    @Override boolean isCancelled()  { deriveStateFromVariable() == PromiseState.CANCELLED }
+
+    // -------------------------------------------------------------------------
+    // Callbacks
+    // -------------------------------------------------------------------------
+
+    //internal helper now
+    Promise<T> onSuccess(Consumer<T> c) {
+        if (c == null) return this
+        variable.whenAvailable { v -> c.accept(v) }
+        return this
+    }
+
+    @Override
+    Promise<T> onError(Consumer<Throwable> c) {
+        if (c == null) return this
+        variable.whenError { e -> c.accept(e) }
+        return this
+    }
+
     @Override
     Promise<T> onComplete(Consumer<T> callback) {
         if (callback == null) return this
-        variable.whenAvailable(callback)
-        return this
-    }
 
-    /** {@inheritDoc} */
-    @Override
-    Promise<T> onError(Consumer<Throwable> handler) {
-        if (handler == null) return this
-        variable.whenError { Throwable err ->
-            handler.accept(err)
-        }
-        return this
-    }
-
-
-    // -------------------------------------------------------------------------
-    // Transformations
-    // -------------------------------------------------------------------------
-
-    /** {@inheritDoc} */
-    @Override
-    <R> Promise<R> then(Function<T, R> fn) {
-        if (fn == null) {
-            // Pass-through promise when no transform is supplied.
-            @SuppressWarnings("unchecked")
-            Promise<R> self = (Promise<R>) this
-            return self
-        }
-
-        // Preserve the underlying dataflow execution context by reusing the DFV's pool.
-        DataflowVariable<R> nextVar = new DataflowVariable<R>(variable.pool)
-
-        // Success path
-        variable.whenAvailable { T value ->
-            if (!variable.hasError()) {
-                try {
-                    nextVar.bind(fn.apply(value))
-                } catch (Throwable e) {
-                    nextVar.bindError(e)
-                }
-            }
-        }
-
-        // Error path
-        variable.whenError { Throwable err ->
-            nextVar.bindError(err)
-        }
-
-        return new DataflowPromise<R>(nextVar)
-    }
-
-    /** {@inheritDoc} */
-    @Override
-    <R> Promise<R> recover(Function<Throwable, R> recovery) {
-        if (recovery == null) {
-            @SuppressWarnings("unchecked")
-            Promise<R> self = (Promise<R>) this
-            return self
-        }
-
-        // Preserve the underlying dataflow execution context by reusing the DFV's pool.
-        DataflowVariable<R> nextVar = new DataflowVariable<R>(variable.pool)
-
-        // Success path: pass through unchanged
-        variable.whenAvailable { Object value ->
-            if (!variable.hasError()) {
-                try {
-                    @SuppressWarnings("unchecked")
-                    R castValue = (R) value
-                    nextVar.bind(castValue)
-                } catch (Throwable e) {
-                    nextVar.bindError(e)
-                }
-            }
-        }
-
-        // Error path: map error to value
-        variable.whenError { Throwable error ->
+        // Success path only — matches Promise<T>.onComplete contract
+        variable.whenAvailable { T v ->
             try {
-                R recovered = recovery.apply(error)
-                nextVar.bind(recovered)
-            } catch (Throwable e) {
-                nextVar.bindError(e)
+                callback.accept(v)
+            } catch (Throwable t) {
+                log.error("Error in onComplete callback", t)
             }
         }
 
-        return new DataflowPromise<R>(nextVar)
+        return this
     }
 
     // -------------------------------------------------------------------------
-    //  Additional fluent transformations
+    // Functional Transformations
     // -------------------------------------------------------------------------
-
-    /**
-     * Syntactic sugar for {@link #then(Function)}.
-     *
-     * <p>Transforms the successful value of this promise using {@code fn}. Errors are
-     * propagated unchanged.</p>
-     *
-     * @param fn mapping function
-     * @param <R> result type
-     * @return a new {@link DataflowPromise} representing the transformed value
-     */
-
 
     @Override
     <R> Promise<R> map(Function<? super T, ? extends R> mapper) {
-        if (mapper == null) {
-            @SuppressWarnings("unchecked")
-            Promise<R> self = (Promise<R>) this
-            return self
-        }
-        return this.then { T v -> mapper.apply(v) }
+        return then { T v -> mapper.apply(v) }
     }
-    /**
-     * Monadic flatMap / bind.
-     *
-     * <p>Transforms the successful value of this promise into another {@link Promise} and
-     * <em>flattens</em> the result so that callers observe a single-level promise.</p>
-     *
-     * <pre>
-     * DataflowPromise&lt;User&gt; userPromise = ...
-     * DataflowPromise&lt;Account&gt; account =
-     *     userPromise.flatMap(u -&gt; accountService.lookup(u.id))
-     * </pre>
-     *
-     * @param fn function mapping the successful value to another {@link Promise}
-     * @param <R> result type of the inner promise
-     * @return a new {@link DataflowPromise} that completes when the inner promise completes
-     */
+
+    @Override
+    <R> Promise<R> then(Function<T, R> fn) {
+        DataflowVariable<R> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<R> next = new DataflowPromise<>(nextVar)
+
+        registerDependent(next)
+
+        this.onSuccess { T v ->
+            try {
+                next.accept(fn.apply(v))
+            } catch (Throwable t) {
+                next.fail(t)
+            }
+        }
+
+        this.onError { Throwable e -> next.fail(e) }
+
+        if (this.isCompleted()) {
+            try {
+                next.accept(fn.apply(variable.get()))
+            } catch (Throwable t) {
+                next.fail(t)
+            }
+        } else if (this.isCancelled()) {
+            next.cancel(false)
+        } else if (this.isDone()) {
+            next.fail(variable.getError())
+        }
+
+        return next
+    }
+
+    @Override
+    <R> Promise<R> recover(Function<Throwable, R> fn) {
+        DataflowVariable<R> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<R> next = new DataflowPromise<>(nextVar)
+
+        registerDependent(next)
+
+        this.onSuccess { T v -> next.accept((R)v) }
+        this.onError { Throwable e ->
+            try {
+                next.accept(fn.apply(e))
+            } catch (Throwable t) {
+                next.fail(t)
+            }
+        }
+
+        return next
+    }
+
     @Override
     <R> Promise<R> flatMap(Function<? super T, Promise<R>> mapper) {
-        if (mapper == null) {
-            @SuppressWarnings("unchecked")
-            Promise<R> self = (Promise<R>) this
-            return self
+        Objects.requireNonNull(mapper, "mapper must not be null")
+
+        DataflowVariable<R> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<R> nextPromise = new DataflowPromise<>(nextVar)
+
+        // Track the inner promise for cancellation
+        final AtomicReference<Promise<R>> innerRef = new AtomicReference<>(null)
+
+        // 1) If OUTER is already cancelled → cancel nextPromise immediately
+        if (this.isCancelled()) {
+            nextPromise.cancel(false)
+            return nextPromise
         }
 
-        DataflowVariable<R> nextVar = new DataflowVariable<R>(variable.pool)
+        // 2) CRITICAL: Register as dependent FIRST, before any async processing
+        //    This ensures that if cancel() is called on outer, it propagates to nextPromise
+        registerDependent(nextPromise)
 
-        this.onComplete { T v ->
+        // 3) If OUTER is already completed, handle synchronously but check for cancellation
+        if (this.isCompleted()) {
             try {
-                Promise<R> inner = mapper.apply(v)
+                // Double-check cancellation before processing
+                if (this.isCancelled()) {
+                    nextPromise.cancel(false)
+                    return nextPromise
+                }
+
+                T value = variable.get()
+                Promise<R> inner = mapper.apply(value)
+
                 if (inner == null) {
-                    nextVar.bindError(new NullPointerException("flatMap mapper returned null promise"))
-                    return
+                    nextPromise.fail(new NullPointerException("flatMap mapper returned null promise"))
+                    return nextPromise
                 }
 
-                inner.onComplete { R r ->
-                    nextVar.bind(r)
+                innerRef.set(inner)
+
+                // Register inner as dependent of outer for cancellation propagation
+                if (inner instanceof DataflowPromise) {
+                    registerDependent(inner)
                 }
 
-                inner.onError { Throwable e ->
-                    nextVar.bindError(e)
+                // Check if outer was cancelled during mapper execution
+                if (this.isCancelled()) {
+                    inner.cancel(false)
+                    nextPromise.cancel(false)
+                    return nextPromise
                 }
-            } catch (Throwable t) {
-                nextVar.bindError(t)
+
+                // Check inner's state synchronously
+                if (inner.isCancelled()) {
+                    nextPromise.cancel(false)
+                    return nextPromise
+                }
+
+                // If inner is already done, propagate immediately
+                if (inner.isDone()) {
+                    if (inner instanceof DataflowPromise) {
+                        DataflowPromise<R> dfInner = (DataflowPromise<R>) inner
+                        if (dfInner.variable.hasError()) {
+                            Throwable err = dfInner.variable.getError()
+                            if (err instanceof CancellationException) {
+                                nextPromise.cancel(false)
+                            } else {
+                                nextPromise.fail(err)
+                            }
+                        } else {
+                            // Final cancellation check before accepting
+                            if (this.isCancelled() || nextPromise.isCancelled()) {
+                                nextPromise.cancel(false)
+                            } else {
+                                nextPromise.accept(dfInner.variable.get())
+                            }
+                        }
+                        return nextPromise
+                    }
+                }
+
+                // Inner is still pending, set up callbacks
+                setupInnerCallbacks(inner, nextPromise)
+
+            } catch (Throwable ex) {
+                nextPromise.fail(ex)
+            }
+
+            return nextPromise
+        }
+
+        // 4) If OUTER is already failed/cancelled, handle synchronously
+        if (this.isDone()) {
+            if (this.isCancelled()) {
+                nextPromise.cancel(false)
+            } else {
+                nextPromise.fail(variable.getError())
+            }
+            return nextPromise
+        }
+
+        // 5) Set up bidirectional cancellation for async case
+        nextPromise.onError { Throwable e ->
+            if (e instanceof CancellationException) {
+                Promise<R> inner = innerRef.get()
+                if (inner != null && !inner.isCancelled()) {
+                    inner.cancel(false)
+                }
             }
         }
 
-        this.onError { Throwable e -> nextVar.bindError(e) }
+        // 6) When OUTER fails (including cancellation) → propagate to nextPromise
+        this.onError { Throwable e ->
+            if (e instanceof CancellationException) {
+                nextPromise.cancel(false)
+                Promise<R> inner = innerRef.get()
+                if (inner != null && !inner.isCancelled()) {
+                    inner.cancel(false)
+                }
+            } else {
+                nextPromise.fail(e)
+            }
+        }
 
-        return new DataflowPromise<R>(nextVar)
+        // 7) When OUTER succeeds → create and wire up inner promise
+        this.onSuccess { T value ->
+            // Check if outer was cancelled after success callback fired
+            if (this.isCancelled()) {
+                nextPromise.cancel(false)
+                return
+            }
+
+            Promise<R> inner
+            try {
+                inner = mapper.apply(value)
+            } catch (Throwable ex) {
+                nextPromise.fail(ex)
+                return
+            }
+
+            if (inner == null) {
+                nextPromise.fail(new NullPointerException("flatMap mapper returned null promise"))
+                return
+            }
+
+            innerRef.set(inner)
+
+            // Register inner as dependent for cancellation propagation
+            if (inner instanceof DataflowPromise) {
+                registerDependent(inner)
+            }
+
+            // Check if inner is already cancelled SYNCHRONOUSLY
+            if (inner.isCancelled()) {
+                nextPromise.cancel(false)
+                return
+            }
+
+            // Check if outer was cancelled while we were setting up
+            if (this.isCancelled()) {
+                inner.cancel(false)
+                nextPromise.cancel(false)
+                return
+            }
+
+            // Check if nextPromise was cancelled while we were setting up
+            if (nextPromise.isCancelled()) {
+                inner.cancel(false)
+                return
+            }
+
+            // Set up callbacks for async completion
+            setupInnerCallbacks(inner, nextPromise)
+        }
+
+        return nextPromise
     }
 
-    /**
-     * Filters the successful value of this promise with a predicate.
-     *
-     * <p>If the predicate returns {@code true}, the value is propagated. If it returns
-     * {@code false}, the returned promise is completed exceptionally with a
-     * {@link java.util.NoSuchElementException}. Errors from this promise are propagated
-     * unchanged.</p>
-     *
-     * @param predicate predicate to apply to the value
-     * @return a new {@link DataflowPromise} that either propagates the value or fails
-     */
-    DataflowPromise<T> filter(Function<T, Boolean> predicate) {
-        if (predicate == null) {
-            return this
+    //internal helper for flat map to ge the logic to work
+    private <R> void setupInnerCallbacks(Promise<R> inner, DataflowPromise<R> nextPromise) {
+        inner.onSuccess { R r ->
+            // CRITICAL: Check both nextPromise and outer promise cancellation
+            if (nextPromise.isCancelled() || this.isCancelled()) {
+                // Don't accept the value if either promise was cancelled
+                if (!nextPromise.isCancelled()) {
+                    nextPromise.cancel(false)
+                }
+                return
+            }
+            nextPromise.accept(r)
         }
 
-        DataflowVariable<T> nextVar = new DataflowVariable<T>(variable.pool)
-
-        variable.whenAvailable { T value ->
-            if (!variable.hasError()) {
-                try {
-                    Boolean keep = predicate.apply(value)
-                    if (Boolean.TRUE.equals(keep)) {
-                        nextVar.bind(value)
-                    } else {
-                        nextVar.bindError(new NoSuchElementException("Predicate rejected value: " + value))
-                    }
-                } catch (Throwable e) {
-                    nextVar.bindError(e)
-                }
+        inner.onError { Throwable e ->
+            if (e instanceof CancellationException) {
+                nextPromise.cancel(false)
+            } else {
+                nextPromise.fail(e)
             }
         }
-
-        variable.whenError { Throwable err ->
-            nextVar.bindError(err)
-        }
-
-        return new DataflowPromise<T>(nextVar)
     }
 
     @Override
-    Promise<T> filter(Predicate<? super T> predicate) {  // Return Promise<T> instead of DataflowPromise<T>
-        if (predicate == null) {
-            return this
-        }
+    Promise<T> filter(Predicate<? super T> predicate) {
+        Objects.requireNonNull(predicate)
 
-        DataflowVariable<T> nextVar = new DataflowVariable<T>(variable.pool)
+        DataflowVariable<T> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<T> next = new DataflowPromise<>(nextVar)
 
-        this.onComplete { T v ->
+        registerDependent(next)
+
+        this.onSuccess { T v ->
             try {
-                if (predicate.test(v)) {
-                    nextVar.bind(v)  // Could use bind() directly on nextVar
-                } else {
-                    nextVar.bindError(new NoSuchElementException("Predicate not satisfied"))
-                }
+                if (predicate.test(v)) next.accept(v)
+                else next.fail(new NoSuchElementException("Predicate not satisfied"))
             } catch (Throwable t) {
-                nextVar.bindError(t)
+                next.fail(t)
             }
         }
 
-        this.onError { Throwable e ->
-            nextVar.bindError(e)
-        }
+        this.onError { Throwable e -> next.fail(e) }
 
-        return new DataflowPromise<T>(nextVar)
+        return next
     }
 
     // -------------------------------------------------------------------------
-    // Type Conversion
+    // Type Coercion
     // -------------------------------------------------------------------------
 
-    /**
-     * Groovy type-coercion hook.
-     *
-     * <p>Currently only conversion to {@link CompletableFuture} is supported. For example:</p>
-     *
-     * <pre>
-     * CompletableFuture<String> cf = (CompletableFuture<String>) promise.asType(CompletableFuture)
-     * </pre>
-     *
-     * @param clazz target type (only {@link CompletableFuture} is currently supported)
-     * @return converted instance
-     */
     @Override
     CompletableFuture<T> asType(Class clazz) {
         if (clazz == CompletableFuture) {
             return variable.toFuture()
         }
-        throw new RuntimeException("conversion to type $clazz is not supported")
+        throw new RuntimeException("Conversion to type $clazz is not supported")
     }
 }

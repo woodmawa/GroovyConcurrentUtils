@@ -97,4 +97,22 @@ interface Promise<T> {
 
     /** Filter successful values based on a predicate. */
     Promise<T> filter(Predicate<? super T> predicate)
+
+    /**
+     * Attempts to cancel execution of this promise's task.
+     *
+     * @param mayInterruptIfRunning ignored for the Dataflow model, but kept for
+     * alignment with java.util.concurrent.Future
+     * @return true if the promise was successfully cancelled, false otherwise
+     */
+    boolean cancel(boolean mayInterruptIfRunning)
+
+    /**
+     * Returns true if this promise was cancelled before it completed normally.
+     *
+     * @return true if cancelled
+     */
+    boolean isCancelled()
+
 }
+

@@ -2,6 +2,7 @@ package org.softwood.dataflow
 
 import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
+import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.pool.ConcurrentPool
 
@@ -43,6 +44,7 @@ import java.util.function.Supplier
  */
 @CompileStatic
 @Slf4j
+@ToString
 class DataflowVariable<T> extends DataflowExpression<T> {
 
     // =============================================================================================

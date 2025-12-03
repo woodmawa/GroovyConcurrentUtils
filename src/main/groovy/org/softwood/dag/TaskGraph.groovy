@@ -7,6 +7,7 @@ import org.softwood.dag.task.TaskEvent
 import org.softwood.dag.task.Task
 import org.softwood.dag.task.TaskListener
 import org.softwood.dag.task.TaskState
+import org.softwood.pool.ConcurrentPool
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
 
@@ -62,145 +63,140 @@ class TaskGraph {
 
     final String id
     final TaskContext ctx
-    final Map<String, Task<?>> tasks = [:]
-    final List<TaskListener> listeners = []
 
-    private TaskGraph(String id = UUID.randomUUID().toString(),
-                      TaskContext ctx = new TaskContext()) {
+    final Map<String, Task> tasks = [:]
+    final List<Closure> eventListeners = []
+
+    // conditionalForks[sourceTaskId] = [ targetId → condition ]
+    final Map<String, Map<String, Closure<Boolean>>> conditionalForks = [:]
+
+    TaskGraph(String id = UUID.randomUUID().toString(),
+              TaskContext ctx = new TaskContext()) {
         this.id = id
         this.ctx = ctx
+        //ensure we set the taskGraph into the context
+        this.ctx.graph = this
     }
 
-    // ---------------------------------------------------------------------
-    // DSL entry point
-    // ---------------------------------------------------------------------
+    static TaskGraph build(@DelegatesTo(TaskGraphDsl) Closure buildSpec) {
+        //ensures that the spec this is current taskGraph instance
+        Closure spec = buildSpec.clone () as Closure
 
-    static TaskGraph build(@DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = TaskGraphDsl) Closure cl) {
-        def graph = new TaskGraph()
-        def dsl = new TaskGraphDsl(graph)
-        cl.delegate = dsl
-        cl.resolveStrategy = Closure.DELEGATE_FIRST
-        cl.call()
-        return graph
+        def g = new TaskGraph()
+        def taskGraphDsl = new TaskGraphDsl(g)
+        spec.delegate = taskGraphDsl
+        spec.resolveStrategy = Closure.DELEGATE_FIRST
+
+        //run the closure spec attached to the build method, resolving on the dsl first
+        spec.call()
+        return g
     }
 
-    void addTask(Task<?> task) {
-        tasks[task.id] = task
+    void addTask(Task t) {
+        tasks[t.id] = t
     }
 
-    void addListener(TaskListener l) {
-        listeners << l
+    void registerConditionalFork(String sourceId, String targetId, Closure<Boolean> cond) {
+        conditionalForks
+                .computeIfAbsent(sourceId) { [:] }[targetId] = cond
     }
 
-    // ---------------------------------------------------------------------
-    // Execution
-    // ---------------------------------------------------------------------
+    void onEvent(Closure listener) {
+        eventListeners << listener
+    }
 
-    Promise<?> run() {
+    void notifyEvent(TaskEvent evt) {
+        eventListeners.each { it(evt) }
+    }
 
-        Promise<Object> completion = Promises.newPromise()
+    // --------------------------------------------------------------------
+    // Run whole DAG
+    // --------------------------------------------------------------------
+    Promise run() {
 
-        // taskId -> Optional<Promise<?>>
-        Map<String, Optional<Promise<?>>> results =
-                new LinkedHashMap<String, Optional<Promise<?>>>().withDefault {
-                    Optional.<Promise<?>>empty()
-                }
+        return Promises.async {
 
-        // Expose to JoinDsl and general diagnostics
-        ctx.globals.__taskResults = results
+            println "taskGraph run: async closure delegate is  $delegate with tasks : $tasks"
+            List<Task> roots = tasks.values()
+                    .findAll { it.predecessors.isEmpty() }
+                    .toList()
 
-        // Event emitter wrapper
-        Closure<Void> emit = { TaskEvent ev ->
-            ev.graphId = this.id
-            listeners.each { TaskListener l -> l.onEvent(ev) }
-            null
-        }
+            assert roots.size() >0
+            println "taskGraph run: has tasks schedule $roots"
 
-        // "Ready" tasks: PENDING/SCHEDULED whose predecessors are all terminal
-        Closure<List<Task>> ready = {
-            tasks.values().findAll { Task t ->
-                t.state in [TaskState.PENDING, TaskState.SCHEDULED] &&
-                        t.predecessors.every { pid ->
-                            tasks[pid].state in [
-                                    TaskState.COMPLETED,
-                                    TaskState.FAILED,
-                                    TaskState.SKIPPED
-                            ]
-                        }
+            Map<String, Promise> results = [:]
+
+            roots.each { root ->
+                assert root
+                println "taskGraph run : scheduling task $root for its promise "
+                def taskPromise = schedule(root, Optional.empty(), results)
+                assert taskPromise
+                println "root task $root returned with promise $taskPromise "
+                results[root.id] = taskPromise
             }
+
+            // Store results in context globals for test access
+            ctx.globals.__taskResults = results
+
+            // return last root result (what tests expect)
+            Promise last = results[roots.last().id]
+
+            return last.get()
+        }
+    }
+
+    // --------------------------------------------------------------------
+    // Schedule a task
+    // --------------------------------------------------------------------
+    private Promise schedule(Task task,
+                             Optional<Promise<?>> prevOpt,
+                             Map<String, Promise> results) {
+
+        println "taskGraph schedule():  received task $task to process, prevOpt : $prevOpt, results : $results "
+
+
+        // already scheduled?
+        if (results.containsKey(task.id))
+            return results[task.id]
+
+        // collect predecessor promises
+        List<Promise> predPromises = task.predecessors.collect { pid ->
+            results[pid] ?: schedule(tasks[pid], Optional.empty(), results)
         }
 
-        // Run scheduler on the pool
-        ctx.pool.execute {
+        // PROMISE for previous results
+        Promise prevPromise =
+                predPromises.isEmpty()
+                        ? Promises.async { null }
+                        : Promises.all(predPromises)  //todo problem here as we dont have an all()
 
-            try {
-                while (true) {
-                    def toRun = ready()
+        println "taskGraph schedule(): prevPromise is $prevPromise"
 
-                    // Schedule all ready tasks
-                    toRun.each { Task t ->
-                        Optional<Promise<?>> prevOpt = Optional.empty()
+        // ----------------------------------------------------------------
+        // CRITICAL FIX: use flatMap instead of map to avoid wrapping promise
+        // ----------------------------------------------------------------
+        Promise exec = prevPromise.flatMap { prevVal ->
 
-                        boolean isJoinTask =
-                                t.metaClass.hasProperty(t, 'isJoinTask') &&
-                                        t.metaClass.isJoinTask
-
-                        // 1-predecessor passthrough (non-join)
-                        if (!isJoinTask && t.predecessors.size() == 1) {
-                            prevOpt = results[t.predecessors.first()]
-                        }
-
-                        Optional<Promise<?>> optPromise = t.execute(ctx, prevOpt, emit)
-
-                        if (optPromise.isPresent()) {
-                            Promise<?> p = optPromise.get()
-                            results[t.id] = Optional.of(p)
-                        } else {
-                            // Represent "no promise" as a completed-null promise
-                            Promise<Object> p = Promises.newPromise()
-                            p.accept(null)
-                            results[t.id] = Optional.of(p)
-                        }
-                    }
-
-                    if (toRun.isEmpty()) {
-                        boolean allDone = tasks.values().every { Task t ->
-                            t.state in [
-                                    TaskState.COMPLETED,
-                                    TaskState.FAILED,
-                                    TaskState.SKIPPED
-                            ]
-                        }
-
-                        if (allDone) {
-                            break
-                        }
-
-                        Thread.sleep(10)
+            // conditional routing
+            if (conditionalForks.containsKey(task.id)) {
+                def conds = conditionalForks[task.id]
+                conds.each { tid, cond ->
+                    if (!cond(prevVal)) {
+                        task.successors.remove(tid)
                     }
                 }
-
-                // Choose "last" task as graph result
-                def lastTask = tasks.values().last()
-                Optional<Promise<?>> opt = results[lastTask.id]
-                Promise<?> lastPromise = opt?.orElse(null)
-
-                if (lastPromise == null) {
-                    lastPromise = Promises.newPromise()
-                    lastPromise.accept(null)
-                }
-
-                lastPromise.onComplete { value ->
-                    completion.accept(value)
-                }.onError { err ->
-                    completion.fail(err)
-                }
-
-            } catch (Throwable e) {
-                completion.fail(e)
             }
+
+            println  "TaskGraph schedule() : flatmap delegate is $delegate, prevVal is $prevVal "
+            Optional optPrevValue = Optional.ofNullable(prevVal)
+            println  "TaskGraph schedule() : : run  task.execute($optPrevValue) "
+            Promise taskExecPromise = task.execute(optPrevValue)
+            println  "TaskGraph schedule() :: just executed task.execute($optPrevValue) and got promise $taskExecPromise "
+
+            return taskExecPromise
         }
 
-        return completion
+        results[task.id] = exec
+        return exec
     }
 }

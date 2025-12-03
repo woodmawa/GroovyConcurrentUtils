@@ -54,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * </ul>
  */
 @Slf4j
-class ConcurrentPool {
+class ConcurrentPool implements WorkerPool {
 
     // ─────────────────────────────────────────────────────────────
     // Shared application-wide resources
@@ -179,6 +179,20 @@ class ConcurrentPool {
             this.scheduledExecutor = scheduledExecutor
             this.ownsScheduledExecutor = false
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // mock bridge methods for WorkerPool - so we can readily mock a ConcurrentPool
+    // ─────────────────────────────────────────────────────────────
+
+    @Override
+    void execute(Runnable r) {
+        this.executor.submit(r)
+    }
+
+    @Override
+    void submit(Runnable r) {
+        this.executor.submit(r)
     }
 
     // ─────────────────────────────────────────────────────────────

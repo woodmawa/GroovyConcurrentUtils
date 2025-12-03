@@ -41,7 +41,7 @@ class DataflowFactory {
         pool.executor.submit {
             try {
                 T result = task.call()
-                variable.set(result)
+                variable.setValue(result)
             } catch (Throwable e) {
                 variable.bindError(e)
                 log.error("Task(): Task execution failed", e)

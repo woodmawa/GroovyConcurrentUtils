@@ -3,6 +3,7 @@ package org.softwood.dag
 import groovy.transform.stc.ClosureParams
 import groovy.transform.stc.FromString
 import org.softwood.dag.task.ServiceTask
+import org.softwood.dag.task.Task
 import org.softwood.dag.task.TaskContext
 import org.softwood.dataflow.DataflowVariable
 import org.softwood.promise.Promise
@@ -79,76 +80,50 @@ import org.softwood.promise.Promises
  */
 class JoinDsl {
 
-    final TaskGraph graph
-    final ServiceTask joinTask
-    final List<String> fromIds = []
+    private final TaskGraph graph
+    private final String id
+    private final Set<String> inputIds = [] as Set
+    private Closure joinAction
 
-    Closure userAction   // stored for build()
-
-    JoinDsl(TaskGraph graph, ServiceTask joinTask) {
+    JoinDsl(TaskGraph graph, String id) {
         this.graph = graph
-        this.joinTask = joinTask
+        this.id = id
     }
 
-    void from(String... ids) {
-        fromIds.addAll(ids)
+    def configure(Closure body) {
+        body.delegate = this
+        body.resolveStrategy = Closure.DELEGATE_FIRST
+        body.call()
     }
 
-    void action(
-            @ClosureParams(
-                    value = FromString,
-                    options = "org.softwood.dag.task.TaskContext,java.util.List<org.softwood.promise.Promise<?>>"
-            )
-                    Closure cl
-    ) {
-        this.userAction = cl
+    def from(String... ids) {
+        inputIds.addAll(ids)
     }
 
+    def action(@DelegatesTo(ServiceTask) Closure c) {
+        this.joinAction = c
+    }
+
+    // ----------------------------------------------------
+    // Create + wire join task
+    // ----------------------------------------------------
     void build() {
 
-        if (fromIds.isEmpty()) {
-            throw new IllegalStateException("Join '${joinTask.id}' has no 'from' tasks defined")
-        }
+        def joinTask = new ServiceTask(id, id, graph.ctx)
 
-        if (!userAction) {
-            throw new IllegalStateException("Join '${joinTask.id}' must define an action { ... }")
-        }
+        if (joinAction == null)
+            throw new IllegalStateException("join($id) requires an action closure")
 
-        // Mark this as a join task with metadata
-        joinTask.metaClass.isJoinTask = true
-        joinTask.metaClass.joinFromIds = fromIds
+        joinTask.action(joinAction)
+        graph.addTask(joinTask)
 
-        // Wire DAG edges: predecessors → joinTask
-        fromIds.each { pid ->
-            def pred = graph.tasks[pid]
-            if (pred) pred.successors.add(joinTask.id)
-            joinTask.predecessors.add(pid)
-        }
+        inputIds.each { pid ->
+            Task pred = graph.tasks[pid]
+            if (!pred)
+                throw new IllegalStateException("Unknown join source: $pid")
 
-        // Install wrapper action that pulls predecessor promises from ctx.globals.__taskResults
-        joinTask.action { TaskContext ctx, Optional prevOpt ->
-
-            def resultsMap = ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-            if (!resultsMap) {
-                throw new IllegalStateException(
-                        "Join task '${joinTask.id}' cannot access task results map from context"
-                )
-            }
-
-            List<Promise<?>> predecessorPromises = fromIds.collect { taskId ->
-                def pOpt = resultsMap[taskId]
-                if (!pOpt?.isPresent()) {
-                    throw new IllegalStateException(
-                            "Join task '${joinTask.id}' cannot find result for predecessor '${taskId}'"
-                    )
-                }
-                pOpt.get()
-            }
-
-            def result = userAction.call(ctx, predecessorPromises)
-
-            // Always normalize to Promise
-            Promises.ensurePromise(result)
+            joinTask.dependsOn(pred.id)
+            pred.addSuccessor(joinTask.id)
         }
     }
 }

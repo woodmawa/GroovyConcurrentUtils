@@ -117,7 +117,19 @@ class DataflowPromise<T> implements Promise<T> {
     /** {@inheritDoc} */
     @Override
     T get() throws Exception {
-        return variable.get()
+        CompletableFuture<T> future = variable.toFuture()
+        try {
+            return future.get() as T
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause()
+            if (cause instanceof Exception) {
+                throw (Exception) cause
+            }
+            throw new RuntimeException(cause.message)
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+            throw new RuntimeException(e.message)
+        }
     }
 
     /**
@@ -132,7 +144,7 @@ class DataflowPromise<T> implements Promise<T> {
     T get(long timeout, TimeUnit unit) throws TimeoutException {
         CompletableFuture<T> future = variable.toFuture()
         try {
-            return future.get(timeout, unit)
+            return future.get(timeout, unit) as T
         } catch (TimeoutException e) {
             throw e
         } catch (ExecutionException e) {
@@ -140,10 +152,10 @@ class DataflowPromise<T> implements Promise<T> {
             if (cause instanceof Exception) {
                 throw (Exception) cause
             }
-            throw new RuntimeException(cause)
+            throw new RuntimeException(cause.message)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
-            throw new RuntimeException(e)
+            throw new RuntimeException(e.message)
         }
     }
 

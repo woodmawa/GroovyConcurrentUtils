@@ -10,40 +10,60 @@ import java.util.function.BiFunction
 @Slf4j
 class ServiceTask<T> extends Task<T> {
 
-    // (ctx, previousPromiseOpt) -> Promise<T>
-    private BiFunction<TaskContext, Optional<Promise<?>>, Promise<T>> action
+    private Closure serviceAction
 
-    ServiceTask(String id, String name = null) {
-        super(id, name)
+    ServiceTask(String id, String name, TaskContext ctx) {
+        super(id, name, ctx)
     }
 
     /**
-     * Configure the task's work as a closure.
-     *
-     * The closure may return:
-     *   - a Promise<T>
-     *   - a plain value T
-     *   - a DataflowVariable, etc.
-     * It will always be normalized to Promise<T> via Promises.ensurePromise.
+     * DSL: action { ctx, prev -> result }
      */
-    ServiceTask<T> action(Closure closure) {
-        this.action = { TaskContext ctx, Optional<Promise<?>> prev ->
-            def result = closure.call(ctx, prev)
-            // Normalize into a Promise<T> safely
-            (Promise<T>) Promises.ensurePromise(result)
-        } as BiFunction<TaskContext, Optional<Promise<?>>, Promise<T>>
+    void action(@DelegatesTo(ServiceTask) Closure c) {
+        serviceAction = c.clone() as Closure
 
-        return this
+        //ensure serviceAction closure resoles to this serviceTask instance first
+        serviceAction.delegate = this
+        serviceAction.resolveStrategy = Closure.DELEGATE_FIRST
     }
 
-    /**
-     * REQUIRED implementation (matches abstract Task.runTask)
-     */
     @Override
-    Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prevOpt) {
-        if (!action) {
-            throw new IllegalStateException("No action configured for ServiceTask '${id}'")
+    protected Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prevOpt) {
+
+        if (serviceAction == null)
+            throw new IllegalStateException("ServiceTask '$id' requires an action")
+
+        return Promises.async {
+            //def prevVal = prevOpt.isPresent() ? prevOpt.get().get() : null
+            //return (T) serviceAction.call(ctx, prevVal)
+            println "ServiceTask.runTask: about to call serviceAction for task $id"
+            def prevVal = prevOpt.isPresent() ? prevOpt.get().get() : null
+
+            /*orig ---
+            println "ServiceTask.runTask: prevVal = $prevVal"
+            def result = serviceAction.call(ctx, prevVal)
+            println "ServiceTask.runTask: serviceAction returned: $result"
+            return (T) result
+            */
+
+            // --- FIX START ---
+            // We need to run the service action in a separate async block and wait for it.
+            // This ensures that the promise returned by runTask is backed by an
+            // execution thread that can be timed out externally by Task.runAttempt.
+            // The task action's sleep will now be running on a separate thread,
+            // and the get() call here will block the main task thread until it either
+            // completes or the external Task.runAttempt timeout hits.
+
+            // The inner promise runs the long-running action
+            return Promises.async {
+                println "ServiceTask.runTask: about to call serviceAction for task $id"
+                println "ServiceTask.runTask: prevVal = $prevVal"
+                def result = serviceAction.call(ctx, prevVal)
+                println "ServiceTask.runTask: serviceAction returned: $result"
+                return (T) result
+            }.get() // Block the outer promise's thread until the inner action completes/fails
+
+            // --- FIX END ---
         }
-        return action.apply(ctx, prevOpt)
     }
 }

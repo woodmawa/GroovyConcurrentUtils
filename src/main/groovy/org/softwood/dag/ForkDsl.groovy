@@ -2,6 +2,7 @@ package org.softwood.dag
 
 import org.softwood.dag.TaskGraph
 import org.softwood.dag.task.ServiceTask
+import org.softwood.dag.task.Task
 import org.softwood.dag.task.TaskContext
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
@@ -107,136 +108,68 @@ import org.softwood.dag.task.TaskState
  */
 class ForkDsl {
 
-    /** The TaskGraph being configured */
     private final TaskGraph graph
+    private final String id
 
-    /** Expose graph.ctx so routing closures can reference ctx.globals safely */
-    final TaskContext ctx
+    private String routeFromId
+    private final Set<String> staticTargets = [] as Set
+    private final Map<String, Closure<Boolean>> conditionalRules = [:]
 
-    /** ID of the source task that triggers the fork */
-    String fromId
-
-    /** List of static target task IDs (wired immediately) */
-    List<String> staticToIds = []
-
-    /** Custom routing closure returning list of task IDs to execute */
-    Closure<List<String>> router
-
-    /** Conditional selector closure (internal - use conditionalOn() API) */
-    Closure<List<String>> conditionalSelector
-
-    ForkDsl(TaskGraph graph) {
+    ForkDsl(TaskGraph graph, String id) {
         this.graph = graph
-        this.ctx   = graph.ctx     // important: gives user routing closures access to ctx.globals
+        this.id = id
     }
 
-    // ---------------------------------------------------------------------
-    // Wiring
-    // ---------------------------------------------------------------------
-
-    void from(String id) {
-        this.fromId = id
+    // Select the driving input of the fork
+    def from(String sourceId) {
+        this.routeFromId = sourceId
     }
 
-    void to(String... ids) {
-        staticToIds.addAll(ids)
-        // Static fan-out wired immediately
-        if (fromId && !staticToIds.isEmpty()) {
-            staticToIds.each { tid ->
-                graph.tasks[tid]?.dependsOn(fromId)
-                graph.tasks[fromId]?.successors?.add(tid)
-            }
+    // Statically route to one or more downstream tasks
+    def to(String... targetIds) {
+        staticTargets.addAll(targetIds)
+    }
+
+    // Conditional routing: conditionalOn(["taskId"]) { prevValue -> boolean }
+    def conditionalOn(List<String> targets, Closure<Boolean> cond) {
+        targets.each { tid ->
+            conditionalRules[tid] = cond
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Conditional / dynamic routing API
-    // ---------------------------------------------------------------------
-
-    void conditionalOn(List<String> ids, Closure<Boolean> predicate) {
-        // Wrap Boolean predicate into a selector that returns a list of IDs
-        this.conditionalSelector = { value ->
-            predicate.call(value) ? ids : []
-        }
-    }
-
-    void route(Closure<List<String>> router) {
-        this.router = router
-    }
-
-    // ---------------------------------------------------------------------
-    // Build synthetic router (if needed)
-    // ---------------------------------------------------------------------
-
+    // ----------------------------------------------------
+    // Build → Wire graph dependencies
+    // ----------------------------------------------------
     void build() {
-        if (!fromId) {
-            return
-        }
-        if (!conditionalSelector && !router) {
-            // purely static fork; wiring already done in to()
-            return
+
+        if (!routeFromId) {
+            throw new IllegalStateException("fork($id) requires 'from \"taskId\"'")
         }
 
-        // Synthetic routing task
-        String routerId = "__router_${fromId}_${UUID.randomUUID()}"
-        def routerTask = new ServiceTask<List<String>>(routerId)
-        routerTask.dependsOn(fromId)
+        Task source = graph.tasks[routeFromId]
+        if (!source)
+            throw new IllegalStateException("Unknown source task: $routeFromId")
 
-        routerTask.action { TaskContext ctx, Optional<Promise<?>> prevOpt ->
-            Promise<?> prev = prevOpt.orElse(null)
+        // Static routes
+        staticTargets.each { tid ->
+            Task target = graph.tasks[tid]
+            if (!target)
+                throw new IllegalStateException("Unknown target: $tid")
 
-            return Promises.async {
-                // upstream value from source
-                def value = prev?.get()
-
-                // Decide which targets to run
-                List<String> selected
-                if (router) {
-                    // Allow router closure to use either (value) or (ctx, value)
-                    if (router.maximumNumberOfParameters == 2) {
-                        selected = router.call(ctx, value) as List<String>
-                    } else {
-                        selected = router.call(value) as List<String>
-                    }
-                } else if (conditionalSelector) {
-                    if (conditionalSelector.maximumNumberOfParameters == 2) {
-                        selected = conditionalSelector.call(ctx, value) as List<String>
-                    } else {
-                        selected = conditionalSelector.call(value) as List<String>
-                    }
-                } else {
-                    selected = []
-                }
-
-                selected = selected ?: []
-
-                // Mark unselected static successors as SKIPPED,
-                // and (optionally) give them a null result promise so joins won't explode.
-                def results = ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-
-                staticToIds.each { tid ->
-                    if (!selected.contains(tid)) {
-                        def t = graph.tasks[tid]
-                        if (t && t.state == TaskState.PENDING) {
-                            t.state = TaskState.SKIPPED
-                        }
-                        if (results != null && !results.containsKey(tid)) {
-                            Promise<Object> p = Promises.newPromise()
-                            p.accept(null)
-                            results[tid] = Optional.of(p)
-                        }
-                    }
-                }
-
-                return selected
-            }
+            target.dependsOn(source.id)
+            source.addSuccessor(target.id)
         }
 
-        graph.addTask(routerTask)
+        // Conditional routes
+        conditionalRules.each { tid, cond ->
+            Task target = graph.tasks[tid]
+            if (!target)
+                throw new IllegalStateException("Unknown conditional target: $tid")
 
-        // Ensure all targets depend on router instead of source
-        staticToIds.each { tid ->
-            graph.tasks[tid]?.dependsOn(routerTask.id)
+            graph.registerConditionalFork(source.id, tid, cond)
+
+            target.dependsOn(source.id)
+            source.addSuccessor(target.id)
         }
     }
 }

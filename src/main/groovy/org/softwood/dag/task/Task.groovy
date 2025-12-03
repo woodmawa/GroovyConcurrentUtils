@@ -1,8 +1,12 @@
 package org.softwood.dag.task
 
+import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
+
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Abstract base class for all DAG tasks.
@@ -14,119 +18,179 @@ import org.softwood.promise.Promises
  *  - promise-based async execution
  */
 @Slf4j
+@ToString
 abstract class Task<T> {
 
     final String id
+    final String name
+    //Closure action
+    TaskState state = TaskState.SCHEDULED
 
-    /** predecessor → successor wiring */
-    final List<String> predecessors = []
-    final List<String> successors   = []
+    //enable duck typing on context
+    def  ctx
 
-    /** Current state */
-    TaskState state = TaskState.PENDING
+    /**
+     * Canonical DAG topology:
+     * All DSLs and tests use only these.
+     */
+    final Set<String> predecessors = [] as Set
+    final Set<String> successors   = [] as Set
 
-    /** Retry support */
-    final RetryPolicy retryPolicy = new RetryPolicy()
+    /** -------------------------------
+     * Task runtime behaviour
+     */
+    protected RetryPolicy retryPolicy = new RetryPolicy()
+    private Long taskTimeoutMillis = null
+    protected Throwable lastError = null
 
-    /** Timeout support (null → no timeout) */
-    Long timeoutMillis = null
-    void setTimeoutMillis(Number n) { timeoutMillis = n?.longValue() }
 
-    /** Execution hook implemented in subclasses */
-    abstract Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prevOpt)
-
-    Task(String id) {
+    // ----------------------------------------------------
+    // constructor - expects id and a name and a graph ctx
+    // ----------------------------------------------------
+    Task(String id, String name, ctx) {
         this.id = id
+        this.name = name
+        this.ctx = ctx
     }
 
-    // -----------------------------------------------------------
-    // Retry + backoff setters (DSL-friendly)
-    // -----------------------------------------------------------
+    // ----------------------------------------------------
+    // Canonical graph wiring, methods for Task DSL classes to call
+    // ----------------------------------------------------
 
-    Task<T> maxRetries(int n)               { retryPolicy.maxAttempts = n; return this }
-    void setMaxRetries(Number n)            { retryPolicy.maxAttempts = n?.intValue() }
-
-    Task<T> retryDelay(long millis)         { retryPolicy.initialDelayMillis = millis; return this }
-    void setRetryDelay(Number n)            { retryPolicy.initialDelayMillis = n?.longValue() }
-
-    Task<T> retryBackoff(double factor)     { retryPolicy.backoffMultiplier = factor; return this }
-    void setRetryBackoff(Number n)          { retryPolicy.backoffMultiplier = n?.doubleValue() }
-
-    // -----------------------------------------------------------
-    // Execution entry point
-    // -----------------------------------------------------------
-
-    Optional<Promise<?>> execute(TaskContext ctx,
-                                 Optional<Promise<?>> prevOpt,
-                                 Closure emitEvent) {
-
-        this.state = TaskState.SCHEDULED
-        emitEvent(new TaskEvent(id, state))
-
-        // If predecessors failed → skip
-        boolean anyFailed = predecessors.any { pid ->
-            ctx.graph.tasks[pid].state == TaskState.FAILED
-        }
-        if (anyFailed) {
-            this.state = TaskState.SKIPPED
-            emitEvent(new TaskEvent(id, state))
-            return Optional.empty()
-        }
-
-        // Submit async execution
-        Promise<T> p = runAttempt(ctx, prevOpt, emitEvent)
-
-        return Optional.of(p)
+    void dependsOn(String taskId) {
+        predecessors << taskId
     }
 
-    // -----------------------------------------------------------
-    // Internal run + retry loop
-    // -----------------------------------------------------------
+    void addSuccessor(String taskId) {
+        successors << taskId
+    }
 
-    Promise<T> runAttempt(TaskContext ctx,
-                          Optional<Promise<?>> prevOpt,
-                          Closure emitEvent) {
+     // ----------------------------------------------------
+    // Synthetic properties
+    // ----------------------------------------------------
+    Integer getMaxRetries() { retryPolicy.maxAttempts }
+    void setMaxRetries(Integer v) { retryPolicy.maxAttempts = v }
 
-        return Promises.future(ctx.pool.executor, {
+    Long getTimeoutMillis() { taskTimeoutMillis }
+    void setTimeoutMillis(Long v) { taskTimeoutMillis = v }
+
+    Throwable getError () {
+        lastError
+    }
+
+    // ----------------------------------------------------
+    // Subclasses implement the core promise-returning action
+    // ----------------------------------------------------
+    protected abstract Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prev)
+
+    // ----------------------------------------------------
+    // Main entrypoint called by TaskGraph
+    // ----------------------------------------------------
+    Promise execute(Optional<Object> previousResult) {
+
+        state = TaskState.RUNNING
+        emitEvent(TaskState.RUNNING)
+
+        println "Task execute : call runAttempt with prevResult : $previousResult "
+        Promise<T> attemptPromise = runAttempt(previousResult as Optional<Promise<?>>)
+
+        println "Task execute just got back attemptPromise $attemptPromise"
+
+        return attemptPromise
+                .then { T result ->
+                    println "Task.execute then(): received result $result"
+                    state = TaskState.COMPLETED
+                    emitEvent(TaskState.COMPLETED)
+                    result  // <-- Don't use "return", just the expression
+                }
+                .recover { Throwable err ->
+                    println "Task.execute recover(): received error $err"
+                    lastError = err
+                    state = TaskState.FAILED
+                    emitErrorEvent(err)
+                    throw err  // Re-throw to keep the promise failed
+                }
+    }
+
+    // ----------------------------------------------------
+    // Retry + timeout wrapper
+    // ----------------------------------------------------
+    private Promise<T> runAttempt(Optional<Promise<?>> prevOpt) {
+
+        println "Task starting runAttempt and calling promises.async() with local closure "
+        //use ctx.pools threads to run the closure
+        return Promises.async {
+
             int attempt = 1
-            long delay  = retryPolicy.initialDelayMillis
+            long delay  = retryPolicy.initialDelay.toMillis()
 
             while (true) {
                 try {
-                    this.state = TaskState.RUNNING
-                    emitEvent(new TaskEvent(id, state))
+                    state = TaskState.RUNNING
+                    emitEvent(TaskState.RUNNING)
 
-                    // Run user action (implemented in subclass)
-                    Promise<T> result = runTask(ctx, prevOpt)
+                    println "Task runAttempt: run task $this with runTask calling concrete implementation in serviceTask!"
+                    Promise<T> promise = runTask(ctx, prevOpt)
 
-                    // Apply timeout if configured
-                    if (timeoutMillis != null) {
-                        result = result.orTimeout(timeoutMillis)
+                    println "Task runAttempt: run task returned promise $promise "
+                    T result
+                    // Let Promises.timeout throw TimeoutException naturally.
+                    if (taskTimeoutMillis != null) {
+                        result = promise.get(taskTimeoutMillis, TimeUnit.MILLISECONDS)
+                        println "Task runAttempt: prmoise.get(timeout ) got result from promise: $result"  // ADD THIS
+                    } else {
+                        // If this throws, catch block handles it.
+                        result = promise.get()
+                        println "Task runAttempt: prmoise.get() got result from promise: $result"  // ADD THIS
+
                     }
 
-                    // Success path
-                    this.state = TaskState.COMPLETED
-                    emitEvent(new TaskEvent(id, state))
-                    return result.get()
+                    // SUCCESS
+                    state = TaskState.COMPLETED
+                    emitEvent(TaskState.COMPLETED)
+                    return result
 
                 } catch (Throwable err) {
 
-                    // Out of retries? → fail task
-                    if (attempt >= retryPolicy.maxAttempts) {
-                        this.state = TaskState.FAILED
-                        emitEvent(new TaskEvent(id, state, err))
-                        throw err
+                    lastError = err
+
+                    // TIMEOUT — fail immediately, no retry
+                    if (err instanceof TimeoutException) {
+                        state = TaskState.FAILED
+                        emitErrorEvent(err)
+                        throw err          // <-- important! propagate failure
                     }
 
-                    // Retry allowed → wait + retry
-                    log.warn("Task ${id} failed on attempt ${attempt}: ${err.message} → retrying")
+                    // NO MORE RETRIES
+                    if (attempt >= retryPolicy.maxAttempts) {
+                        state = TaskState.FAILED
+                        //todo  maybe throw a new runtime error with max attempts exceeded ?
+                        def exceededAttemptsErr = new RuntimeException("exceeded retry attempts ", lastError)
+                        emitErrorEvent(exceededAttemptsErr)
+                        throw exceededAttemptsErr
+                    }
+
+                    log.warn("Task $id failed on attempt $attempt: ${err.message} → retrying")
 
                     Thread.sleep(delay)
                     delay = (long)(delay * retryPolicy.backoffMultiplier)
                     attempt++
                 }
             }
-        })
+        }
     }
 
+    // ----------------------------------------------------
+    // Task Event helpers
+    // ----------------------------------------------------
+
+    private void emitEvent(TaskState newState) {
+        state = newState
+        ctx.graph.notifyEvent(new TaskEvent(id, newState))
+    }
+
+    private void emitErrorEvent(Throwable err) {
+        state = TaskState.FAILED
+        ctx.graph.notifyEvent(new TaskEvent(id, TaskState.FAILED, err))
+    }
 }

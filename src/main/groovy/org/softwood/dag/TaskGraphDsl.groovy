@@ -17,92 +17,51 @@ class TaskGraphDsl {
         this.graph = graph
     }
 
-    // ----------------------------------------------------------------------
-    // Globals DSL
-    // ----------------------------------------------------------------------
-
-    void globals(@DelegatesTo(Map) Closure cl) {
-        cl.delegate = graph.ctx.globals
-        cl.resolveStrategy = Closure.DELEGATE_FIRST
-        cl.call()
-    }
-
-    // ----------------------------------------------------------------------
-    // Task creation DSL
-    // ----------------------------------------------------------------------
-
-    def task(String id,
-             Class<? extends Task> type = ServiceTask,
-             @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
-                     genericTypeIndex = 0,
-                     type = "T extends org.softwood.dag.task.Task")
-                     Closure cl) {
-
-        Task t = type.getConstructor(String).newInstance(id)
-        cl.delegate = t
-        cl.resolveStrategy = Closure.DELEGATE_FIRST
-        cl.call()
-
+    // ----------------------------------------------------
+    // Create service task
+    // ----------------------------------------------------
+    Task serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
+        def t = new ServiceTask(id, id, graph.ctx)
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.delegate = t
+        config.call()
         graph.addTask(t)
         return t
     }
 
-    def serviceTask(String id,
-                    @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
-                            value = ServiceTask)
-                            Closure cl) {
-
-        task(id, ServiceTask, cl)
+    // Generic task declaration
+    Task task(String id, @DelegatesTo(Task) Closure config) {
+        return serviceTask(id, config)
     }
 
-    // ----------------------------------------------------------------------
-    // Fork DSL
-    // ----------------------------------------------------------------------
-
-    void fork(String name,
-              @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
-                      value = ForkDsl)
-                      Closure cl) {
-        def dsl = new ForkDsl(graph)
-        cl.delegate = dsl
-        cl.resolveStrategy = Closure.DELEGATE_FIRST
-        cl.call()
-
-        // Apply any dynamic routing wiring (router task) after user config
-        dsl.build()
+    // ----------------------------------------------------
+    // Fork block
+    // ----------------------------------------------------
+    def fork(String id, @DelegatesTo(ForkDsl) Closure body) {
+        def forkDsl = new ForkDsl(graph, id)
+        body.delegate = forkDsl
+        body.resolveStrategy = Closure.DELEGATE_FIRST
+        body.call()
+        forkDsl.build()
     }
 
-    // ----------------------------------------------------------------------
-    // Join DSL
-    // ----------------------------------------------------------------------
-
-    void join(String id,
-              JoinStrategy strategy = JoinStrategy.ALL_COMPLETED,
-              @DelegatesTo(strategy = Closure.DELEGATE_FIRST,
-                      value = JoinDsl)
-                      Closure cl) {
-
-        ServiceTask joinTask = new ServiceTask(id)
-        joinTask.metaClass.joinStrategy = strategy
-
-        JoinDsl jdsl = new JoinDsl(graph, joinTask)
-
-        cl.delegate = jdsl
-        cl.resolveStrategy = Closure.DELEGATE_FIRST
-        cl.call()
-
-        // finish configuring joinTask
-        jdsl.build()
-
-        // then add to graph
-        graph.addTask(joinTask)
+    // ----------------------------------------------------
+    // Join block
+    // ----------------------------------------------------
+    def join(String id, @DelegatesTo(JoinDsl) Closure body) {
+        def joinDsl = new JoinDsl(graph, id)
+        body.delegate = joinDsl
+        body.resolveStrategy = Closure.DELEGATE_FIRST
+        joinDsl.configure(body)
+        joinDsl.build()
     }
 
-    // ----------------------------------------------------------------------
-    // Task event listener DSL
-    // ----------------------------------------------------------------------
-
-    void onTaskEvent(Closure listener) {
-        graph.addListener({ TaskEvent ev -> listener.call(ev) } as TaskListener)
+    // ----------------------------------------------------
+    // Globals block → sets ctx.globals
+    // ----------------------------------------------------
+    def globals(@DelegatesTo(Map) Closure body) {
+        body.delegate = graph.ctx.globals
+        body.resolveStrategy = Closure.DELEGATE_FIRST
+        body.call()
     }
 }

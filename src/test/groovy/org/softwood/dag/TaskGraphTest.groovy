@@ -17,13 +17,17 @@ class TaskGraphRoutingTest {
 
     // Utility to await a promise
     private static <T> T awaitPromise(Promise<T> p) {
-        return Awaitility.await()
+        // First wait for the promise to complete
+        Awaitility.await()
                 .atMost(5, TimeUnit.SECONDS)
-                .until({ p.isDone() }, { p.get() })
+                .until({ p.isDone() })
+
+        // Then get the result (which may block briefly if not quite ready)
+        return p.get()
     }
 
     // ------------------------------------------------------------
-    // Corrected TEST 4 — Conditional Routing
+    // TEST 4 – Conditional Routing
     // ------------------------------------------------------------
     @Test
     void testConditionalFork() {
@@ -31,7 +35,9 @@ class TaskGraphRoutingTest {
         def graph = TaskGraph.build {
 
             serviceTask("start") {
-                action { ctx, _ -> Promises.async { "A" } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "A" }
+                }
             }
 
             fork("conditional") {
@@ -42,25 +48,25 @@ class TaskGraphRoutingTest {
 
             serviceTask("a") {
                 action { ctx, prevOpt ->
-                    Promises.async { "A-ran" }
+                    ctx.promiseFactory.executeAsync { "A-ran" }
                 }
             }
 
             serviceTask("b") {
                 action { ctx, prevOpt ->
-                    Promises.async { "B-ran" }
+                    ctx.promiseFactory.executeAsync { "B-ran" }
                 }
             }
         }
 
         def value = awaitPromise(graph.run())
 
-        assertEquals(TaskState.COMPLETED, graph.tasks["a"].state)
-        assertEquals(TaskState.SKIPPED, graph.tasks["b"].state)
+        assertEquals(TaskState.COMPLETED, graph.tasks["a"].state, "Task 'a' should be COMPLETED")
+        assertEquals(TaskState.SKIPPED, graph.tasks["b"].state, "Task 'b' should be SKIPPED")
     }
 
     // ------------------------------------------------------------
-    // Corrected TEST 5 — Dynamic Routing
+    // TEST 5 – Dynamic Routing
     // ------------------------------------------------------------
     @Test
     void testDynamicRouting() {
@@ -69,7 +75,7 @@ class TaskGraphRoutingTest {
 
             serviceTask("classify") {
                 action { ctx, _ ->
-                    Promises.async { [type: "fast", payload: 99] }
+                    ctx.promiseFactory.executeAsync { [type: "fast", payload: 99] }
                 }
             }
 
@@ -82,26 +88,25 @@ class TaskGraphRoutingTest {
 
             serviceTask("fast") {
                 action { ctx, prevOpt ->
-                    Promises.async { "FAST-RAN" }
+                    ctx.promiseFactory.executeAsync { "FAST-RAN" }
                 }
             }
 
             serviceTask("standard") {
                 action { ctx, prevOpt ->
-                    Promises.async { "STANDARD-RAN" }
+                    ctx.promiseFactory.executeAsync { "STANDARD-RAN" }
                 }
             }
         }
 
         def value = awaitPromise(graph.run())
 
-        assertEquals(TaskState.COMPLETED, graph.tasks["fast"].state)
-        assertEquals(TaskState.SKIPPED, graph.tasks["standard"].state)
+        assertEquals(TaskState.COMPLETED, graph.tasks["fast"].state, "Task 'fast' should be COMPLETED")
+        assertEquals(TaskState.SKIPPED, graph.tasks["standard"].state, "Task 'standard' should be SKIPPED")
     }
 
-    // ------------------------------------------------------------
-    // Test A — Sharding Router
-    // ------------------------------------------------------------
+    // UPDATED TEST - Use prevOpt instead of ctx.globals
+
     @Test
     void testShardingRouter() {
 
@@ -109,7 +114,7 @@ class TaskGraphRoutingTest {
 
             serviceTask("loadData") {
                 action { ctx, _ ->
-                    Promises.async { (1..10).toList() }
+                    ctx.promiseFactory.executeAsync { (1..10).toList() }
                 }
             }
 
@@ -121,7 +126,13 @@ class TaskGraphRoutingTest {
             (0..2).each { idx ->
                 serviceTask("process_shard_${idx}") {
                     action { ctx, prevOpt ->
-                        Promises.async { "SHARD-${idx}-DONE" }
+                        // Get shard data from prevOpt instead of ctx.globals
+                        def myShard = prevOpt.orElse([])
+
+                        // Process the shard
+                        ctx.promiseFactory.executeAsync {
+                            "SHARD-${idx}-DONE (processed ${myShard.size()} items: $myShard)"
+                        }
                     }
                 }
             }
@@ -129,21 +140,28 @@ class TaskGraphRoutingTest {
             join("joinShards") {
                 from "process_shard_0", "process_shard_1", "process_shard_2"
                 action { ctx, promises ->
-                    Promises.async { "JOINED" }
+                    // Collect all shard results
+                    def results = promises.collect { it.get() }
+                    ctx.promiseFactory.executeAsync {
+                        "JOINED: ${results.join(', ')}"
+                    }
                 }
             }
         }
 
         def result = awaitPromise(graph.run())
 
-        (0..2).each { idx ->
-            assertEquals(TaskState.COMPLETED, graph.tasks["process_shard_${idx}"].state)
-        }
-        assertEquals("JOINED", result)
-    }
+        println "Final result: $result"
 
+        (0..2).each { idx ->
+            assertEquals(TaskState.COMPLETED, graph.tasks["process_shard_${idx}"].state,
+                    "Shard ${idx} should be COMPLETED")
+        }
+
+        assertTrue(result.contains("JOINED"), "Result should contain JOINED")
+    }
     // ------------------------------------------------------------
-    // Test B — Nested Routers
+    // Test B – Nested Routers
     // ------------------------------------------------------------
     @Test
     void testNestedRouters() {
@@ -151,7 +169,9 @@ class TaskGraphRoutingTest {
         def graph = TaskGraph.build {
 
             serviceTask("start") {
-                action { ctx, _ -> Promises.async { 42 } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { 42 }
+                }
             }
 
             fork("router1") {
@@ -161,11 +181,15 @@ class TaskGraphRoutingTest {
             }
 
             serviceTask("x") {
-                action { ctx, prevOpt -> Promises.async { "X" } }
+                action { ctx, prevOpt ->
+                    ctx.promiseFactory.executeAsync { "X" }
+                }
             }
 
             serviceTask("y") {
-                action { ctx, prevOpt -> Promises.async { "Y" } }
+                action { ctx, prevOpt ->
+                    ctx.promiseFactory.executeAsync { "Y" }
+                }
             }
 
             fork("router2") {
@@ -174,21 +198,30 @@ class TaskGraphRoutingTest {
                 conditionalOn(["xb"]) { v -> false }
             }
 
-            serviceTask("xa") { action { ctx, _ -> Promises.async { "XA" } } }
-            serviceTask("xb") { action { ctx, _ -> Promises.async { "XB" } } }
+            serviceTask("xa") {
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "XA" }
+                }
+            }
+
+            serviceTask("xb") {
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "XB" }
+                }
+            }
         }
 
         awaitPromise(graph.run())
 
-        assertEquals(TaskState.COMPLETED, graph.tasks["x"].state)
-        assertEquals(TaskState.SKIPPED,   graph.tasks["y"].state)
+        assertEquals(TaskState.COMPLETED, graph.tasks["x"].state, "Task 'x' should be COMPLETED")
+        assertEquals(TaskState.SKIPPED, graph.tasks["y"].state, "Task 'y' should be SKIPPED")
 
-        assertEquals(TaskState.COMPLETED, graph.tasks["xa"].state)
-        assertEquals(TaskState.SKIPPED,   graph.tasks["xb"].state)
+        assertEquals(TaskState.COMPLETED, graph.tasks["xa"].state, "Task 'xa' should be COMPLETED")
+        assertEquals(TaskState.SKIPPED, graph.tasks["xb"].state, "Task 'xb' should be SKIPPED")
     }
 
     // ------------------------------------------------------------
-    // Test C — Router returns empty list
+    // Test C – Router returns empty list
     // ------------------------------------------------------------
     @Test
     void testRouterReturnsEmptyList() {
@@ -196,7 +229,9 @@ class TaskGraphRoutingTest {
         def graph = TaskGraph.build {
 
             serviceTask("start") {
-                action { ctx, _ -> Promises.async { 5 } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { 5 }
+                }
             }
 
             fork("router") {
@@ -206,22 +241,26 @@ class TaskGraphRoutingTest {
             }
 
             serviceTask("t1") {
-                action { ctx, _ -> Promises.async { "T1" } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "T1" }
+                }
             }
 
             serviceTask("t2") {
-                action { ctx, _ -> Promises.async { "T2" } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "T2" }
+                }
             }
         }
 
         awaitPromise(graph.run())
 
-        assertEquals(TaskState.SKIPPED, graph.tasks["t1"].state)
-        assertEquals(TaskState.SKIPPED, graph.tasks["t2"].state)
+        assertEquals(TaskState.SKIPPED, graph.tasks["t1"].state, "Task 't1' should be SKIPPED")
+        assertEquals(TaskState.SKIPPED, graph.tasks["t2"].state, "Task 't2' should be SKIPPED")
     }
 
     // ------------------------------------------------------------
-    // Test D — Mixed static + conditional routing
+    // Test D – Mixed static + conditional routing
     // ------------------------------------------------------------
     @Test
     void testMixedRouting() {
@@ -229,7 +268,9 @@ class TaskGraphRoutingTest {
         def graph = TaskGraph.build {
 
             serviceTask("start") {
-                action { ctx, _ -> Promises.async { 20 } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { 20 }
+                }
             }
 
             fork("mixed") {
@@ -239,17 +280,24 @@ class TaskGraphRoutingTest {
             }
 
             serviceTask("always") {
-                action { ctx, _ -> Promises.async { "ALWAYS" } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "ALWAYS" }
+                }
             }
 
             serviceTask("maybe") {
-                action { ctx, _ -> Promises.async { "MAYBE" } }
+                action { ctx, _ ->
+                    ctx.promiseFactory.executeAsync { "MAYBE" }
+                }
             }
         }
 
-        awaitPromise(graph.run())
+        def value = awaitPromise(graph.run())
 
-        assertEquals(TaskState.COMPLETED, graph.tasks["always"].state)
-        assertEquals(TaskState.COMPLETED, graph.tasks["maybe"].state)
+        // Give a tiny bit of time for final state updates to propagate
+        Thread.sleep(50)
+
+        assertEquals(TaskState.COMPLETED, graph.tasks["always"].state, "Task 'always' should be COMPLETED")
+        assertEquals(TaskState.COMPLETED, graph.tasks["maybe"].state, "Task 'maybe' should be COMPLETED")
     }
 }

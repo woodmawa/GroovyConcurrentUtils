@@ -3,20 +3,19 @@ package org.softwood.dag.task
 import groovy.util.logging.Slf4j
 
 /**
- * ShardingRouterTask
+ * ShardingRouterTask - COMPLETE FIXED VERSION
  *
- * Produces N parallel branches based on a collection returned
- * by shardSource(prevValue).
+ * Splits input data into N shards, stores them in an instance variable,
+ * and returns the list of shard task IDs to execute.
  *
- * The router returns a List<String> of shard IDs.
- * The engine should wire these IDs to "template" tasks.
+ * TaskGraph reads the shard data via getShardData() and passes it
+ * directly to each shard task through the promise chain.
  */
 @Slf4j
 class ShardingRouterTask extends RouterTask {
 
     /**
-     * User closure:
-     *    prevValue -> Collection items
+     * User closure: prevValue -> Collection items
      */
     Closure shardSource
 
@@ -32,10 +31,16 @@ class ShardingRouterTask extends RouterTask {
      */
     String templateTargetId
 
+    /**
+     * Store computed shard data so TaskGraph can access it.
+     * Package-scope so TaskGraph can read it.
+     */
+    @groovy.transform.PackageScope
+    Map<String, List> computedShardData = [:]
+
     ShardingRouterTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
-
 
     @Override
     protected List<String> route(Object prevValue) {
@@ -60,18 +65,50 @@ class ShardingRouterTask extends RouterTask {
 
         log.debug("ShardingRouterTask($id): received collection size = ${collection.size()}")
 
-        // evenly divided shards
-        def shardSize = Math.max(1, Math.ceil(collection.size() / shardCount))
+        // Calculate shard size (divide collection into N parts)
+        List collectionList = collection.toList()
+        int totalSize = collectionList.size()
+        int shardSize = Math.max(1, (int) Math.ceil(totalSize / (double) shardCount))
 
+        log.debug("ShardingRouterTask($id): totalSize=$totalSize, shardCount=$shardCount, shardSize=$shardSize")
+
+        // Split data into shards and store in instance variable
         List<String> shardIds = []
+        computedShardData.clear()  // Clear previous data
 
         (0..<shardCount).each { i ->
             def shardId = "${templateTargetId}_shard_${i}"
             shardIds << shardId
+
+            // Calculate slice indices for this shard
+            int startIdx = i * shardSize
+            int endIdx = Math.min(startIdx + shardSize, totalSize)
+
+            // Extract the shard data
+            List shard = (startIdx < totalSize) ? collectionList[startIdx..<endIdx] : []
+
+            log.debug("ShardingRouterTask($id): shard $i -> [$startIdx..<$endIdx] = $shard")
+
+            // Store shard data in instance variable
+            computedShardData[shardId] = shard
         }
 
         log.debug("ShardingRouterTask($id): generated shardIds = $shardIds")
+        log.debug("ShardingRouterTask($id): stored shard data for: ${computedShardData.keySet()}")
 
         return shardIds
+    }
+
+    /**
+     * Get the shard data for a specific shard ID.
+     * Called by TaskGraph when scheduling shard tasks.
+     *
+     * @param shardId The ID of the shard task
+     * @return The data for this shard, or empty list if not found
+     */
+    List getShardData(String shardId) {
+        List data = computedShardData[shardId]
+        log.debug("ShardingRouterTask($id): getShardData($shardId) returning: $data")
+        return data ?: []
     }
 }

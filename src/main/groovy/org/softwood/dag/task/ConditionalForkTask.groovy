@@ -1,6 +1,7 @@
 package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
+import org.softwood.promise.Promise
 
 /**
  * ConditionalForkTask
@@ -28,6 +29,49 @@ class ConditionalForkTask extends RouterTask {
 
     ConditionalForkTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
+    }
+
+    @Override
+    protected Promise<List<String>> runTask(TaskContext ctx, Optional<?> prev) {
+
+        return ctx.promiseFactory.executeAsync {
+
+            // --------------------------------------
+            // Extract previous value
+            // --------------------------------------
+            Object prevValue = null
+
+            if (prev.isPresent()) {
+                def p = prev.get()
+
+                // If upstream returned a Promise, resolve it
+                if (p instanceof Promise) {
+                    prevValue = p.get()
+                } else {
+                    prevValue = p
+                }
+
+                // If router receives a list from multiple parents, unwrap
+                if (prevValue instanceof List && prevValue.size() == 1) {
+                    prevValue = prevValue[0]
+                }
+            }
+
+            log.debug("ConditionalForkTask($id): prevValue = $prevValue")
+
+            // --------------------------------------
+            // Evaluate routing rules
+            // --------------------------------------
+            List<String> routedTargets = route(prevValue)
+
+            if (!(routedTargets instanceof List)) {
+                throw new IllegalStateException(
+                        "ConditionalForkTask($id): route() must return List<String>, got: $routedTargets"
+                )
+            }
+
+            return routedTargets
+        }
     }
 
     /**

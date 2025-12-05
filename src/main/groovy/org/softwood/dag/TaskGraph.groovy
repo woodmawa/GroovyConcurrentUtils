@@ -1,186 +1,196 @@
 package org.softwood.dag
 
 import groovy.util.logging.Slf4j
-import org.softwood.dag.task.RouterTask
-import org.softwood.dag.task.TaskContext
-import org.softwood.dag.task.TaskEvent
-import org.softwood.dag.task.Task
-import org.softwood.dag.task.TaskListener
-import org.softwood.dag.task.TaskState
-import org.softwood.pool.ExecutorPool
+import org.softwood.dag.task.*
 import org.softwood.promise.Promise
-import org.softwood.promise.Promises
-import org.softwood.promise.core.PromisePoolContext
 
-/**
- * TaskGraph represents a Directed Acyclic Graph (DAG) of executable tasks with promise-based
- * asynchronous execution capabilities.
- *
- * <p>The TaskGraph provides a declarative DSL for defining complex task workflows with dependencies,
- * fork/join patterns, and conditional/dynamic routing. Tasks are executed asynchronously using a
- * thread pool, with automatic dependency resolution and state management.</p>
- *
- * <h3>Execution model</h3>
- * <ul>
- *   <li>Each node is a concrete {@link Task} (ServiceTask, RouterTask, etc.)</li>
- *   <li>Edges are fixed after DSL build time (no runtime mutation of the DAG)</li>
- *   <li>RouterTask subclasses decide which successors are logically "active"</li>
- *   <li>Unselected successors are marked {@link TaskState#SKIPPED}</li>
- * </ul>
- */
 @Slf4j
 class TaskGraph {
 
-    final String id
-    final TaskContext ctx
+    Map<String, Task> tasks = [:]
 
-    final Map<String, Task> tasks = [:]
-    final List<Closure> eventListeners = []
+    /** Fork → RouterTask mapping produced by ForkDsl */
+    List<RouterTask> routers = []
 
-    // Store pool reference if provided
-    private final ExecutorPool pool
+    /** True once finalizeWiring() has run */
+    boolean wired = false
 
-    TaskGraph(String id = UUID.randomUUID().toString(),
-              TaskContext ctx = new TaskContext(), ExecutorPool pool = null) {
-        this.id = id
-        this.ctx = ctx
-        this.pool = pool ?: PromisePoolContext.getCurrentPool()
-    }
-
-    static TaskGraph build(@DelegatesTo(TaskGraphDsl) Closure buildSpec) {
-        // ensures that the spec "this" is the current TaskGraph instance
-        Closure spec = buildSpec.clone() as Closure
-
-        def g = new TaskGraph()
-        def taskGraphDsl = new TaskGraphDsl(g)
-        spec.delegate = taskGraphDsl
-        spec.resolveStrategy = Closure.DELEGATE_FIRST
-
-        spec.call()
-        return g
-    }
+    // --------------------------------------------------------------------
+    // BUILD / WIRING
+    // --------------------------------------------------------------------
 
     void addTask(Task t) {
         tasks[t.id] = t
     }
 
-    void onEvent(Closure listener) {
-        eventListeners << listener
+    void registerRouter(RouterTask router) {
+        routers << router
     }
 
-    void notifyEvent(TaskEvent evt) {
-        eventListeners.each { it(evt) }
-    }
+    /**
+     * After ForkDSL has attached successors to router.targetIds, finalize DAG
+     */
+    void finalizeWiring() {
+        if (wired) return
+        wired = true
 
-    // --------------------------------------------------------------------
-    // Run whole DAG
-    // --------------------------------------------------------------------
-    Promise run() {
+        log.debug "finalizeWiring: processing ${routers.size()} forks"
 
-        // If we have a pool, use it for all promise operations
-        if (pool != null) {
-            return Promises.withPool(pool) {
-                executeTaskGraph()
+        tasks.values().each { t ->
+            t.successors.each { succId ->
+                tasks[succId]?.predecessors << t.id
             }
-        } else {
-            return executeTaskGraph()
         }
-    }
 
-    private Promise executeTaskGraph() {
-        return Promises.async {
-            List<Task> roots = tasks.values()
-                    .findAll { it.predecessors.isEmpty() }
-                    .toList()
-
-            assert roots.size() > 0
-
-            Map<String, Promise> results = [:]
-
-            roots.each { root ->
-                def taskPromise = schedule(root, Optional.empty(), results)
-                results[root.id] = taskPromise
-            }
-
-            ctx.globals.__taskResults = results
-
-            Promise last = results[roots.last().id]
-            return last.get()
+        log.debug "Final graph structure:"
+        tasks.values().each { t ->
+            log.debug "  Task ${t.id}: predecessors=${t.predecessors} successors=${t.successors}"
         }
     }
 
     // --------------------------------------------------------------------
-    // Schedule a task
+    // EXECUTION
     // --------------------------------------------------------------------
-    private Promise schedule(Task task,
-                             Optional<Promise<?>> prevOpt,
-                             Map<String, Promise> results) {
 
-        println "schedule(): received task $task, prevOpt=$prevOpt"
+    /**
+     * Start graph execution by scheduling all root tasks
+     */
+    Promise<?> start() {
+        finalizeWiring()
 
-        // 1. Already scheduled?
-        if (results.containsKey(task.id)) {
-            return results[task.id]
+        List<Task> roots = tasks.values().findAll { it.predecessors.isEmpty() }
+        log.debug "Root tasks: ${roots*.id}"
+
+        roots.each { schedule(it) }
+
+        // Return combined promise that completes when all terminal tasks complete
+        List<Promise> terminals = tasks.values()
+                .findAll { it.successors.isEmpty() }
+                .collect { it.completionPromise }
+
+        return Promise.allOf(terminals)
+    }
+
+    // --------------------------------------------------------------------
+    // Scheduler
+    // --------------------------------------------------------------------
+
+    private void schedule(Task t) {
+
+        if (t.hasStarted) {
+            log.debug "schedule(): ${t.id} already scheduled"
+            return
         }
 
-        // 2. Collect predecessor promises
-        List<Promise> predPromises = task.predecessors.collect { pid ->
-            results[pid] ?: schedule(tasks[pid], Optional.empty(), results)
-        }
+        t.markScheduled()
 
-        // If no predecessors, prev = null
-        Promise prevPromise =
-                predPromises.isEmpty()
-                        ? Promises.async { null }
-                        : Promises.all(predPromises)
+        log.debug "schedule(): execute ${t.id}"
 
-        println "schedule(): prevPromise = $prevPromise"
+        Promise<?> prevPromise = t.buildPrevPromise(tasks)
+        Promise<?> execPromise = t.execute(prevPromise)
 
-        // 3. Execute task (flatMap so we don't wrap promises)
-        Promise exec = prevPromise.flatMap { prevVal ->
+        // -------------------------
+        // Completion callback
+        // -------------------------
+        execPromise.onComplete { result, error ->
 
-            println "schedule(): flatMap(prevVal=$prevVal) on task=${task.id}"
-
-            Optional optPrev = Optional.ofNullable(prevVal)
-            Promise execPromise = task.execute(optPrev)
-
-            // 4. If NOT a RouterTask → normal task, return execPromise
-            if (!(task instanceof RouterTask)) {
-                return execPromise
+            if (error) {
+                log.error "Task ${t.id} failed: $error"
+                t.markFailed(error)
+                return
             }
 
-            // 5. RouterTask logic: execPromise resolves to List<String>
-            return execPromise.then { List<String> selectedTargets ->
+            t.markCompleted()
 
-                log.info "schedule(): RouterTask ${task.id} selected = $selectedTargets"
+            if (!(t instanceof RouterTask)) {
+                scheduleNormalSuccessors(t)
+            } else {
+                scheduleRouterSuccessors((RouterTask)t)
+            }
+        }
+    }
 
-                Set<String> allTargets = task.successors as Set
+    // --------------------------------------------------------------------
+    // NORMAL SUCCESSOR SCHEDULING
+    // --------------------------------------------------------------------
 
-                // 6. Mark unselected successors as SKIPPED
-                allTargets.each { tid ->
-                    if (!selectedTargets.contains(tid)) {
+    private void scheduleNormalSuccessors(Task t) {
+        t.successors.each { succId ->
+            Task succ = tasks[succId]
+            scheduleIfReady(succ)
+        }
+    }
 
-                        log.info "schedule(): marking SKIPPED for task $tid"
+    // --------------------------------------------------------------------
+    // ROUTER SUCCESSOR SCHEDULING
+    // --------------------------------------------------------------------
 
-                        Promise skippedPromise = Promises.async {
-                            Task t = tasks[tid]
-                            t.state = TaskState.SKIPPED
-                            TaskState.SKIPPED
-                        }
+    private void scheduleRouterSuccessors(RouterTask router) {
 
-                        // store SKIPPED result
-                        results[tid] = skippedPromise
-                    }
+        if (!router.alreadyRouted) {
+            log.error "Router ${router.id} completed but has no routing result!"
+            return
+        }
+
+        List<String> chosen = router.lastSelectedTargets
+        Set<String> allTargets = router.targetIds
+
+        log.debug "router ${router.id} selected targets: $chosen"
+        log.debug "router ${router.id} all possible targets: $allTargets"
+
+        // Mark unselected targets as SKIPPED
+        allTargets.each { tid ->
+            if (!chosen.contains(tid)) {
+                tasks[tid]?.markSkipped()
+            }
+        }
+
+        // Handle sharding router → ensure join successors scheduled only ONCE
+        if (router instanceof ShardingRouterTask) {
+
+            if (!router.scheduledShardSuccessors) {
+                router.scheduledShardSuccessors = true
+
+                // First schedule shard tasks
+                chosen.each { sid ->
+                    Task shardTask = tasks[sid]
+
+                    // Inject shard data into shard task
+                    List shardData = router.getShardData(sid)
+                    shardTask.setInjectedInput(shardData)
+
+                    schedule(shardTask)
                 }
 
-                // 7. Return router decision downstream (if anyone cares)
-                return selectedTargets
+                // AFTER scheduling shards → schedule successors of router
+                router.successors.each { joinId ->
+                    scheduleIfReady(tasks[joinId])
+                }
             }
+
+            return
         }
 
-        // 8. Store execution promise
-        results[task.id] = exec
+        // Non-sharding router: schedule only chosen targets
+        chosen.each { tid ->
+            scheduleIfReady(tasks[tid])
+        }
+    }
 
-        return exec
+    // --------------------------------------------------------------------
+    // READY CHECK
+    // --------------------------------------------------------------------
+
+    private void scheduleIfReady(Task t) {
+        if (t == null || t.hasStarted) return
+
+        boolean ready = t.predecessors.every { pid ->
+            def pt = tasks[pid]
+            pt.isCompleted() || pt.isSkipped()
+        }
+
+        if (ready) {
+            schedule(t)
+        }
     }
 }

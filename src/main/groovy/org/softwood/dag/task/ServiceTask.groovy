@@ -1,69 +1,55 @@
 package org.softwood.dag.task
 
-
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
-import org.softwood.promise.Promises
 
-import java.util.function.BiFunction
-
+/**
+ * ServiceTask executes a user-defined action closure.
+ * The action receives the task context and the previous task's output value.
+ */
 @Slf4j
-class ServiceTask<T> extends Task<T> {
+class ServiceTask extends Task<Object> {
 
-    private Closure serviceAction
+    Closure serviceAction
 
     ServiceTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
 
     /**
-     * DSL: action { ctx, prev -> result }
+     * DSL method to set the task's action.
      */
-    void action(@DelegatesTo(ServiceTask) Closure c) {
-        serviceAction = c.clone() as Closure
-
-        //ensure serviceAction closure resoles to this serviceTask instance first
-        serviceAction.delegate = this
-        serviceAction.resolveStrategy = Closure.DELEGATE_FIRST
+    void action(Closure action) {
+        this.serviceAction = action
     }
 
     @Override
-    protected Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prevOpt) {
+    protected Promise<Object> runTask(TaskContext ctx, Optional<?> prevOpt) {
 
-        if (serviceAction == null)
-            throw new IllegalStateException("ServiceTask '$id' requires an action")
+        log.debug "Task ${id}: calling runTask() with prevValue"
 
-        return Promises.async {
-            //def prevVal = prevOpt.isPresent() ? prevOpt.get().get() : null
-            //return (T) serviceAction.call(ctx, prevVal)
+        if (!serviceAction) {
+            throw new IllegalStateException("ServiceTask ${id}: no action defined")
+        }
+
+        return ctx.promiseFactory.executeAsync {
+
+            // prevOpt already contains the unwrapped VALUE, not a Promise
+            Object prevVal = prevOpt.isPresent() ? prevOpt.get() : null
+
             println "ServiceTask.runTask: about to call serviceAction for task $id"
-            def prevVal = prevOpt.isPresent() ? prevOpt.get().get() : null
-
-            /*orig ---
+            println "ServiceTask.runTask: about to call serviceAction for task $id"
             println "ServiceTask.runTask: prevVal = $prevVal"
-            def result = serviceAction.call(ctx, prevVal)
+
+            // Call the user's action with context and previous value
+            Promise result = serviceAction.call(ctx, prevOpt)
+
             println "ServiceTask.runTask: serviceAction returned: $result"
-            return (T) result
-            */
 
-            // --- FIX START ---
-            // We need to run the service action in a separate async block and wait for it.
-            // This ensures that the promise returned by runTask is backed by an
-            // execution thread that can be timed out externally by Task.runAttempt.
-            // The task action's sleep will now be running on a separate thread,
-            // and the get() call here will block the main task thread until it either
-            // completes or the external Task.runAttempt timeout hits.
+            log.debug "Task ${id}: runTask() returned promise, waiting for result"
 
-            // The inner promise runs the long-running action
-            return Promises.async {
-                println "ServiceTask.runTask: about to call serviceAction for task $id"
-                println "ServiceTask.runTask: prevVal = $prevVal"
-                def result = serviceAction.call(ctx, prevVal)
-                println "ServiceTask.runTask: serviceAction returned: $result"
-                return (T) result
-            }.get() // Block the outer promise's thread until the inner action completes/fails
-
-            // --- FIX END ---
+            // The action should return a Promise, so we wait for it
+            return result.get()
         }
     }
 }

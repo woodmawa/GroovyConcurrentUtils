@@ -18,17 +18,16 @@ import java.util.concurrent.TimeoutException
  *  - promise-based async execution
  */
 @Slf4j
-@ToString
+@ToString(includeNames = true, includeFields = true, excludes = ['ctx', 'eventDispatcher'])
 abstract class Task<T> {
 
     final String id
     final String name
-    //Closure action
     TaskState state = TaskState.SCHEDULED
     TaskEventDispatch eventDispatcher
 
-    //enable duck typing on context
-    def  ctx
+    // enable duck typing on context
+    def ctx
 
     /**
      * Canonical DAG topology:
@@ -55,7 +54,7 @@ abstract class Task<T> {
     }
 
     // ----------------------------------------------------
-    // Canonical graph wiring, methods for Task DSL classes to call
+    // Canonical graph wiring
     // ----------------------------------------------------
 
     void dependsOn(String taskId) {
@@ -66,7 +65,7 @@ abstract class Task<T> {
         successors << taskId
     }
 
-     // ----------------------------------------------------
+    // ----------------------------------------------------
     // Synthetic properties
     // ----------------------------------------------------
     Integer getMaxRetries() { retryPolicy.maxAttempts }
@@ -75,114 +74,128 @@ abstract class Task<T> {
     Long getTimeoutMillis() { taskTimeoutMillis }
     void setTimeoutMillis(Long v) { taskTimeoutMillis = v }
 
-    Throwable getError () {
-        lastError
-    }
+    Throwable getError() { lastError }
 
     // ----------------------------------------------------
     // Subclasses implement the core promise-returning action
+    // This receives the UNWRAPPED value (Optional<?>), not the promise
     // ----------------------------------------------------
-    protected abstract Promise<T> runTask(TaskContext ctx, Optional<Promise<?>> prev)
+    protected abstract Promise<T> runTask(TaskContext ctx, Optional<?> prevValue)
 
     // ----------------------------------------------------
     // Main entrypoint called by TaskGraph
+    // Receives Optional<Promise<?>> and unwraps it for runTask
     // ----------------------------------------------------
-    Promise execute(Optional<Object> previousResult) {
+    Promise execute(Optional<Promise<?>> previousPromiseOpt) {
 
         state = TaskState.RUNNING
         emitEvent(TaskState.RUNNING)
 
-        println "Task execute : call runAttempt with prevResult : $previousResult "
-        Promise<T> attemptPromise = runAttempt(previousResult as Optional<Promise<?>>)
+        log.debug "Task ${id}: execute() called with prevPromise present: ${previousPromiseOpt.isPresent()}"
 
-        println "Task execute just got back attemptPromise $attemptPromise"
+        Promise<T> attemptPromise = runAttempt(previousPromiseOpt)
 
-        return attemptPromise
-                .then { T result ->
-                    println "Task.execute then(): received result $result"
-                    state = TaskState.COMPLETED
-                    emitEvent(TaskState.COMPLETED)
-                    result  // <-- Don't use "return", just the expression
-                }
-                .recover { Throwable err ->
-                    println "Task.execute recover(): received error $err"
-                    lastError = err
-                    state = TaskState.FAILED
-                    emitErrorEvent(err)
-                    throw err  // Re-throw to keep the promise failed
-                }
+        log.debug "Task ${id}: execute() got attemptPromise"
+
+        return attemptPromise.then { T result ->
+            log.debug "Task ${id}: completed with result: $result"
+            state = TaskState.COMPLETED
+            emitEvent(TaskState.COMPLETED)
+            result
+        }.recover { Throwable err ->
+            log.error "Task ${id}: failed with error: ${err.message}"
+            lastError = err
+            state = TaskState.FAILED
+            emitErrorEvent(err)
+            throw err
+        }
     }
 
     // ----------------------------------------------------
     // Retry + timeout wrapper
+    // Unwraps Optional<Promise<?>> to Optional<?> for runTask
     // ----------------------------------------------------
-    private Promise<T> runAttempt(Optional<Promise<?>> prevOpt) {
+    private Promise<T> runAttempt(Optional<Promise<?>> prevPromiseOpt) {
 
-        println "Task starting runAttempt and calling promises.async() with local closure "
-
-        //use ctx.pools threads to run the closure.  handles for injected mocks etc
+        log.debug "Task ${id}: runAttempt() starting"
         def factory = ctx.promiseFactory
-        if (!factory) {
-            throw new IllegalStateException("TaskContext.promiseFactory must not be null")
-        }
-
-        println "----> Task starting runAttempt via ctx.promiseFactory.executeAsync()"
 
         return factory.executeAsync {
 
             int attempt = 1
-            long delay  = retryPolicy.initialDelay.toMillis()
+            long delay = retryPolicy.initialDelay.toMillis()
 
             while (true) {
                 try {
                     state = TaskState.RUNNING
                     emitEvent(TaskState.RUNNING)
 
-                    println "Task runAttempt: run task $this with runTask calling concrete implementation in serviceTask!"
-                    Promise<T> promise = runTask(ctx, prevOpt)
+                    // Unwrap the promise to get the actual value
+                    Optional<?> prevValueOpt = Optional.empty()
+                    if (prevPromiseOpt.isPresent()) {
+                        Promise<?> prevPromise = prevPromiseOpt.get()
 
-                    println "Task runAttempt: run task returned promise $promise "
-                    T result
-                    // Let Promises.timeout throw TimeoutException naturally.
-                    if (taskTimeoutMillis != null) {
-                        result = promise.get(taskTimeoutMillis, TimeUnit.MILLISECONDS)
-                        println "Task runAttempt: prmoise.get(timeout ) got result from promise: $result"  // ADD THIS
-                    } else {
-                        // If this throws, catch block handles it.
-                        result = promise.get()
-                        println "Task runAttempt: prmoise.get() got result from promise: $result"  // ADD THIS
+                        log.debug "Task ${id}: unwrapping predecessor promise"
+                        Object prevValue = prevPromise.get()  // Block and get the value
 
+                        log.debug "Task ${id}: raw unwrapped value: $prevValue (${prevValue?.getClass()?.simpleName})"
+
+                        // If the value is itself a Promise, unwrap it again (this can happen with nested promises)
+                        while (prevValue instanceof Promise) {
+                            log.debug "Task ${id}: value is still a Promise, unwrapping again"
+                            prevValue = ((Promise) prevValue).get()
+                        }
+
+                        // Handle List results from multiple predecessors
+                        if (prevValue instanceof List && ((List) prevValue).size() == 1) {
+                            prevValue = ((List) prevValue)[0]
+                            log.debug "Task ${id}: unwrapped single-element list to: $prevValue"
+                        }
+
+                        // IMPORTANT: don't call Optional.of(null)
+                        if (prevValue != null) {
+                            prevValueOpt = Optional.of(prevValue)
+                        } else {
+                            prevValueOpt = Optional.empty()
+                        }
+
+                        log.debug "Task ${id}: final unwrapped prevValue: $prevValue"
                     }
 
-                    // SUCCESS
+                    log.debug "Task ${id}: calling runTask() with prevValue"
+                    Promise<T> promise = runTask(ctx, prevValueOpt)
+
+                    log.debug "Task ${id}: runTask() returned promise, waiting for result"
+                    T result = (taskTimeoutMillis != null)
+                            ? promise.get(taskTimeoutMillis, TimeUnit.MILLISECONDS)
+                            : promise.get()
+
+                    log.debug "Task ${id}: got result: $result"
+
                     state = TaskState.COMPLETED
                     emitEvent(TaskState.COMPLETED)
                     return result
 
                 } catch (Throwable err) {
-
                     lastError = err
+                    log.error "Task ${id}: attempt $attempt failed: ${err.message}"
 
-                    // TIMEOUT — fail immediately, no retry
                     if (err instanceof TimeoutException) {
                         state = TaskState.FAILED
                         emitErrorEvent(err)
-                        throw err          // <-- important! propagate failure
+                        throw err
                     }
 
-                    // NO MORE RETRIES
                     if (attempt >= retryPolicy.maxAttempts) {
                         state = TaskState.FAILED
-                        //todo  maybe throw a new runtime error with max attempts exceeded ?
-                        def exceededAttemptsErr = new RuntimeException("exceeded retry attempts ", lastError)
-                        emitErrorEvent(exceededAttemptsErr)
-                        throw exceededAttemptsErr
+                        def exceeded = new RuntimeException("Task ${id}: exceeded retry attempts", err)
+                        emitErrorEvent(exceeded)
+                        throw exceeded
                     }
 
-                    log.warn("Task $id failed on attempt $attempt: ${err.message} → retrying")
-
+                    log.debug "Task ${id}: retrying after ${delay}ms (attempt $attempt)"
                     Thread.sleep(delay)
-                    delay = (long)(delay * retryPolicy.backoffMultiplier)
+                    delay = (long) (delay * retryPolicy.backoffMultiplier)
                     attempt++
                 }
             }
@@ -195,11 +208,15 @@ abstract class Task<T> {
 
     private void emitEvent(TaskState newState) {
         state = newState
-        eventDispatcher.emit (new TaskEvent(id, newState))
+        if (eventDispatcher) {
+            eventDispatcher.emit(new TaskEvent(id, newState))
+        }
     }
 
     private void emitErrorEvent(Throwable err) {
         state = TaskState.FAILED
-        eventDispatcher.emit  (new TaskEvent(id, TaskState.FAILED, err))
+        if (eventDispatcher) {
+            eventDispatcher.emit(new TaskEvent(id, TaskState.FAILED, err))
+        }
     }
 }

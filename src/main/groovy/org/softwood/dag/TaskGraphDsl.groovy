@@ -1,13 +1,17 @@
 package org.softwood.dag
 
+import org.softwood.dag.task.DefaultTaskEventDispatcher
 import org.softwood.dag.task.ServiceTask
 import org.softwood.dag.task.Task
-import org.softwood.dag.task.TaskEvent
-import org.softwood.dag.task.TaskListener
 
 /**
- * DSL builder for TaskGraph with enhanced @DelegatesTo annotations
- * for better IDE support.
+ * DSL builder for TaskGraph.
+ *
+ * Provides declarative blocks:
+ *  - serviceTask / task
+ *  - fork { ... }
+ *  - join { ... }
+ *  - globals { ... }
  */
 class TaskGraphDsl {
 
@@ -22,6 +26,7 @@ class TaskGraphDsl {
     // ----------------------------------------------------
     Task serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
         def t = new ServiceTask(id, id, graph.ctx)
+        t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
@@ -35,7 +40,7 @@ class TaskGraphDsl {
     }
 
     // ----------------------------------------------------
-    // Fork block
+    // Fork block → configures RouterTasks / static fan-out
     // ----------------------------------------------------
     def fork(String id, @DelegatesTo(ForkDsl) Closure body) {
         def forkDsl = new ForkDsl(graph, id)
@@ -46,7 +51,7 @@ class TaskGraphDsl {
     }
 
     // ----------------------------------------------------
-    // Join block
+    // Join block → configures a ServiceTask that depends on many
     // ----------------------------------------------------
     def join(String id, @DelegatesTo(JoinDsl) Closure body) {
         def joinDsl = new JoinDsl(graph, id)

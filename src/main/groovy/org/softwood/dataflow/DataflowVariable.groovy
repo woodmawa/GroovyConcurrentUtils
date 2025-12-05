@@ -6,6 +6,7 @@ import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.codehaus.groovy.runtime.InvokerHelper
 import org.softwood.pool.ConcurrentPool
+import org.softwood.pool.ExecutorPool
 
 import java.time.Duration
 import java.util.Optional
@@ -16,6 +17,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
+import org.softwood.promise.core.PromisePoolContext
 
 /**
  * A {@code DataflowVariable} is a specialised {@link DataflowExpression} that behaves similarly to a
@@ -65,16 +67,16 @@ class DataflowVariable<T> extends DataflowExpression<T> {
 
     /** Construct using a default {@link ConcurrentPool}. */
     DataflowVariable() {
-        super(new ConcurrentPool())
+        super(PromisePoolContext.getCurrentPool())
     }
 
     /** Construct backed by a specific pool. */
-    DataflowVariable(ConcurrentPool pool) {
+    DataflowVariable(ExecutorPool  pool) {
         super(pool)
     }
 
     /** Construct with explicit value type and pool. */
-    DataflowVariable(ConcurrentPool pool, Class<T> type) {
+    DataflowVariable(ExecutorPool  pool, Class<T> type) {
         super(pool, type)
     }
 

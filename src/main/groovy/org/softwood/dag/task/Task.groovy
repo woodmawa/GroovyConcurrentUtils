@@ -25,6 +25,7 @@ abstract class Task<T> {
     final String name
     //Closure action
     TaskState state = TaskState.SCHEDULED
+    TaskEventDispatch eventDispatcher
 
     //enable duck typing on context
     def  ctx
@@ -118,8 +119,16 @@ abstract class Task<T> {
     private Promise<T> runAttempt(Optional<Promise<?>> prevOpt) {
 
         println "Task starting runAttempt and calling promises.async() with local closure "
-        //use ctx.pools threads to run the closure
-        return Promises.async {
+
+        //use ctx.pools threads to run the closure.  handles for injected mocks etc
+        def factory = ctx.promiseFactory
+        if (!factory) {
+            throw new IllegalStateException("TaskContext.promiseFactory must not be null")
+        }
+
+        println "----> Task starting runAttempt via ctx.promiseFactory.executeAsync()"
+
+        return factory.executeAsync {
 
             int attempt = 1
             long delay  = retryPolicy.initialDelay.toMillis()
@@ -186,11 +195,11 @@ abstract class Task<T> {
 
     private void emitEvent(TaskState newState) {
         state = newState
-        ctx.graph.notifyEvent(new TaskEvent(id, newState))
+        eventDispatcher.emit (new TaskEvent(id, newState))
     }
 
     private void emitErrorEvent(Throwable err) {
         state = TaskState.FAILED
-        ctx.graph.notifyEvent(new TaskEvent(id, TaskState.FAILED, err))
+        eventDispatcher.emit  (new TaskEvent(id, TaskState.FAILED, err))
     }
 }

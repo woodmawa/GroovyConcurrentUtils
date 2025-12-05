@@ -2,7 +2,9 @@ package org.softwood.promise
 
 import groovy.util.logging.Slf4j
 import org.softwood.dataflow.DataflowVariable
+import org.softwood.pool.ExecutorPool
 import org.softwood.promise.core.PromiseConfiguration
+import org.softwood.promise.core.PromisePoolContext
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
@@ -49,6 +51,38 @@ import java.util.function.Supplier
  */
 @Slf4j
 class Promises {
+
+    /**
+    * Execute a closure with a specific pool active.
+    * All promises created within this scope will use the given pool.
+    *
+    * Example:
+    * <pre>
+    * def customPool = new ConcurrentPool(4)
+            * Promises.withPool(customPool) {
+        *     def p = Promises.async { ... }  // uses customPool
+                *     return p.get()
+                * }
+            * </pre>
+     */
+    static <T> T withPool(ExecutorPool pool, Closure<T> closure) {
+        return PromisePoolContext.withPool(pool, closure)
+    }
+
+    /**
+     * Set the default pool used by all promises when no thread-local pool is set.
+     * This is a global setting that affects all threads.
+     */
+    static void setDefaultPool(ExecutorPool pool) {
+        PromisePoolContext.setDefaultPool(pool)
+    }
+
+    /**
+     * Get the current pool being used in this context.
+     */
+    static ExecutorPool getCurrentPool() {
+        return PromisePoolContext.getCurrentPool()
+    }
 
     // -------------------------------------------------------------------------
     // Basic creation

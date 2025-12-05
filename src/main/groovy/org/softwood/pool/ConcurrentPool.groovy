@@ -3,6 +3,7 @@ package org.softwood.pool
 import groovy.util.logging.Slf4j
 import groovyjarjarantlr4.v4.runtime.misc.NotNull
 
+import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutorService
@@ -54,7 +55,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * </ul>
  */
 @Slf4j
-class ConcurrentPool implements WorkerPool {
+class ConcurrentPool implements ExecutorPool {
 
     // ─────────────────────────────────────────────────────────────
     // Shared application-wide resources
@@ -186,13 +187,21 @@ class ConcurrentPool implements WorkerPool {
     // ─────────────────────────────────────────────────────────────
 
     @Override
-    void execute(Runnable r) {
-        this.executor.submit(r)
+    CompletableFuture execute(Callable task) {
+        if (this.closed.get()) {
+            throw new IllegalStateException("Pool is closed and not accepting new tasks")
+        }
+        Future future = this.executor.submit(task)
+        return transformFutureToCFuture(future, this.executor)
     }
 
     @Override
-    void submit(Runnable r) {
-        this.executor.submit(r)
+    CompletableFuture execute(Runnable task) {
+        if (this.closed.get()) {
+            throw new IllegalStateException("Pool is closed and not accepting new tasks")
+        }
+        Future future = this.executor.submit(task)
+        return transformFutureToCFuture(future, this.executor)
     }
 
     // ─────────────────────────────────────────────────────────────

@@ -5,6 +5,8 @@ import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.pool.ConcurrentPool
+import org.softwood.pool.ExecutorPool
+import org.softwood.promise.core.PromisePoolContext
 
 import java.beans.PropertyChangeListener
 import java.beans.PropertyChangeSupport
@@ -55,7 +57,7 @@ class DataflowExpression<T> {
     }
 
     /** Pool used for asynchronous callback execution. */
-    final ConcurrentPool pool
+    final ExecutorPool pool
 
     /** Backing future representing completion of this expression. */
     private final CompletableFuture<T> future = new CompletableFuture<>()
@@ -89,8 +91,9 @@ class DataflowExpression<T> {
      *
      * @param pool worker pool used for listener execution
      */
-    DataflowExpression(ConcurrentPool pool) {
+    DataflowExpression(ExecutorPool pool) {
         this(pool, (Class<T>) Object)
+        assert pool != null : "DataflowExpression requires a non-null ExecutorPool"
     }
 
     /**
@@ -99,17 +102,24 @@ class DataflowExpression<T> {
      * @param pool worker pool used for listener execution
      * @param type runtime type token for the value (purely informational)
      */
-    DataflowExpression(ConcurrentPool pool, Class<T> type) {
+    DataflowExpression(ExecutorPool pool, Class<T> type) {
+        assert pool != null : "DataflowExpression requires a non-null ExecutorPool"
         this.pool = pool
         this.type = type
     }
+
+    // No-arg constructor that uses PromisePoolContext:
+    DataflowExpression() {
+        this(PromisePoolContext.getCurrentPool(), (Class<T>) Object)
+    }
+
 
     /**
      * Expose the underlying {@link ConcurrentPool} used to schedule asynchronous listeners.
      *
      * @return the {@link ConcurrentPool} backing this expression
      */
-    ConcurrentPool getPool() {
+    ExecutorPool getPool() {
         return pool
     }
 

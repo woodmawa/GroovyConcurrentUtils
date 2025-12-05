@@ -1,110 +1,26 @@
 package org.softwood.dag
 
-import org.softwood.dag.TaskGraph
+import org.softwood.dag.task.ConditionalForkTask
+import org.softwood.dag.task.DefaultTaskEventDispatcher
+import org.softwood.dag.task.DynamicRouterTask
+import org.softwood.dag.task.RouterTask
 import org.softwood.dag.task.ServiceTask
+import org.softwood.dag.task.ShardingRouterTask
 import org.softwood.dag.task.Task
-import org.softwood.dag.task.TaskContext
-import org.softwood.promise.Promise
-import org.softwood.promise.Promises
-import org.softwood.dag.task.TaskState
-
 
 /**
  * DSL builder for configuring fork patterns that enable parallel task execution with routing logic.
  *
- * <p>ForkDsl provides a fluent interface for defining fan-out execution patterns where a single
- * source task triggers multiple parallel tasks. Supports three execution modes:</p>
- * <ul>
- *   <li><b>Static Fork:</b> Fixed set of successors always executed in parallel</li>
- *   <li><b>Conditional Fork:</b> Subset of successors selected based on predicate</li>
- *   <li><b>Dynamic Fork:</b> Custom routing logic determines which successors to execute</li>
- * </ul>
+ * The fork DSL wires DAG edges and, when needed, inserts a concrete RouterTask node
+ * between a source task and its targets:
  *
- * <h3>Architecture Overview</h3>
- * <p>The fork mechanism operates in two phases:</p>
- * <ol>
- *   <li><b>Static Wiring (immediate):</b> Dependencies established when to() is called</li>
- *   <li><b>Dynamic Routing (runtime):</b> Synthetic router task evaluates logic during execution</li>
- * </ol>
+ *   sourceTask → routerTask → [target1, target2, target3]
  *
- * <h3>Routing Architecture</h3>
- * <p>For dynamic routing (conditional or route-based), ForkDsl creates a synthetic router task:</p>
- * <pre>
- * sourceTask → __router_sourceTask_UUID → [target1, target2, target3]
- * </pre>
- * <p>The router task:</p>
- * <ul>
- *   <li>Receives the source task's result as input</li>
- *   <li>Evaluates routing logic (predicate or custom closure)</li>
- *   <li>Returns list of selected target task IDs</li>
- *   <li>Marks unselected targets as SKIPPED</li>
- *   <li>Allows selected targets to execute normally</li>
- * </ul>
- *
- * <h3>Static Fork Pattern</h3>
- * <p>All specified tasks execute unconditionally in parallel:</p>
- * <pre>
- * serviceTask("fetchData") { ... }
- * serviceTask("processA") { ... }
- * serviceTask("processB") { ... }
- * serviceTask("processC") { ... }
- *
- * fork("parallelProcessing") {
- *     from "fetchData"
- *     to "processA", "processB", "processC"
- *     // All three tasks execute in parallel
- * }
- * </pre>
- *
- * <h3>Conditional Fork Pattern</h3>
- * <p>Tasks execute only if predicate returns true:</p>
- * <pre>
- * fork("conditionalBranch") {
- *     from "validateInput"
- *     to "heavyProcess", "lightProcess"
- *
- *     // Only execute heavyProcess if input is large
- *     conditionalOn(["heavyProcess"]) { result ->
- *         result.size > 1000
- *     }
- *     // lightProcess always executes
- * }
- * </pre>
- *
- * <h3>Dynamic Routing Pattern</h3>
- * <p>Custom logic determines execution path:</p>
- * <pre>
- * fork("dynamicRouter") {
- *     from "classifyRequest"
- *     to "handlePriority", "handleStandard", "handleBatch"
- *
- *     route { classification ->
- *         switch(classification.type) {
- *             case "priority":
- *                 return ["handlePriority"]
- *             case "batch":
- *                 return ["handleBatch"]
- *             default:
- *                 return ["handleStandard"]
- *         }
- *     }
- * }
- * </pre>
- *
- * <h3>Execution Semantics</h3>
- * <ul>
- *   <li>Static successors are wired immediately during DSL evaluation</li>
- *   <li>Router task is created only if conditionalOn() or route() is called</li>
- *   <li>Router executes after source task completes</li>
- *   <li>Unselected tasks transition to SKIPPED state</li>
- *   <li>Selected tasks execute normally when dependencies are satisfied</li>
- *   <li>Graph execution continues through all active paths</li>
- * </ul>
- *
- * @author Softwood
- * @see TaskGraphDsl#fork(String, Closure)
- * @see ServiceTask
- * @see org.softwood.dag.task.TaskState
+ * Routing strategies supported:
+ *  - Static fork: fixed set of successors, no router node
+ *  - Conditional fork: ConditionalForkTask with (targetId → predicate) rules
+ *  - Dynamic routing: DynamicRouterTask using a custom closure
+ *  - Sharding: ShardingRouterTask that computes shard IDs from a collection
  */
 class ForkDsl {
 
@@ -114,62 +30,128 @@ class ForkDsl {
     private String routeFromId
     private final Set<String> staticTargets = [] as Set
     private final Map<String, Closure<Boolean>> conditionalRules = [:]
+    private Closure dynamicRouteLogic = null
+    private Closure shardSource = null
+    private String shardTemplateId = null
+    private Integer shardCount = null
 
     ForkDsl(TaskGraph graph, String id) {
         this.graph = graph
         this.id = id
     }
 
-    // Select the driving input of the fork
-    def from(String sourceId) {
-        this.routeFromId = sourceId
-    }
+    // -------------------------
+    // DSL Methods
+    // -------------------------
 
-    // Statically route to one or more downstream tasks
-    def to(String... targetIds) {
-        staticTargets.addAll(targetIds)
-    }
+    /** Select the upstream source whose output drives the fork. */
+    def from(String sourceId) { routeFromId = sourceId }
 
-    // Conditional routing: conditionalOn(["taskId"]) { prevValue -> boolean }
+    /** Statically route to one or more downstream tasks. */
+    def to(String... targetIds) { staticTargets.addAll(targetIds) }
+
+    /** Conditional routing: conditionalOn(["taskId"]) { prevValue -> boolean } */
     def conditionalOn(List<String> targets, Closure<Boolean> cond) {
-        targets.each { tid ->
-            conditionalRules[tid] = cond
-        }
+        targets.each { tid -> conditionalRules[tid] = cond }
     }
 
-    // ----------------------------------------------------
-    // Build → Wire graph dependencies
-    // ----------------------------------------------------
+    /** Dynamic routing: route { prevValue -> List<String> targetIds } */
+    def route(Closure customLogic) {
+        dynamicRouteLogic = customLogic
+    }
+
+    /**
+     * Sharding fan-out:
+     *  shard("templateId", count) { prevValue -> Collection items }
+     *
+     * ShardingRouterTask will compute concrete shard IDs from templateId.
+     */
+    def shard(String templateId, int count, Closure shardSrc) {
+        shardTemplateId = templateId
+        shardCount = count
+        shardSource = shardSrc
+    }
+
+    // -------------------------
+    // BUILD: create real tasks
+    // -------------------------
+
     void build() {
 
-        if (!routeFromId) {
-            throw new IllegalStateException("fork($id) requires 'from \"taskId\"'")
-        }
+        if (!routeFromId)
+            throw new IllegalStateException("fork($id) requires from \"taskId\"")
 
         Task source = graph.tasks[routeFromId]
         if (!source)
             throw new IllegalStateException("Unknown source task: $routeFromId")
 
-        // Static routes
-        staticTargets.each { tid ->
-            Task target = graph.tasks[tid]
-            if (!target)
-                throw new IllegalStateException("Unknown target: $tid")
+        boolean hasConditional = !conditionalRules.isEmpty()
+        boolean hasDynamic = dynamicRouteLogic != null
+        boolean hasSharding = shardSource != null
 
-            target.dependsOn(source.id)
-            source.addSuccessor(target.id)
+        // Choose router type (if any)
+        RouterTask router
+
+        if (hasSharding) {
+            // -- SHARDING ROUTER --
+            String rid = "__shardRouter_${id}_${UUID.randomUUID()}"
+            router = new ShardingRouterTask(rid, rid, graph.ctx)
+            router.templateTargetId = shardTemplateId
+            router.shardSource = shardSource
+            router.shardCount = shardCount
+        }
+        else if (hasDynamic) {
+            // -- DYNAMIC ROUTER --
+            String rid = "__dynamicRouter_${id}_${UUID.randomUUID()}"
+            router = new DynamicRouterTask(rid, rid, graph.ctx)
+            router.routingLogic = dynamicRouteLogic
+            router.allowedTargets = (staticTargets + conditionalRules.keySet()).unique()
+        }
+        else if (hasConditional) {
+            // -- CONDITIONAL ROUTER --
+            String rid = "__conditionalRouter_${id}_${UUID.randomUUID()}"
+            router = new ConditionalForkTask(rid, rid, graph.ctx)
+            router.staticTargets.addAll(staticTargets)
+            router.conditionalRules.putAll(conditionalRules)
+        }
+        else {
+            // -- SIMPLE STATIC FORK: no router node needed --
+            staticTargets.each { tid ->
+                Task target = graph.tasks[tid]
+                if (!target) throw new IllegalStateException("Unknown target: $tid")
+                target.dependsOn(source.id)
+                source.addSuccessor(target.id)
+            }
+            return
         }
 
-        // Conditional routes
-        conditionalRules.each { tid, cond ->
-            Task target = graph.tasks[tid]
-            if (!target)
-                throw new IllegalStateException("Unknown conditional target: $tid")
+        // ------------------------------------------
+        // Router task selected → wire it
+        // ------------------------------------------
+        router.eventDispatcher = new DefaultTaskEventDispatcher(graph)
+        graph.addTask(router)
 
-            graph.registerConditionalFork(source.id, tid, cond)
+        // Wire source → router
+        router.dependsOn(source.id)
+        source.addSuccessor(router.id)
 
-            target.dependsOn(source.id)
-            source.addSuccessor(target.id)
+        // ------------------------------------------
+        // Wire router → downstream targets
+        // ------------------------------------------
+
+        if (!hasSharding) {
+            // Static + conditional + dynamic all know explicit ids
+            (staticTargets + conditionalRules.keySet()).unique().each { tid ->
+                Task target = graph.tasks[tid]
+                if (!target)
+                    throw new IllegalStateException("Unknown target: $tid")
+
+                target.dependsOn(router.id)
+                router.addSuccessor(target.id)
+            }
+        } else {
+            // Sharding generates its own dynamic shard IDs.
+            // Shard-specific tasks are expected to be created separately.
         }
     }
 }

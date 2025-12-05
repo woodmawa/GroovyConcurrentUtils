@@ -3,8 +3,10 @@ package org.softwood.promise.core.dataflow
 import groovy.util.logging.Slf4j
 import org.softwood.dataflow.DataflowFactory
 import org.softwood.dataflow.DataflowVariable
+import org.softwood.pool.ExecutorPool
 import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
+import org.softwood.promise.core.PromisePoolContext
 
 import java.util.concurrent.CompletableFuture
 
@@ -32,6 +34,13 @@ class DataflowPromiseFactory implements PromiseFactory {
      */
     DataflowPromiseFactory(DataflowFactory dataflowFactory) {
         this.dataflowFactory = dataflowFactory
+    }
+
+    /**
+     * Create factory using current context pool.
+     */
+    DataflowPromiseFactory() {
+        this(new DataflowFactory(PromisePoolContext.getCurrentPool()))
     }
 
     /** {@inheritDoc} */
@@ -101,5 +110,12 @@ class DataflowPromiseFactory implements PromiseFactory {
      */
     <T> Promise<T> wrapDataflowVariable(DataflowVariable<T> variable) {
         return new DataflowPromise<T>(variable)
+    }
+
+    /**
+     * Get the pool used by this factory.
+     */
+    ExecutorPool getPool() {
+        return dataflowFactory.getPool()
     }
 }

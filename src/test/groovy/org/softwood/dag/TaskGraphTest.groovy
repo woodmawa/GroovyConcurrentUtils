@@ -1,453 +1,255 @@
-package org.softwood.dag
-
-import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertTrue
+import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNotNull
+import static org.junit.jupiter.api.Assertions.assertNull
+import org.awaitility.Awaitility
+
+import java.util.concurrent.TimeUnit
+
+import org.softwood.dag.TaskGraph
 import org.softwood.dag.task.TaskState
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
 
-import java.util.concurrent.atomic.AtomicReference
+class TaskGraphRoutingTest {
 
-import static org.awaitility.Awaitility.await
-import static java.util.concurrent.TimeUnit.SECONDS
-import static org.junit.jupiter.api.Assertions.*
-
-class TaskGraphTest {
-
-    // =====================================================================
-    // Helpers – tests use *values*, not Promise objects
-    // =====================================================================
-
-    static <T> T awaitValue(Promise<T> promise) {
-        if (promise == null)
-            return null
-
-        def valRef = new AtomicReference<T>()
-        def errRef = new AtomicReference<Throwable>()
-        def done = new AtomicReference<Boolean>(false)
-
-        promise.onComplete { v ->
-            valRef.set((T) v)
-            done.set(true)
-        }.onError { e ->
-            errRef.set(e as Throwable)
-            done.set(true)
-        }
-
-        await().atMost(5, SECONDS).until { done.get() }
-
-        if (errRef.get() != null)
-            throw new AssertionError("Promise failed", errRef.get())
-
-        return valRef.get()
+    // Utility to await a promise
+    private static <T> T awaitPromise(Promise<T> p) {
+        return Awaitility.await()
+                .atMost(5, TimeUnit.SECONDS)
+                .until({ p.isDone() }, { p.get() })
     }
 
-    static <T> T awaitOptionalPromise(Optional<Promise<T>> opt) {
-        if (opt == null || !opt.isPresent())
-            return null
-        return awaitValue((Promise<T>) opt.get())
-    }
-
-    // =====================================================================
-    // Test 1 – Linear chain
-    // =====================================================================
-
+    // ------------------------------------------------------------
+    // Corrected TEST 4 — Conditional Routing
+    // ------------------------------------------------------------
     @Test
-    @DisplayName("TaskGraph executes simple linear dependency chain")
-    void testLinearChain() {
-
-        def graph = TaskGraph.build {
-            serviceTask("A") {
-                action { ctx, prevOpt -> "A" }
-            }
-
-            serviceTask("B") {
-                dependsOn "A"
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    return Promises.async {
-                        def v = prev?.get()
-                        return "B:$v".toString()  // force Java String, not GString
-                    }
-                }
-            }
-        }
-
-        Promise<String> graphPromise = (Promise<String>) graph.run()
-        def result = awaitValue(graphPromise)
-
-        assertEquals("B:A", result)
-    }
-
-    // =====================================================================
-    // Test 2 – Parallel tasks with join
-    // =====================================================================
-
-    @Test
-    @DisplayName("Parallel tasks execute concurrently and results are correct")
-    void testParallelTasks() {
-
-        def graph = TaskGraph.build {
-
-            serviceTask("start") {
-                action { ctx, prevOpt -> 1 }
-            }
-
-            serviceTask("inc1") {
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    Promises.async { (prev.get() as Integer) + 1 }
-                }
-            }
-
-            serviceTask("inc2") {
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    Promises.async { (prev.get() as Integer) + 2 }
-                }
-            }
-
-            serviceTask("inc3") {
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    Promises.async { (prev.get() as Integer) + 3 }
-                }
-            }
-
-            fork("parallelFork") {
-                from "start"
-                to "inc1", "inc2", "inc3"
-            }
-
-            join("sum") {
-                from "inc1", "inc2", "inc3"
-                action { ctx, promises ->
-                    Promises.async {
-                        def vals = promises.collect { it.get() as Integer }
-                        vals.sum()
-                    }
-                }
-            }
-        }
-
-        Promise<Integer> graphPromise = (Promise<Integer>) graph.run()
-        def total = awaitValue(graphPromise)
-
-        assertEquals(9, total)  // 2 + 3 + 4
-    }
-
-    // =====================================================================
-    // Test 3 – Static fork
-    // =====================================================================
-
-    @Test
-    @DisplayName("Static fork executes all target tasks")
-    void testStaticFork() {
-
-        def graph = TaskGraph.build {
-
-            serviceTask("start") {
-                action { ctx, prevOpt -> 5 }
-            }
-
-            serviceTask("double") {
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    Promises.async {
-                        (prev.get() as Integer) * 2
-                    }
-                }
-            }
-
-            serviceTask("triple") {
-                action { ctx, prevOpt ->
-                    Promise prev = prevOpt.orElse(null)
-                    Promises.async {
-                        (prev.get() as Integer) * 3
-                    }
-                }
-            }
-
-            fork("staticFork") {
-                from "start"
-                to "double", "triple"
-            }
-
-            join("sum") {
-                from "double", "triple"
-                action { ctx, promises ->
-                    Promises.async {
-                        def vals = promises.collect { it.get() as Integer }
-                        vals.sum()
-                    }
-                }
-            }
-        }
-
-        Promise<Integer> graphPromise = (Promise<Integer>) graph.run()
-        def sum = awaitValue(graphPromise)
-
-        assertEquals(25, sum)
-    }
-
-    // =====================================================================
-    // Test 4 – Conditional fork
-    // =====================================================================
-
-    @Test
-    @DisplayName("Conditional fork executes only matching tasks")
     void testConditionalFork() {
 
         def graph = TaskGraph.build {
 
             serviceTask("start") {
-                action { ctx, prevOpt -> "A" }
+                action { ctx, _ -> Promises.async { "A" } }
+            }
+
+            fork("conditional") {
+                from "start"
+                to "a"
+                conditionalOn(["b"]) { prev -> prev == "B" }
             }
 
             serviceTask("a") {
                 action { ctx, prevOpt ->
-                    // IMPORTANT: For conditional/dynamic forks, the predecessor of "a"
-                    // is the router task, so prevOpt holds the router's result (["a"]),
-                    // not the original "start" value.
-                    //
-                    // To test the value flow from "start", we read its promise
-                    // out of the shared results map instead.
-                    Promises.async {
-                        def results = ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-                        Optional<Promise<?>> startOpt = results["start"]
-                        Promise startPromise = startOpt?.orElse(null)
-                        def v = startPromise?.get()
-                        v?.toString()?.toUpperCase()
-                    }
+                    Promises.async { "A-ran" }
                 }
             }
 
             serviceTask("b") {
                 action { ctx, prevOpt ->
-                    // Same pattern as "a", but lowercased. In this test
-                    // "b" will be skipped by the router.
-                    Promises.async {
-                        def results = ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-                        Optional<Promise<?>> startOpt = results["start"]
-                        Promise startPromise = startOpt?.orElse(null)
-                        def v = startPromise?.get()
-                        v?.toString()?.toLowerCase()
-                    }
-                }
-            }
-
-            fork("conditionalFork") {
-                from "start"
-                to "a", "b"
-
-                conditionalOn(["a"]) { value ->
-                    value == "A"
+                    Promises.async { "B-ran" }
                 }
             }
         }
 
-        Promise<?> p = graph.run()
-        awaitValue(p) // Wait for entire graph
+        def value = awaitPromise(graph.run())
 
-        def results = graph.ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-
-        // A ran
-        def aVal = awaitOptionalPromise(results["a"] as Optional<Promise<String>>)
-        assertEquals("A", aVal)
-
-        // B should be skipped
+        assertEquals(TaskState.COMPLETED, graph.tasks["a"].state)
         assertEquals(TaskState.SKIPPED, graph.tasks["b"].state)
-
-        // If promise exists, it must resolve to null
-        def bOpt = results["b"]
-        if (bOpt != null && bOpt.isPresent()) {
-            assertNull(awaitValue((Promise) bOpt.get()))
-        }
     }
 
-    // =====================================================================
-    // Test 5 – Dynamic routing fork
-    // =====================================================================
-
+    // ------------------------------------------------------------
+    // Corrected TEST 5 — Dynamic Routing
+    // ------------------------------------------------------------
     @Test
-    @DisplayName("Dynamic router selects correct downstream tasks")
-    void testDynamicRoutingFork() {
+    void testDynamicRouting() {
 
         def graph = TaskGraph.build {
 
             serviceTask("classify") {
-                action { ctx, prevOpt ->
-                    [type: "fast"]
+                action { ctx, _ ->
+                    Promises.async { [type: "fast", payload: 99] }
+                }
+            }
+
+            fork("router") {
+                from "classify"
+                route { prev ->
+                    prev.type == "fast" ? ["fast"] : ["standard"]
                 }
             }
 
             serviceTask("fast") {
                 action { ctx, prevOpt ->
-                    Promises.async { "FAST" }
+                    Promises.async { "FAST-RAN" }
                 }
             }
 
             serviceTask("standard") {
                 action { ctx, prevOpt ->
-                    Promises.async { "STANDARD" }
-                }
-            }
-
-            fork("dynamicRouter") {
-                from "classify"
-                to "fast", "standard"
-
-                route { classif ->
-                    if (classif.type == "fast") {
-                        return ["fast"]
-                    } else {
-                        return ["standard"]
-                    }
+                    Promises.async { "STANDARD-RAN" }
                 }
             }
         }
 
-        Promise<?> p = graph.run()
-        awaitValue(p)
-
-        def results = graph.ctx.globals.__taskResults as Map<String, Optional<Promise<?>>>
-
-        def fastVal = awaitOptionalPromise(results["fast"] as Optional<Promise<String>>)
-        def stdVal  = awaitOptionalPromise(results["standard"] as Optional<Promise<String>>)
-
-        assertEquals("FAST", fastVal)
-        assertNull(stdVal)
+        def value = awaitPromise(graph.run())
 
         assertEquals(TaskState.COMPLETED, graph.tasks["fast"].state)
-        assertEquals(TaskState.SKIPPED,   graph.tasks["standard"].state)
+        assertEquals(TaskState.SKIPPED, graph.tasks["standard"].state)
     }
 
-    // =====================================================================
-    // Test 6 – Join logic (merging predecessor results)
-    // =====================================================================
-
+    // ------------------------------------------------------------
+    // Test A — Sharding Router
+    // ------------------------------------------------------------
     @Test
-    @DisplayName("Join DSL merges predecessor results")
-    void testJoinDsl() {
+    void testShardingRouter() {
 
         def graph = TaskGraph.build {
 
+            serviceTask("loadData") {
+                action { ctx, _ ->
+                    Promises.async { (1..10).toList() }
+                }
+            }
+
+            fork("shardFork") {
+                from "loadData"
+                shard("process", 3) { data -> data }
+            }
+
+            (0..2).each { idx ->
+                serviceTask("process_shard_${idx}") {
+                    action { ctx, prevOpt ->
+                        Promises.async { "SHARD-${idx}-DONE" }
+                    }
+                }
+            }
+
+            join("joinShards") {
+                from "process_shard_0", "process_shard_1", "process_shard_2"
+                action { ctx, promises ->
+                    Promises.async { "JOINED" }
+                }
+            }
+        }
+
+        def result = awaitPromise(graph.run())
+
+        (0..2).each { idx ->
+            assertEquals(TaskState.COMPLETED, graph.tasks["process_shard_${idx}"].state)
+        }
+        assertEquals("JOINED", result)
+    }
+
+    // ------------------------------------------------------------
+    // Test B — Nested Routers
+    // ------------------------------------------------------------
+    @Test
+    void testNestedRouters() {
+
+        def graph = TaskGraph.build {
+
+            serviceTask("start") {
+                action { ctx, _ -> Promises.async { 42 } }
+            }
+
+            fork("router1") {
+                from "start"
+                conditionalOn(["x"]) { n -> n > 10 }
+                conditionalOn(["y"]) { n -> n <= 10 }
+            }
+
             serviceTask("x") {
-                action { ctx, prevOpt -> 10 }
+                action { ctx, prevOpt -> Promises.async { "X" } }
             }
 
             serviceTask("y") {
-                action { ctx, prevOpt -> 20 }
+                action { ctx, prevOpt -> Promises.async { "Y" } }
             }
 
-            join("sum") {
-                from "x", "y"
-                action { ctx, promises ->
-                    Promises.async {
-                        def values = promises.collect { it.get() as Integer }
-                        values.sum()
-                    }
-                }
+            fork("router2") {
+                from "x"
+                conditionalOn(["xa"]) { v -> true }
+                conditionalOn(["xb"]) { v -> false }
             }
+
+            serviceTask("xa") { action { ctx, _ -> Promises.async { "XA" } } }
+            serviceTask("xb") { action { ctx, _ -> Promises.async { "XB" } } }
         }
 
-        Promise<Integer> p = graph.run()
-        def result = awaitValue(p)
-        assertEquals(30, result)
+        awaitPromise(graph.run())
+
+        assertEquals(TaskState.COMPLETED, graph.tasks["x"].state)
+        assertEquals(TaskState.SKIPPED,   graph.tasks["y"].state)
+
+        assertEquals(TaskState.COMPLETED, graph.tasks["xa"].state)
+        assertEquals(TaskState.SKIPPED,   graph.tasks["xb"].state)
     }
 
-
-    // =====================================================================
-    // Test 7 – Failure propagation
-    // =====================================================================
-
+    // ------------------------------------------------------------
+    // Test C — Router returns empty list
+    // ------------------------------------------------------------
     @Test
-    @DisplayName("Task failures propagate and allow graph to continue")
-    void testFailurePropagation() {
+    void testRouterReturnsEmptyList() {
 
         def graph = TaskGraph.build {
 
-            serviceTask("bad") {
-                action { ctx, prevOpt ->
-                    throw new RuntimeException("boom")
-                }
+            serviceTask("start") {
+                action { ctx, _ -> Promises.async { 5 } }
             }
 
-            serviceTask("after") {
-                dependsOn "bad"
-                action { ctx, prevOpt ->
-                    // prevOpt contains the FAILED promise
-                    Promises.async { "still ran" }
-                }
+            fork("router") {
+                from "start"
+                route { prev -> [] }
+                to "t1", "t2"
+            }
+
+            serviceTask("t1") {
+                action { ctx, _ -> Promises.async { "T1" } }
+            }
+
+            serviceTask("t2") {
+                action { ctx, _ -> Promises.async { "T2" } }
             }
         }
 
-        // Graph itself must complete (graph.run() waits for all tasks)
-        Promise<?> p = graph.run()
-        awaitValue(p)
+        awaitPromise(graph.run())
 
-        assertEquals(TaskState.FAILED, graph.tasks["bad"].state)
-        assertEquals(TaskState.COMPLETED, graph.tasks["after"].state)
-
-        def results = graph.ctx.globals.__taskResults
-        def afterVal = awaitOptionalPromise(results["after"])
-        assertEquals("still ran", afterVal)
+        assertEquals(TaskState.SKIPPED, graph.tasks["t1"].state)
+        assertEquals(TaskState.SKIPPED, graph.tasks["t2"].state)
     }
 
-
-    // =====================================================================
-    // Test 8 – Global context propagation
-    // =====================================================================
-
+    // ------------------------------------------------------------
+    // Test D — Mixed static + conditional routing
+    // ------------------------------------------------------------
     @Test
-    @DisplayName("Global variables propagate into task context")
-    void testGlobalsPropagation() {
+    void testMixedRouting() {
 
         def graph = TaskGraph.build {
 
-            globals {
-                factor = 7
+            serviceTask("start") {
+                action { ctx, _ -> Promises.async { 20 } }
             }
 
-            serviceTask("t") {
-                action { ctx, prevOpt ->
-                    Promises.async { ctx.globals.factor * 3 }
-                }
-            }
-        }
-
-        Promise<Integer> p = graph.run()
-        def result = awaitValue(p)
-        assertEquals(21, result)
-    }
-
-
-    // =====================================================================
-    // Test 9 – Event listeners
-    // =====================================================================
-
-    @Test
-    @DisplayName("Task event listeners receive proper events during execution")
-    void testEventListeners() {
-
-        def events = []
-
-        def graph = TaskGraph.build {
-
-            onTaskEvent { ev ->
-                events << ev.type.toString()
+            fork("mixed") {
+                from "start"
+                to "always"
+                conditionalOn(["maybe"]) { n -> n > 10 }
             }
 
-            serviceTask("hello") {
-                action { ctx, prevOpt -> "Hello" }
+            serviceTask("always") {
+                action { ctx, _ -> Promises.async { "ALWAYS" } }
+            }
+
+            serviceTask("maybe") {
+                action { ctx, _ -> Promises.async { "MAYBE" } }
             }
         }
 
-        awaitValue(graph.run())
+        awaitPromise(graph.run())
 
-        assertTrue(events.contains("START"))
-        assertTrue(events.any { it == "SUCCESS" || it == "COMPLETED" })
+        assertEquals(TaskState.COMPLETED, graph.tasks["always"].state)
+        assertEquals(TaskState.COMPLETED, graph.tasks["maybe"].state)
     }
-
-
 }

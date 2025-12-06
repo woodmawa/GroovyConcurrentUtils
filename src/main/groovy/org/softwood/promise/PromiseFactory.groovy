@@ -1,6 +1,9 @@
 package org.softwood.promise
 
+import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * Factory interface for creating promises.
@@ -53,6 +56,17 @@ interface PromiseFactory {
     <T> Promise<T> createFailedPromise(Throwable cause)
 
     <T> Promise<T> executeAsync(Closure<T> task)
+
+    //enable for java lambda expressions
+
+    <T> Promise<T> executeAsync(Callable<T> task)
+
+    Promise<Void> executeAsync(Runnable task)
+
+    <T> Promise<T> executeAsync(Supplier<T> task)
+
+    <T, R> Promise<R> executeAsync(Function<T, R> fn, T input)
+
 
     /**
      * Create a new Promise that adopts completion of a CompletableFuture.

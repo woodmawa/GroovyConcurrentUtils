@@ -8,7 +8,10 @@ import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 import org.softwood.promise.core.PromisePoolContext
 
+import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * Dataflow-based implementation of {@link PromiseFactory}.
@@ -73,6 +76,51 @@ class DataflowPromiseFactory implements PromiseFactory {
     @Override
     <T> Promise<T> executeAsync(Closure<T> task) {
         return new DataflowPromise<T>(dataflowFactory.task(task))
+    }
+
+    // =========================================================================
+    //  NEW ASYNC OVERLOADS — Java-friendly APIs
+    // =========================================================================
+
+    /**
+     * Execute a Callable asynchronously.
+     */
+    @Override
+    <T> Promise<T> executeAsync(Callable<T> task) {
+        Closure<T> work = { task.call() }
+        return new DataflowPromise<T>(dataflowFactory.task(work))
+    }
+
+    /**
+     * Execute a Runnable asynchronously.
+     * Promise result is Void (null).
+     */
+    @Override
+    Promise<Void> executeAsync(Runnable task) {
+        Closure<Void> work = {
+            task.run()
+            return null
+        }
+        return new DataflowPromise<Void>(dataflowFactory.task(work))
+    }
+
+    /**
+     * Execute a Supplier asynchronously.
+     */
+    @Override
+    <T> Promise<T> executeAsync(Supplier<T> supplier) {
+        Closure<T> work = { supplier.get() }
+        return new DataflowPromise<T>(dataflowFactory.task(work))
+    }
+
+    /**
+     * Execute a Function with a supplied input.
+     */
+    @Override
+    def <T, R> Promise<R> executeAsync(Function<T, R> fn, T input) {
+        Closure<R> work = { fn.apply(input) }
+        DataflowVariable<R> dv = (DataflowVariable<R>) dataflowFactory.task(work)
+        return new DataflowPromise<R>(dv)
     }
 
     /** {@inheritDoc} */

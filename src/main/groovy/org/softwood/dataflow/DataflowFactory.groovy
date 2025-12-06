@@ -1,9 +1,8 @@
 package org.softwood.dataflow
 
 import groovy.util.logging.Slf4j
-import org.softwood.pool.ConcurrentPool
 import org.softwood.pool.ExecutorPool
-import org.softwood.pool.ExecutorPoolsFactory
+import org.softwood.pool.ExecutorPoolFactory
 import org.softwood.promise.core.PromisePoolContext
 
 import java.util.concurrent.ExecutorService
@@ -33,7 +32,7 @@ class DataflowFactory {
 
     //wrap a user provided executor service if really required.  better to use the default virtual threads model though
     DataflowFactory(ExecutorService executor) {
-        this.pool = ExecutorPoolsFactory.wrap (executor)
+        this.pool = ExecutorPoolFactory.wrap (executor)
     }
 
     <T> DataflowVariable<T> createDataflowVariable() {

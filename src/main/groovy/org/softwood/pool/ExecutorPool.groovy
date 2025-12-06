@@ -56,4 +56,5 @@ interface ExecutorPool {
     boolean isClosed()
     String getName()
     boolean isUsingVirtualThreads()
+    void shutdown ()
 }

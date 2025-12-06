@@ -12,7 +12,7 @@ import java.util.concurrent.ScheduledExecutorService
  * and scheduled executors without tightly coupling to ConcurrentPool.
  */
 @Slf4j
-class ExecutorPoolsFactory {
+class ExecutorPoolFactory {
 
     /**
      * Wrap an existing ExecutorService in a ConcurrentPool.

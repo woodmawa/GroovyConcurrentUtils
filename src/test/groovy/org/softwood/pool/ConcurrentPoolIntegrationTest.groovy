@@ -1,5 +1,6 @@
 package org.softwood.pool
 
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -11,6 +12,14 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 
 class ConcurrentPoolIntegrationTest {
+
+    private ExecutorPool pool;
+
+    @BeforeEach
+    void setUp() {
+        // always obtain a fresh synchronous fake pool
+        pool = ExecutorPoolFactory.builder().name("integration-test-pool").build();
+    }
 
     @Test
     void testDefaultConstructorUsesVirtualThreads() throws Exception {

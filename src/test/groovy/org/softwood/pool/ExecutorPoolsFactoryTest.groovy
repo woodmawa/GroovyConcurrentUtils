@@ -18,7 +18,7 @@ class ExecutorPoolsFactoryTest {
     @Test
     void testWrapUsesProvidedExecutor() throws Exception {
         ExecutorService es = Executors.newFixedThreadPool(2);
-        ExecutorPool pool = ExecutorPoolsFactory.wrap(es);
+        ExecutorPool pool = ExecutorPoolFactory.wrap(es);
 
         AtomicReference<String> threadName = new AtomicReference<>();
 
@@ -44,7 +44,7 @@ class ExecutorPoolsFactoryTest {
     @Test
     void testBuilderWithCustomExecutor() throws Exception {
         ExecutorService es = Executors.newSingleThreadExecutor();
-        ExecutorPool pool = ExecutorPoolsFactory.builder()
+        ExecutorPool pool = ExecutorPoolFactory.builder()
                 .executor(es)
                 .name("custom-pool")
                 .build();
@@ -66,7 +66,7 @@ class ExecutorPoolsFactoryTest {
     @Test
     void testBuilderWithCustomScheduler() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        ExecutorPool pool = ExecutorPoolsFactory.builder()
+        ExecutorPool pool = ExecutorPoolFactory.builder()
                 .scheduler(scheduler)
                 .name("scheduled-pool")
                 .build();
@@ -91,7 +91,7 @@ class ExecutorPoolsFactoryTest {
 
     @Test
     void testBuilderDefaultUsesConcurrentPoolDefaults() throws Exception {
-        ExecutorPool pool = ExecutorPoolsFactory.builder()
+        ExecutorPool pool = ExecutorPoolFactory.builder()
                 .name("default-test")
                 .build();
 
@@ -111,7 +111,7 @@ class ExecutorPoolsFactoryTest {
 
     @Test
     void testBuilderSetsName() {
-        ExecutorPool pool = ExecutorPoolsFactory.builder()
+        ExecutorPool pool = ExecutorPoolFactory.builder()
                 .name("my-awesome-pool")
                 .build();
 
@@ -128,7 +128,7 @@ class ExecutorPoolsFactoryTest {
         ExecutorService es = Executors.newFixedThreadPool(2);
         ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
-        ExecutorPool pool = ExecutorPoolsFactory.builder()
+        ExecutorPool pool = ExecutorPoolFactory.builder()
                 .executor(es)
                 .scheduler(scheduler)
                 .name("combo")

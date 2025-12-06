@@ -1,13 +1,10 @@
 package org.softwood.dag.task
 
 import org.softwood.config.ConfigLoader
-import org.softwood.dag.TaskGraph
-import org.softwood.pool.ConcurrentPool
 import groovy.util.logging.Slf4j
 import org.softwood.pool.ExecutorPool
 import org.softwood.promise.PromiseFactory
-import org.softwood.promise.core.PromisePoolContext
-import org.softwood.pool.ExecutorPoolsFactory
+import org.softwood.pool.ExecutorPoolFactory
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 @Slf4j
@@ -22,7 +19,7 @@ class TaskContext {
     TaskContext() {
         this.promiseFactory = new DataflowPromiseFactory()
         this.config = ConfigLoader.loadConfig()
-        this.pool   = ExecutorPoolsFactory.builder()
+        this.pool   = ExecutorPoolFactory.builder()
                 .name("dag-pool")
                 .build()
     }
@@ -45,7 +42,7 @@ class TaskContext {
     TaskContext(Map config) {
         this.promiseFactory = new DataflowPromiseFactory()
         this.config = config ?: ConfigLoader.loadConfig()      // uses  ConfigLoader as fallback
-        this.pool   = ExecutorPoolsFactory.builder()
+        this.pool   = ExecutorPoolFactory.builder()
                 .name("dag-pool")
                 .build()    // uses virtual threads if available
     }
@@ -82,7 +79,7 @@ class TaskContext {
 
             if (!pool) {
                 // Normal default behaviour
-                pool = ExecutorPoolsFactory.builder()
+                pool = ExecutorPoolFactory.builder()
                         .name("dag-pool")
                         .build()
             }

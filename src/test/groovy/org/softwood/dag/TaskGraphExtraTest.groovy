@@ -373,6 +373,10 @@ class FakePool implements ExecutorPool {
     @Override boolean isUsingVirtualThreads() { useVT }
     @Override ExecutorService getExecutor() { executor }
     @Override ScheduledExecutorService getScheduledExecutor() { scheduler }
+
+    void shutdown() {
+        //do nothing
+    }
 }
 
 /**

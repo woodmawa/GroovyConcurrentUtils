@@ -12,10 +12,16 @@ import org.softwood.dag.task.Task
  *  - fork { ... }
  *  - join { ... }
  *  - globals { ... }
+ *  
+ * Supports deferred wiring - forks can reference tasks declared later in the DSL.
  */
 class TaskGraphDsl {
 
     private final TaskGraph graph
+    
+    // Store fork/join DSL instances for deferred wiring
+    private final List<ForkDsl> deferredForks = []
+    private final List<JoinDsl> deferredJoins = []
 
     TaskGraphDsl(TaskGraph graph) {
         this.graph = graph
@@ -40,25 +46,29 @@ class TaskGraphDsl {
     }
 
     // ----------------------------------------------------
-    // Fork block → configures RouterTasks / static fan-out
+    // Fork block → DEFERRED wiring
     // ----------------------------------------------------
     def fork(String id, @DelegatesTo(ForkDsl) Closure body) {
         def forkDsl = new ForkDsl(graph, id)
         body.delegate = forkDsl
         body.resolveStrategy = Closure.DELEGATE_FIRST
         body.call()
-        forkDsl.build()
+        
+        // Store for later wiring instead of building immediately
+        deferredForks << forkDsl
     }
 
     // ----------------------------------------------------
-    // Join block → configures a ServiceTask that depends on many
+    // Join block → DEFERRED wiring
     // ----------------------------------------------------
     def join(String id, @DelegatesTo(JoinDsl) Closure body) {
         def joinDsl = new JoinDsl(graph, id)
         body.delegate = joinDsl
         body.resolveStrategy = Closure.DELEGATE_FIRST
         joinDsl.configure(body)
-        joinDsl.build()
+        
+        // Store for later wiring instead of building immediately
+        deferredJoins << joinDsl
     }
 
     // ----------------------------------------------------
@@ -68,5 +78,21 @@ class TaskGraphDsl {
         body.delegate = graph.ctx.globals
         body.resolveStrategy = Closure.DELEGATE_FIRST
         body.call()
+    }
+    
+    // ----------------------------------------------------
+    // Wire all deferred forks and joins
+    // Called by TaskGraph.build() after DSL completes
+    // ----------------------------------------------------
+    void wireDeferred() {
+        // Wire all forks
+        deferredForks.each { forkDsl ->
+            forkDsl.build()
+        }
+        
+        // Wire all joins
+        deferredJoins.each { joinDsl ->
+            joinDsl.build()
+        }
     }
 }

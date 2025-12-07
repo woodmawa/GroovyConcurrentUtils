@@ -24,7 +24,7 @@ class ServiceTask extends Task<Object> {
     }
 
     @Override
-    protected Promise<Object> runTask(TaskContext ctx, Optional<?> prevOpt) {
+    protected Promise<Object> runTask(TaskContext ctx, Object prevValue) {
 
         log.debug "Task ${id}: calling runTask() with prevValue"
 
@@ -35,14 +35,14 @@ class ServiceTask extends Task<Object> {
         return ctx.promiseFactory.executeAsync {
 
             // prevOpt already contains the unwrapped VALUE, not a Promise
-            Object prevVal = prevOpt.isPresent() ? prevOpt.get() : null
+            Object prevVal = prevValue
 
             println "ServiceTask.runTask: about to call serviceAction for task $id"
             println "ServiceTask.runTask: about to call serviceAction for task $id"
             println "ServiceTask.runTask: prevVal = $prevVal"
 
             // Call the user's action with context and previous value
-            Promise result = serviceAction.call(ctx, prevOpt)
+            Promise result = serviceAction.call(ctx, prevVal)
 
             println "ServiceTask.runTask: serviceAction returned: $result"
 

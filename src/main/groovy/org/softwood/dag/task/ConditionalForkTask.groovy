@@ -32,30 +32,10 @@ class ConditionalForkTask extends RouterTask {
     }
 
     @Override
-    protected Promise<List<String>> runTask(TaskContext ctx, Optional<?> prev) {
+    protected Promise<List<String>> runTask(TaskContext ctx, Object prevValue) {
 
         return ctx.promiseFactory.executeAsync {
 
-            // --------------------------------------
-            // Extract previous value
-            // --------------------------------------
-            Object prevValue = null
-
-            if (prev.isPresent()) {
-                def p = prev.get()
-
-                // If upstream returned a Promise, resolve it
-                if (p instanceof Promise) {
-                    prevValue = p.get()
-                } else {
-                    prevValue = p
-                }
-
-                // If router receives a list from multiple parents, unwrap
-                if (prevValue instanceof List && prevValue.size() == 1) {
-                    prevValue = prevValue[0]
-                }
-            }
 
             log.debug("ConditionalForkTask($id): prevValue = $prevValue")
 

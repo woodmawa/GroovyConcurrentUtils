@@ -329,7 +329,7 @@ class Promises {
         def errors = []
 
         // 1. Convert to a list to count and iterate safely
-        def promiseList = promises.collect()
+        def promiseList = promises.promises.findAll { it != null }  // ✅ Filter out nulls!
         totalPromises = promiseList.size()
 
         if (totalPromises == 0) {
@@ -375,7 +375,7 @@ class Promises {
         Promise<List<T>> resultPromise = newPromise()
 
         // 1. Convert to a list and set up result storage
-        def promiseList = promises.collect()
+        def promiseList = promises.findAll { it != null }  // ✅ Filter out nulls!
         def totalPromises = promiseList.size()
         def results = new ArrayList(Collections.nCopies(totalPromises, null))
         def successCount = 0
@@ -405,5 +405,10 @@ class Promises {
         }
 
         return resultPromise
+    }
+
+    //alias for all
+    static <T> Promise<List<T>> allOf(Iterable<Promise<T>> promises) {
+        return all(promises)
     }
 }

@@ -3,7 +3,10 @@ package org.softwood.promise.core
 import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 
+import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.function.Function
+import java.util.function.Supplier
 
 /**
  * Factory for creating synchronous Promise mocks.
@@ -33,6 +36,43 @@ class SynchronousPromiseFactoryMock implements PromiseFactory {
             return new SynchronousPromiseMock<T>().accept(task.call())
         } catch (Throwable t) {
             return new SynchronousPromiseMock<T>().fail(t)
+        }
+    }
+
+    @Override
+    def <T> Promise<T> executeAsync(Callable<T> task) {
+        try {
+            return new SynchronousPromiseMock<T>().accept(task.call())
+        } catch (Throwable t) {
+            return new SynchronousPromiseMock<T>().fail(t)
+        }
+    }
+
+    @Override
+    Promise<Void> executeAsync(Runnable task) {
+        try {
+            task.run()
+            return new SynchronousPromiseMock<Void>().accept(null)
+        } catch (Throwable t) {
+            return new SynchronousPromiseMock<Void>().fail(t)
+        }
+    }
+
+    @Override
+    def <T> Promise<T> executeAsync(Supplier<T> task) {
+        try {
+            return new SynchronousPromiseMock<T>().accept(task.get())
+        } catch (Throwable t) {
+            return new SynchronousPromiseMock<T>().fail(t)
+        }
+    }
+
+    @Override
+    def <T, R> Promise<R> executeAsync(Function<T, R> fn, T input) {
+        try {
+            return new SynchronousPromiseMock<R>().accept(fn.apply(input))
+        } catch (Throwable t) {
+            return new SynchronousPromiseMock<R>().fail(t)
         }
     }
 

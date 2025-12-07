@@ -54,7 +54,7 @@ abstract class RouterTask extends Task<List<String>> {
     // Receives Optional<?> (unwrapped value), not Optional<Promise<?>>
     // ---------------------------------------------------------
     @Override
-    protected Promise<List<String>> runTask(TaskContext ctx, Optional<?> prevValueOpt) {
+    protected Promise<List<String>> runTask(TaskContext ctx, Object prevValue) {
 
         return ctx.promiseFactory.executeAsync {
 
@@ -68,24 +68,6 @@ abstract class RouterTask extends Task<List<String>> {
                 return lastSelectedTargets
             }
 
-            // Extract previous upstream value
-            Object prevValue = null
-
-            if (prevValueOpt.isPresent()) {
-                prevValue = prevValueOpt.get()
-
-                log.debug "RouterTask(${id}): raw prevValue = $prevValue (${prevValue?.getClass()?.simpleName})"
-
-                // Defensive unwrap (should never be needed if TaskGraph is correct)
-                while (prevValue instanceof Promise) {
-                    log.warn "RouterTask(${id}): prevValue is still a Promise! Unwrapping..."
-                    prevValue = ((Promise)prevValue).get()
-                }
-
-                log.debug "RouterTask(${id}): final prevValue = $prevValue"
-            } else {
-                log.debug "RouterTask(${id}): no predecessor value"
-            }
 
             // -------------------------------------------------
             // Call routing logic ONCE

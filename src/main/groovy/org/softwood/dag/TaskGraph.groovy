@@ -3,6 +3,7 @@ package org.softwood.dag
 import groovy.util.logging.Slf4j
 import org.softwood.dag.task.*
 import org.softwood.promise.Promise
+import org.softwood.promise.Promises
 
 @Slf4j
 class TaskGraph {
@@ -15,6 +16,39 @@ class TaskGraph {
     /** True once finalizeWiring() has run */
     boolean wired = false
 
+    /** Task execution context */
+    TaskContext ctx
+
+    // --------------------------------------------------------------------
+    // STATIC BUILDER METHOD
+    // --------------------------------------------------------------------
+
+    /**
+     * Static factory method to build a TaskGraph using DSL
+     * Usage: TaskGraph.build { ... DSL blocks ... }
+     */
+    static TaskGraph build(@DelegatesTo(TaskGraphDsl) Closure dslClosure) {
+        TaskGraph graph = new TaskGraph()
+        graph.ctx = new TaskContext()
+        
+        TaskGraphDsl dsl = new TaskGraphDsl(graph)
+        dslClosure.delegate = dsl
+        dslClosure.resolveStrategy = Closure.DELEGATE_FIRST
+        dslClosure.call()
+
+        // DEFERRED WIRING: Wire all forks/joins after DSL completes
+        dsl.wireDeferred()
+
+        return graph
+    }
+
+    /**
+     * Convenience method - alias for start()
+     */
+    Promise<?> run() {
+        return start()
+    }
+
     // --------------------------------------------------------------------
     // BUILD / WIRING
     // --------------------------------------------------------------------
@@ -25,6 +59,13 @@ class TaskGraph {
 
     void registerRouter(RouterTask router) {
         routers << router
+    }
+
+    // Add this method:
+    void notifyEvent(TaskEvent event) {
+        // Event notification for task state changes
+        log.debug "Task event: ${event.taskId} -> ${event.taskState}"
+        // You can add event listeners here later if needed
     }
 
     /**
@@ -67,8 +108,9 @@ class TaskGraph {
         List<Promise> terminals = tasks.values()
                 .findAll { it.successors.isEmpty() }
                 .collect { it.completionPromise }
+                .findAll { it != null }  // ✅ Filter out nulls!
 
-        return Promise.allOf(terminals)
+        return Promises.all(terminals)
     }
 
     // --------------------------------------------------------------------

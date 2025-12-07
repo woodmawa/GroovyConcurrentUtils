@@ -43,6 +43,8 @@ abstract class Task<T> {
     private Long taskTimeoutMillis = null
     protected Throwable lastError = null
 
+    Promise<?> completionPromise = null
+    private Optional<?> injectedInput = Optional.empty()
 
     // ----------------------------------------------------
     // constructor - expects id and a name and a graph ctx
@@ -76,24 +78,82 @@ abstract class Task<T> {
 
     Throwable getError() { lastError }
 
+    boolean getHasStarted() { state != TaskState.SCHEDULED }
+
+    boolean isCompleted() { state == TaskState.COMPLETED }
+    boolean isSkipped() { state == TaskState.SKIPPED }
+    boolean isFailed() { state == TaskState.FAILED }
+
+    void markScheduled() {
+        state = TaskState.SCHEDULED
+        emitEvent(TaskState.SCHEDULED)
+    }
+
+    void markCompleted() {
+        state = TaskState.COMPLETED
+        emitEvent(TaskState.COMPLETED)
+    }
+
+    void markFailed(Throwable error) {
+        lastError = error
+        state = TaskState.FAILED
+        emitErrorEvent(error)
+    }
+
+    void markSkipped() {
+        state = TaskState.SKIPPED
+        emitEvent(TaskState.SKIPPED)
+    }
+
+    void setInjectedInput(Object data) {
+        this.injectedInput = Optional.ofNullable(data)
+    }
+
+
+    // ------------
+    // helper method
+    // -------------
+    Promise<?> buildPrevPromise(Map<String, Task> tasks) {
+        if (injectedInput.isPresent()) {
+            return ctx.promiseFactory.createPromise(injectedInput.get())
+        }
+
+        if (predecessors.isEmpty()) {
+            return ctx.promiseFactory.createPromise (null)
+        }
+
+        if (predecessors.size() == 1) {
+            String predId = predecessors.first()
+            Task pred = tasks[predId]
+            return pred?.completionPromise ?: ctx.promiseFactory.createPromise(null)
+        }
+
+        List<Promise<?>> predPromises = predecessors.collect {
+            tasks[it]?.completionPromise
+        }.findAll { it != null }
+
+        return Promise.allOf(predPromises)
+    }
+
     // ----------------------------------------------------
     // Subclasses implement the core promise-returning action
     // This receives the UNWRAPPED value (Optional<?>), not the promise
     // ----------------------------------------------------
-    protected abstract Promise<T> runTask(TaskContext ctx, Optional<?> prevValue)
+    protected abstract Promise<T> runTask(TaskContext ctx, Object prevValue)
 
     // ----------------------------------------------------
     // Main entrypoint called by TaskGraph
     // Receives Optional<Promise<?>> and unwraps it for runTask
     // ----------------------------------------------------
-    Promise execute(Optional<Promise<?>> previousPromiseOpt) {
+    Promise execute(Promise<?> previousPromise) {
 
         state = TaskState.RUNNING
         emitEvent(TaskState.RUNNING)
 
-        log.debug "Task ${id}: execute() called with prevPromise present: ${previousPromiseOpt.isPresent()}"
+        log.debug "Task ${id}: execute() called with prevPromise present: $previousPromise"
 
-        Promise<T> attemptPromise = runAttempt(previousPromiseOpt)
+        Promise<T> attemptPromise = runAttempt(previousPromise)
+        completionPromise = attemptPromise
 
         log.debug "Task ${id}: execute() got attemptPromise"
 
@@ -115,7 +175,7 @@ abstract class Task<T> {
     // Retry + timeout wrapper
     // Unwraps Optional<Promise<?>> to Optional<?> for runTask
     // ----------------------------------------------------
-    private Promise<T> runAttempt(Optional<Promise<?>> prevPromiseOpt) {
+    private Promise<T> runAttempt(Promise<?> previousPromise) {
 
         log.debug "Task ${id}: runAttempt() starting"
         def factory = ctx.promiseFactory
@@ -131,12 +191,10 @@ abstract class Task<T> {
                     emitEvent(TaskState.RUNNING)
 
                     // Unwrap the promise to get the actual value
-                    Optional<?> prevValueOpt = Optional.empty()
-                    if (prevPromiseOpt.isPresent()) {
-                        Promise<?> prevPromise = prevPromiseOpt.get()
-
+                    Object prevValue = null
+                    if (previousPromise != null) {
                         log.debug "Task ${id}: unwrapping predecessor promise"
-                        Object prevValue = prevPromise.get()  // Block and get the value
+                        prevValue = previousPromise.get()  // Block and get the value
 
                         log.debug "Task ${id}: raw unwrapped value: $prevValue (${prevValue?.getClass()?.simpleName})"
 
@@ -152,18 +210,11 @@ abstract class Task<T> {
                             log.debug "Task ${id}: unwrapped single-element list to: $prevValue"
                         }
 
-                        // IMPORTANT: don't call Optional.of(null)
-                        if (prevValue != null) {
-                            prevValueOpt = Optional.of(prevValue)
-                        } else {
-                            prevValueOpt = Optional.empty()
-                        }
-
                         log.debug "Task ${id}: final unwrapped prevValue: $prevValue"
                     }
 
                     log.debug "Task ${id}: calling runTask() with prevValue"
-                    Promise<T> promise = runTask(ctx, prevValueOpt)
+                    Promise<T> promise = runTask(ctx, prevValue)  // Pass raw value (may be null)
 
                     log.debug "Task ${id}: runTask() returned promise, waiting for result"
                     T result = (taskTimeoutMillis != null)

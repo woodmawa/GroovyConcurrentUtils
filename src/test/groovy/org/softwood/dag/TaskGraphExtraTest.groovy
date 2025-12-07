@@ -726,6 +726,55 @@ class FakePromiseFactory implements PromiseFactory {
     }
 
     @Override
+    <T> Promise<T> executeAsync(Callable<T> task) {
+        if (pool != null) {
+            pool.submitted << "factory-callable"
+        }
+        try {
+            return new FakePromise<T>().accept(task.call())
+        } catch (Throwable t) {
+            return new FakePromise<T>().fail(t)
+        }
+    }
+
+    @Override
+    Promise<Void> executeAsync(Runnable task) {
+        if (pool != null) {
+            pool.submitted << "factory-runnable"
+        }
+        try {
+            task.run()
+            return new FakePromise<Void>().accept(null)
+        } catch (Throwable t) {
+            return new FakePromise<Void>().fail(t)
+        }
+    }
+
+    @Override
+    <T> Promise<T> executeAsync(Supplier<T> task) {
+        if (pool != null) {
+            pool.submitted << "factory-supplier"
+        }
+        try {
+            return new FakePromise<T>().accept(task.get())
+        } catch (Throwable t) {
+            return new FakePromise<T>().fail(t)
+        }
+    }
+
+    @Override
+    <T, R> Promise<R> executeAsync(Function<T, R> fn, T input) {
+        if (pool != null) {
+            pool.submitted << "factory-function"
+        }
+        try {
+            return new FakePromise<R>().accept(fn.apply(input))
+        } catch (Throwable t) {
+            return new FakePromise<R>().fail(t)
+        }
+    }
+
+    @Override
     <T> Promise<T> from(CompletableFuture<T> future) {
         try {
             return new FakePromise<T>().accept(future.get())

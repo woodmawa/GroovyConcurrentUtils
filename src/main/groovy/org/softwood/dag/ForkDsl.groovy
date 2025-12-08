@@ -53,11 +53,23 @@ class ForkDsl {
 
     /** Conditional routing: conditionalOn(["taskId"]) { prevValue -> boolean } */
     def conditionalOn(List<String> targets, Closure<Boolean> cond) {
+        // Create a delegate that exposes ctx as a property
+        def delegateObj = new Object() {
+            def getCtx() { return graph.ctx }
+        }
+        cond.delegate = delegateObj
+        cond.resolveStrategy = Closure.DELEGATE_FIRST
         targets.each { tid -> conditionalRules[tid] = cond }
     }
 
     /** Dynamic routing: route { prevValue -> List<String> targetIds } */
     def route(Closure customLogic) {
+        // Create a delegate that exposes ctx as a property
+        def delegateObj = new Object() {
+            def getCtx() { return graph.ctx }
+        }
+        customLogic.delegate = delegateObj
+        customLogic.resolveStrategy = Closure.DELEGATE_FIRST
         dynamicRouteLogic = customLogic
     }
 
@@ -75,6 +87,12 @@ class ForkDsl {
      *  shard("templateId", count) { prevValue -> Collection items }
      */
     def shard(String templateId, int count, Closure shardSrc) {
+        // Create a delegate that exposes ctx as a property
+        def delegateObj = new Object() {
+            def getCtx() { return graph.ctx }
+        }
+        shardSrc.delegate = delegateObj
+        shardSrc.resolveStrategy = Closure.DELEGATE_FIRST
         shardTemplateId = templateId
         shardCount = count
         shardSource = shardSrc

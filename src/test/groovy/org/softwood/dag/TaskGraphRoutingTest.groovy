@@ -49,13 +49,13 @@ class TaskGraphRoutingTest {
             }
 
             serviceTask("a") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "A-ran" }
                 }
             }
 
             serviceTask("b") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "B-ran" }
                 }
             }
@@ -83,19 +83,20 @@ class TaskGraphRoutingTest {
 
             fork("router") {
                 from "classify"
+                to "fast", "standard"  // Declare possible targets
                 route { prev ->
                     prev.type == "fast" ? ["fast"] : ["standard"]
                 }
             }
 
             serviceTask("fast") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "FAST-RAN" }
                 }
             }
 
             serviceTask("standard") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "STANDARD-RAN" }
                 }
             }
@@ -127,9 +128,9 @@ class TaskGraphRoutingTest {
 
             (0..2).each { idx ->
                 serviceTask("process_shard_${idx}") {
-                    action { ctx, prevOpt ->
-                        // Get shard data from prevOpt instead of ctx.globals
-                        def myShard = prevOpt.orElse([])
+                    action { ctx, prevValue ->
+                        // prevValue is already unwrapped (not Optional)
+                        def myShard = prevValue ?: []
 
                         // Process the shard
                         ctx.promiseFactory.executeAsync {
@@ -141,9 +142,9 @@ class TaskGraphRoutingTest {
 
             join("joinShards") {
                 from "process_shard_0", "process_shard_1", "process_shard_2"
-                action { ctx, promises ->
-                    // Collect all shard results
-                    def results = promises.collect { it.get() }
+                action { ctx, prevValue ->
+                    // prevValue is already the list of predecessor results
+                    def results = prevValue ?: []
                     ctx.promiseFactory.executeAsync {
                         "JOINED: ${results.join(', ')}"
                     }
@@ -183,13 +184,13 @@ class TaskGraphRoutingTest {
             }
 
             serviceTask("x") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "X" }
                 }
             }
 
             serviceTask("y") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "Y" }
                 }
             }

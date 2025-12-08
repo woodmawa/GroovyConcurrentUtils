@@ -329,7 +329,7 @@ class Promises {
         def errors = []
 
         // 1. Convert to a list to count and iterate safely
-        def promiseList = promises.promises.findAll { it != null }  // ✅ Filter out nulls!
+        def promiseList = promises.findAll { it != null }  // ✅ Filter out nulls!
         totalPromises = promiseList.size()
 
         if (totalPromises == 0) {

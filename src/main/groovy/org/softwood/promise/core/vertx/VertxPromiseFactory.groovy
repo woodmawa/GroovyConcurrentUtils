@@ -218,7 +218,7 @@ class VertxPromiseFactory implements PromiseFactory {
                     return VertxFuture.failedFuture(
                             new IllegalStateException("any() succeeded but no succeeded index found")
                     )
-                })
+                }) as VertxFuture<T>
 
         return new VertxPromiseAdapter<T>(firstFuture, vertx)
     }

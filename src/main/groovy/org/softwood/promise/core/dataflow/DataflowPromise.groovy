@@ -312,6 +312,16 @@ class DataflowPromise<T> implements Promise<T> {
     Promise<T> onSuccess(Consumer<T> c) {
         if (c == null) return this
         variable.whenAvailable { v -> c.accept(v) }
+        
+        // CRITICAL: If already completed, invoke callback immediately
+        if (this.isCompleted()) {
+            try {
+                c.accept(variable.get())
+            } catch (Throwable t) {
+                log.error("Error in onSuccess callback (immediate invocation)", t)
+            }
+        }
+        
         return this
     }
 
@@ -319,6 +329,16 @@ class DataflowPromise<T> implements Promise<T> {
     Promise<T> onError(Consumer<Throwable> c) {
         if (c == null) return this
         variable.whenError { e -> c.accept(e) }
+        
+        // CRITICAL: If already failed, invoke callback immediately
+        if (this.isDone() && !this.isCompleted() && !this.isCancelled()) {
+            try {
+                c.accept(variable.getError())
+            } catch (Throwable t) {
+                log.error("Error in onError callback (immediate invocation)", t)
+            }
+        }
+        
         return this
     }
 
@@ -332,6 +352,15 @@ class DataflowPromise<T> implements Promise<T> {
                 callback.accept(v)
             } catch (Throwable t) {
                 log.error("Error in onComplete callback", t)
+            }
+        }
+
+        // CRITICAL: If already completed, invoke callback immediately
+        if (this.isCompleted()) {
+            try {
+                callback.accept(variable.get())
+            } catch (Throwable t) {
+                log.error("Error in onComplete callback (immediate invocation)", t)
             }
         }
 

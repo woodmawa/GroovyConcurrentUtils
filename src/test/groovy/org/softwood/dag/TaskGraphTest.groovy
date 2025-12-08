@@ -32,9 +32,9 @@ class TaskGraphTest {
             }
 
             serviceTask("task2") {
-                action { ctx, prevOpt ->
-                    def prev = prevOpt.get()
-                    ctx.promiseFactory.executeAsync { prev + "B" }
+                action { ctx, prevValue ->
+                    // prevValue is already unwrapped
+                    ctx.promiseFactory.executeAsync { prevValue + "B" }
                 }
             }
 
@@ -65,27 +65,28 @@ class TaskGraphTest {
             }
 
             serviceTask("task1") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "T1" }
                 }
             }
 
             serviceTask("task2") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "T2" }
                 }
             }
 
             serviceTask("task3") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "T3" }
                 }
             }
 
             join("combiner") {
                 from "task1", "task2", "task3"
-                action { ctx, promises ->
-                    def results = promises.collect { it.get() }
+                action { ctx, prevValue ->
+                    // prevValue is already the list of predecessor results
+                    def results = prevValue ?: []
                     ctx.promiseFactory.executeAsync {
                         results.join("-")
                     }
@@ -118,21 +119,22 @@ class TaskGraphTest {
             }
 
             serviceTask("pathA") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "A" }
                 }
             }
 
             serviceTask("pathB") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "B" }
                 }
             }
 
             join("merge") {
                 from "pathA", "pathB"
-                action { ctx, promises ->
-                    def results = promises.collect { it.get() }
+                action { ctx, prevValue ->
+                    // prevValue is already the list of predecessor results
+                    def results = prevValue ?: []
                     ctx.promiseFactory.executeAsync {
                         "Merged: ${results.join(' + ')}"
                     }
@@ -163,13 +165,13 @@ class TaskGraphTest {
             }
 
             serviceTask("a") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "A-ran" }
                 }
             }
 
             serviceTask("b") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "B-ran" }
                 }
             }
@@ -192,19 +194,20 @@ class TaskGraphTest {
 
             fork("router") {
                 from "classify"
+                to "fast", "standard"  // Declare possible targets
                 route { prev ->
                     prev.type == "fast" ? ["fast"] : ["standard"]
                 }
             }
 
             serviceTask("fast") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "FAST-RAN" }
                 }
             }
 
             serviceTask("standard") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "STANDARD-RAN" }
                 }
             }
@@ -233,8 +236,9 @@ class TaskGraphTest {
 
             join("sum") {
                 from "a", "b"
-                action { ctx, promises ->
-                    def values = promises.collect { it.get() as Integer }
+                action { ctx, prevValue ->
+                    // prevValue is already the list of predecessor results
+                    def values = (prevValue ?: []) as List<Integer>
                     ctx.promiseFactory.executeAsync {
                         values.sum()
                     }
@@ -259,7 +263,7 @@ class TaskGraphTest {
             }
 
             serviceTask("dependent") {
-                action { ctx, prevOpt ->
+                action { ctx, prevValue ->
                     ctx.promiseFactory.executeAsync { "Should not run" }
                 }
             }

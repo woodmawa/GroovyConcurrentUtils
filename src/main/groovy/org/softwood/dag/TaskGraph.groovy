@@ -19,6 +19,11 @@ class TaskGraph {
     /** Task execution context */
     TaskContext ctx
 
+    /** Graph completion tracking */
+    private Promise graphCompletionPromise = null
+    private int completedTaskCount = 0
+    private int totalTaskCount = 0
+
     // --------------------------------------------------------------------
     // STATIC BUILDER METHOD
     // --------------------------------------------------------------------
@@ -95,22 +100,48 @@ class TaskGraph {
 
     /**
      * Start graph execution by scheduling all root tasks
+     * Returns a promise that resolves with terminal task results when ALL tasks complete
      */
     Promise<?> start() {
         finalizeWiring()
+
+        // Initialize completion tracking
+        totalTaskCount = tasks.size()
+        completedTaskCount = 0
+        graphCompletionPromise = ctx.promiseFactory.createPromise()
 
         List<Task> roots = tasks.values().findAll { it.predecessors.isEmpty() }
         log.debug "Root tasks: ${roots*.id}"
 
         roots.each { schedule(it) }
 
-        // Return combined promise that completes when all terminal tasks complete
-        List<Promise> terminals = tasks.values()
-                .findAll { it.successors.isEmpty() }
-                .collect { it.completionPromise }
-                .findAll { it != null }  // ✅ Filter out nulls!
+        return graphCompletionPromise
+    }
 
-        return Promises.all(terminals)
+    /**
+     * Called by schedule() when a task reaches a terminal state
+     * Checks if graph execution is complete and resolves graphCompletionPromise if so
+     */
+    private void checkGraphCompletion() {
+        synchronized (this) {
+            int terminal = tasks.values().count { task ->
+                task.isCompleted() || task.isFailed() || task.isSkipped()
+            }
+
+            if (terminal == totalTaskCount && graphCompletionPromise != null) {
+                // All tasks have reached terminal state - collect results
+                List terminalResults = tasks.values()
+                    .findAll { it.successors.isEmpty() && it.isCompleted() }
+                    .collect { it.completionPromise?.get() }
+                    .findAll { it != null }
+
+                // Resolve the graph completion promise
+                def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
+                graphCompletionPromise.accept(result)
+                
+                log.debug "Graph execution completed with result: $result"
+            }
+        }
     }
 
     // --------------------------------------------------------------------
@@ -132,23 +163,29 @@ class TaskGraph {
         Promise<?> execPromise = t.execute(prevPromise)
 
         // -------------------------
-        // Completion callback
+        // Completion callbacks
         // -------------------------
-        execPromise.onComplete { result, error ->
-
-            if (error) {
-                log.error "Task ${t.id} failed: $error"
-                t.markFailed(error)
-                return
-            }
-
+        execPromise.onComplete { result ->
+            log.debug "Task ${t.id} completed with result: $result"
             t.markCompleted()
 
             if (!(t instanceof RouterTask)) {
                 scheduleNormalSuccessors(t)
             } else {
-                scheduleRouterSuccessors((RouterTask)t)
+                // For routers, the result IS the list of chosen targets
+                scheduleRouterSuccessors((RouterTask)t, result as List<String>)
             }
+
+            // Check if graph execution is complete
+            checkGraphCompletion()
+        }
+
+        execPromise.onError { error ->
+            log.error "Task ${t.id} failed: $error"
+            t.markFailed(error)
+            
+            // Check if graph execution is complete (even with failures)
+            checkGraphCompletion()
         }
     }
 
@@ -167,14 +204,13 @@ class TaskGraph {
     // ROUTER SUCCESSOR SCHEDULING
     // --------------------------------------------------------------------
 
-    private void scheduleRouterSuccessors(RouterTask router) {
+    private void scheduleRouterSuccessors(RouterTask router, List<String> chosen) {
 
-        if (!router.alreadyRouted) {
-            log.error "Router ${router.id} completed but has no routing result!"
+        if (chosen == null) {
+            log.error "Router ${router.id} completed but result was null!"
             return
         }
 
-        List<String> chosen = router.lastSelectedTargets
         Set<String> allTargets = router.targetIds
 
         log.debug "router ${router.id} selected targets: $chosen"
@@ -184,6 +220,8 @@ class TaskGraph {
         allTargets.each { tid ->
             if (!chosen.contains(tid)) {
                 tasks[tid]?.markSkipped()
+                // Check completion after marking tasks as skipped
+                checkGraphCompletion()
             }
         }
 
@@ -224,15 +262,21 @@ class TaskGraph {
     // --------------------------------------------------------------------
 
     private void scheduleIfReady(Task t) {
-        if (t == null || t.hasStarted) return
+        if (t == null) return
 
-        boolean ready = t.predecessors.every { pid ->
-            def pt = tasks[pid]
-            pt.isCompleted() || pt.isSkipped()
-        }
+        // Synchronize on the task to prevent race conditions when multiple
+        // predecessors complete simultaneously
+        synchronized (t) {
+            if (t.hasStarted) return
 
-        if (ready) {
-            schedule(t)
+            boolean ready = t.predecessors.every { pid ->
+                def pt = tasks[pid]
+                pt.isCompleted() || pt.isSkipped()
+            }
+
+            if (ready) {
+                schedule(t)
+            }
         }
     }
 }

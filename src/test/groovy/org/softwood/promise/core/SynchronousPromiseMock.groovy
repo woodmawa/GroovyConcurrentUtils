@@ -153,7 +153,11 @@ class SynchronousPromiseMock<T> implements Promise<T> {
     @Override
     Promise<T> filter(Predicate<? super T> predicate) {
         if (!failed && !predicate.test(value)) {
-            return fail(new IllegalStateException("Predicate rejected value: $value"))
+            // Create a new failed promise instead of modifying this one
+            def failedPromise = new SynchronousPromiseMock<T>()
+            failedPromise.failed = true
+            failedPromise.error = new IllegalStateException("Predicate rejected value: $value")
+            return failedPromise
         }
         return this
     }

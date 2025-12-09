@@ -6,7 +6,7 @@ import org.softwood.dag.task.DefaultTaskEventDispatcher
 import org.softwood.dag.task.DynamicRouterTask
 import org.softwood.dag.task.RouterTask
 import org.softwood.dag.task.ShardingRouterTask
-import org.softwood.dag.task.Task
+import org.softwood.dag.task.ITask
 
 /**
  * DSL builder for configuring fork patterns that enable parallel task execution with routing logic.
@@ -108,7 +108,7 @@ class ForkDsl {
             throw new IllegalStateException("fork($id) requires from \"taskId\"")
         }
 
-        Task source = graph.tasks[routeFromId]
+        ITask source = graph.tasks[routeFromId]
         if (!source) {
             throw new IllegalStateException("Unknown source task: $routeFromId")
         }
@@ -155,7 +155,7 @@ class ForkDsl {
 
             // Wire: router -> each shard task
             shardTargetIds.each { String tid ->
-                Task shardTask = graph.tasks[tid]
+                ITask shardTask = graph.tasks[tid]
                 if (!shardTask) {
                     throw new IllegalStateException(
                             "fork($id) sharding refers to unknown shard task '$tid'. " +
@@ -213,7 +213,7 @@ class ForkDsl {
             }
 
             allTargets.each { String tid ->
-                Task targetTask = graph.tasks[tid]
+                ITask targetTask = graph.tasks[tid]
                 if (!targetTask) {
                     throw new IllegalStateException(
                             "fork($id) router ${router.id} refers to unknown target task '$tid'."
@@ -234,7 +234,7 @@ class ForkDsl {
             }
 
             allTargets.each { String tid ->
-                Task targetTask = graph.tasks[tid]
+                ITask targetTask = graph.tasks[tid]
                 if (!targetTask) {
                     throw new IllegalStateException(
                             "fork($id) static fork refers to unknown target task '$tid'."

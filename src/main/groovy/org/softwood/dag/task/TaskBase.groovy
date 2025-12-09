@@ -11,7 +11,7 @@ import java.util.concurrent.TimeoutException
 /**
  * Abstract base class for all DAG tasks.
  *
- * Implements:
+ * Implements ITask interface and provides:
  *  - retryPolicy (maxRetries, backoff, delay)
  *  - timeoutMillis
  *  - state handling
@@ -19,7 +19,7 @@ import java.util.concurrent.TimeoutException
  */
 @Slf4j
 @ToString(includeNames = true, includeFields = true, excludes = ['ctx', 'eventDispatcher'])
-abstract class Task<T> {
+abstract class TaskBase<T> implements ITask<T> {
 
     final String id
     final String name
@@ -49,7 +49,7 @@ abstract class Task<T> {
     // ----------------------------------------------------
     // constructor - expects id and a name and a graph ctx
     // ----------------------------------------------------
-    Task(String id, String name, ctx) {
+    TaskBase(String id, String name, ctx) {
         this.id = id
         this.name = name
         this.ctx = ctx
@@ -113,7 +113,7 @@ abstract class Task<T> {
     // ------------
     // helper method
     // -------------
-    Promise<?> buildPrevPromise(Map<String, Task> tasks) {
+    Promise<?> buildPrevPromise(Map<String, ? extends ITask> tasks) {
         if (injectedInput.isPresent()) {
             return ctx.promiseFactory.createPromise(injectedInput.get())
         }
@@ -124,14 +124,14 @@ abstract class Task<T> {
 
         if (predecessors.size() == 1) {
             String predId = predecessors.first()
-            Task pred = tasks[predId]
+            ITask pred = tasks[predId]
             return pred?.completionPromise ?: ctx.promiseFactory.createPromise(null)
         }
 
         // Multiple predecessors - collect their completion promises
         log.debug "Task ${id}: building combined promise from ${predecessors.size()} predecessors: ${predecessors}"
         List<Promise<?>> predPromises = predecessors.collect {
-            Task pred = tasks[it]
+            ITask pred = tasks[it]
             log.debug "Task ${id}: predecessor ${it} -> completionPromise: ${pred?.completionPromise}"
             pred?.completionPromise
         }.findAll { it != null }

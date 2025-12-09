@@ -14,7 +14,7 @@ import org.softwood.promise.Promises
  * implement the route(prevValue) method.
  */
 @Slf4j
-abstract class RouterTask extends Task<List<String>> {
+abstract class RouterTask extends TaskBase<List<String>> implements IDecisionTask<List<String>> {
 
     /**
      * All possible successor task IDs this router may choose between.

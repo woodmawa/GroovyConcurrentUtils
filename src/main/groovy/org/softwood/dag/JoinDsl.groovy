@@ -2,7 +2,7 @@ package org.softwood.dag
 
 import org.softwood.dag.task.DefaultTaskEventDispatcher
 import org.softwood.dag.task.ServiceTask
-import org.softwood.dag.task.Task
+import org.softwood.dag.task.ITask
 
 /**
  * DSL builder for configuring join tasks that synchronize multiple parallel execution paths.
@@ -46,7 +46,7 @@ class JoinDsl {
         graph.addTask(joinTask)
 
         inputIds.each { pid ->
-            Task pred = graph.tasks[pid]
+            ITask pred = graph.tasks[pid]
             if (!pred)
                 throw new IllegalStateException("Unknown join source: $pid")
 

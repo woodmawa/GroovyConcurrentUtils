@@ -2,7 +2,7 @@ package org.softwood.dag
 
 import org.softwood.dag.task.DefaultTaskEventDispatcher
 import org.softwood.dag.task.ServiceTask
-import org.softwood.dag.task.Task
+import org.softwood.dag.task.ITask
 
 /**
  * DSL builder for TaskGraph.
@@ -30,7 +30,7 @@ class TaskGraphDsl {
     // ----------------------------------------------------
     // Create service task
     // ----------------------------------------------------
-    Task serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
+    ITask serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
         def t = new ServiceTask(id, id, graph.ctx)
         t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
         config.resolveStrategy = Closure.DELEGATE_FIRST
@@ -41,7 +41,7 @@ class TaskGraphDsl {
     }
 
     // Generic task declaration
-    Task task(String id, @DelegatesTo(Task) Closure config) {
+    ITask task(String id, @DelegatesTo(ITask) Closure config) {
         return serviceTask(id, config)
     }
 

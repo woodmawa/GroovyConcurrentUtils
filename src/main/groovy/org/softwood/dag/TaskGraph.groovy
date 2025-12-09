@@ -8,7 +8,7 @@ import org.softwood.promise.Promises
 @Slf4j
 class TaskGraph {
 
-    Map<String, Task> tasks = [:]
+    Map<String, ITask> tasks = [:]
 
     /** Fork → RouterTask mapping produced by ForkDsl */
     List<RouterTask> routers = []
@@ -58,7 +58,7 @@ class TaskGraph {
     // BUILD / WIRING
     // --------------------------------------------------------------------
 
-    void addTask(Task t) {
+    void addTask(ITask t) {
         tasks[t.id] = t
     }
 
@@ -110,7 +110,7 @@ class TaskGraph {
         completedTaskCount = 0
         graphCompletionPromise = ctx.promiseFactory.createPromise()
 
-        List<Task> roots = tasks.values().findAll { it.predecessors.isEmpty() }
+        List<ITask> roots = tasks.values().findAll { it.predecessors.isEmpty() }
         log.debug "Root tasks: ${roots*.id}"
 
         roots.each { schedule(it) }
@@ -148,7 +148,7 @@ class TaskGraph {
     // Scheduler
     // --------------------------------------------------------------------
 
-    private void schedule(Task t) {
+    private void schedule(ITask t) {
 
         if (t.hasStarted) {
             log.debug "schedule(): ${t.id} already scheduled"
@@ -193,9 +193,9 @@ class TaskGraph {
     // NORMAL SUCCESSOR SCHEDULING
     // --------------------------------------------------------------------
 
-    private void scheduleNormalSuccessors(Task t) {
+    private void scheduleNormalSuccessors(ITask t) {
         t.successors.each { succId ->
-            Task succ = tasks[succId]
+            ITask succ = tasks[succId]
             scheduleIfReady(succ)
         }
     }
@@ -233,7 +233,7 @@ class TaskGraph {
 
                 // First schedule shard tasks
                 chosen.each { sid ->
-                    Task shardTask = tasks[sid]
+                    ITask shardTask = tasks[sid]
 
                     // Inject shard data into shard task
                     List shardData = router.getShardData(sid)
@@ -261,7 +261,7 @@ class TaskGraph {
     // READY CHECK
     // --------------------------------------------------------------------
 
-    private void scheduleIfReady(Task t) {
+    private void scheduleIfReady(ITask t) {
         if (t == null) return
 
         // Synchronize on the task to prevent race conditions when multiple
@@ -270,7 +270,7 @@ class TaskGraph {
             if (t.hasStarted) return
 
             boolean ready = t.predecessors.every { pid ->
-                def pt = tasks[pid]
+                ITask pt = tasks[pid]
                 pt.isCompleted() || pt.isSkipped()
             }
 

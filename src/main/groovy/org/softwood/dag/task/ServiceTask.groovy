@@ -8,7 +8,7 @@ import org.softwood.promise.Promise
  * The action receives the task context and the previous task's output value.
  */
 @Slf4j
-class ServiceTask extends Task<Object> {
+class ServiceTask extends TaskBase<Object> {
 
     Closure serviceAction
 

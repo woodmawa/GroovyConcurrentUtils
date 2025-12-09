@@ -413,7 +413,9 @@ class DataflowPromise<T> implements Promise<T> {
         DataflowVariable<R> nextVar = new DataflowVariable<>(variable.pool)
         DataflowPromise<R> next = new DataflowPromise<>(nextVar)
 
-        registerDependent(next)
+        // NOTE: Do NOT call registerDependent(next) for recover!
+        // registerDependent would immediately fail the recovered promise if THIS is already failed,
+        // which prevents the recovery function from running.
 
         this.onSuccess { T v -> next.accept((R)v) }
         this.onError { Throwable e ->

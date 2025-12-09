@@ -689,6 +689,36 @@ class FakePromise<T> implements Promise<T> {
 
     @Override
     boolean isCancelled() { cancelled }
+
+    @Override
+    Promise<T> whenComplete(java.util.function.BiConsumer<T, Throwable> action) {
+        return this
+    }
+
+    @Override
+    Promise<T> tap(java.util.function.Consumer<T> action) {
+        return this
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit) {
+        return this
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit, T fallbackValue) {
+        return this
+    }
+
+    @Override
+    Promise<T> orTimeout(long timeout, TimeUnit unit) {
+        return this
+    }
+
+    @Override
+    <U, R> Promise<R> zip(Promise<U> other, java.util.function.BiFunction<T, U, R> combiner) {
+        return new FakePromise<R>()
+    }
 }
 
 

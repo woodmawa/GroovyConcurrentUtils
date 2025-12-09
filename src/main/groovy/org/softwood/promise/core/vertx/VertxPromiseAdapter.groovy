@@ -666,4 +666,213 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
      * Original Vert.x context on which callbacks run.
      */
     Context getContext() { context }
+
+    // =========================================================================
+    // TIER 1 Enhancements - Implemented for Vertx backend
+    // =========================================================================
+
+    /**
+     * Register a callback that receives both the value and error.
+     * One will be null, the other will have the result.
+     *
+     * @param callback BiConsumer receiving (value, error)
+     * @return this promise
+     */
+    @Override
+    SoftPromise<T> whenComplete(java.util.function.BiConsumer<T, Throwable> callback) {
+        future.onComplete({ AsyncResult<T> ar ->
+            context.runOnContext { Void v ->
+                if (ar.succeeded()) {
+                    try {
+                        callback.accept(ar.result(), null)
+                    } catch (Throwable t) {
+                        log.warn("Exception in whenComplete callback: ${t.message}", t)
+                    }
+                } else {
+                    try {
+                        callback.accept(null, ar.cause())
+                    } catch (Throwable t) {
+                        log.warn("Exception in whenComplete callback: ${t.message}", t)
+                    }
+                }
+            }
+        } as Handler<AsyncResult<T>>)
+        return this
+    }
+
+    /**
+     * Execute a side effect with the successful value without changing it.
+     * Useful for logging, metrics, debugging.
+     *
+     * @param action side effect to perform
+     * @return this promise (value unchanged)
+     */
+    @Override
+    SoftPromise<T> tap(Consumer<T> action) {
+        future.onSuccess({ T v ->
+            context.runOnContext { Void ignored ->
+                try {
+                    action.accept(v)
+                } catch (Throwable t) {
+                    log.warn("Exception in tap: ${t.message}", t)
+                }
+            }
+        })
+        return this
+    }
+
+    /**
+     * Apply a timeout to this promise. If the promise doesn't complete
+     * within the specified time, it fails with TimeoutException.
+     *
+     * @param timeout timeout duration
+     * @param unit time unit
+     * @return new promise that times out
+     */
+    @Override
+    SoftPromise<T> timeout(long timeout, TimeUnit unit) {
+        VertxPromiseAdapter<T> result = VertxPromiseAdapter.<T>create(vertx)
+
+        // Set up timeout timer
+        long timerId = vertx.setTimer(unit.toMillis(timeout)) { Long id ->
+            result.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
+        }
+
+        // Wire the original future to the result
+        future.onComplete({ AsyncResult<T> ar ->
+            vertx.cancelTimer(timerId) // Cancel timeout on completion
+            if (ar.succeeded()) {
+                result.accept(ar.result())
+            } else {
+                result.fail(ar.cause())
+            }
+        } as Handler<AsyncResult<T>>)
+
+        return result
+    }
+
+    /**
+     * Apply a timeout with a fallback value. If the promise doesn't complete
+     * within the specified time, it completes with the fallback value.
+     *
+     * @param timeout timeout duration
+     * @param unit time unit
+     * @param fallbackValue value to use on timeout
+     * @return new promise with timeout and fallback
+     */
+    @Override
+    SoftPromise<T> timeout(long timeout, TimeUnit unit, T fallbackValue) {
+        VertxPromiseAdapter<T> result = VertxPromiseAdapter.<T>create(vertx)
+
+        // Set up timeout timer
+        long timerId = vertx.setTimer(unit.toMillis(timeout)) { Long id ->
+            result.accept(fallbackValue)
+        }
+
+        // Wire the original future to the result
+        future.onComplete({ AsyncResult<T> ar ->
+            vertx.cancelTimer(timerId) // Cancel timeout on completion
+            if (ar.succeeded()) {
+                result.accept(ar.result())
+            } else {
+                result.fail(ar.cause())
+            }
+        } as Handler<AsyncResult<T>>)
+
+        return result
+    }
+
+    /**
+     * Mutates this promise to timeout after the specified duration.
+     * This modifies the current promise rather than creating a new one.
+     *
+     * @param timeout timeout duration
+     * @param unit time unit
+     * @return this promise
+     */
+    @Override
+    SoftPromise<T> orTimeout(long timeout, TimeUnit unit) {
+        if (promise == null) {
+            log.warn("orTimeout called on non-owning adapter – cannot mutate")
+            return this
+        }
+
+        vertx.setTimer(unit.toMillis(timeout)) { Long id ->
+            if (!future.isComplete()) {
+                promise.tryFail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
+            }
+        }
+
+        return this
+    }
+
+    /**
+     * Combine this promise with another, applying a combining function
+     * when both complete successfully.
+     *
+     * @param other other promise to combine with
+     * @param combiner function to combine the two values
+     * @return new promise with combined result
+     */
+    @Override
+    <U, R> SoftPromise<R> zip(SoftPromise<U> other, java.util.function.BiFunction<T, U, R> combiner) {
+        VertxPromiseAdapter<R> result = VertxPromiseAdapter.<R>create(vertx)
+
+        // Use atomic references to store values and track completion
+        def value1 = new AtomicReference<T>()
+        def value2 = new AtomicReference<U>()
+        def completed1 = new java.util.concurrent.atomic.AtomicBoolean(false)
+        def completed2 = new java.util.concurrent.atomic.AtomicBoolean(false)
+        def failed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+        // Handler for this promise
+        this.onComplete { T v ->
+            value1.set(v)
+            completed1.set(true)
+
+            // Check if both are complete
+            if (completed2.get() && !failed.get()) {
+                context.runOnContext { Void ignored ->
+                    try {
+                        R combined = combiner.apply(value1.get(), value2.get())
+                        result.accept(combined)
+                    } catch (Throwable t) {
+                        result.fail(t)
+                    }
+                }
+            }
+        }
+
+        this.onError { Throwable e ->
+            if (failed.compareAndSet(false, true)) {
+                result.fail(e)
+            }
+        }
+
+        // Handler for other promise
+        other.onComplete { U v ->
+            value2.set(v)
+            completed2.set(true)
+
+            // Check if both are complete
+            if (completed1.get() && !failed.get()) {
+                context.runOnContext { Void ignored ->
+                    try {
+                        R combined = combiner.apply(value1.get(), value2.get())
+                        result.accept(combined)
+                    } catch (Throwable t) {
+                        result.fail(t)
+                    }
+                }
+            }
+        }
+
+        other.onError { Throwable e ->
+            if (failed.compareAndSet(false, true)) {
+                result.fail(e)
+            }
+        }
+
+        return result
+    }
 }

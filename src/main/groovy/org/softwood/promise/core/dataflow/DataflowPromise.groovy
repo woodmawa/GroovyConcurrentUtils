@@ -674,6 +674,193 @@ class DataflowPromise<T> implements Promise<T> {
     // Type Coercion
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // whenComplete - Unified Callback
+    // -------------------------------------------------------------------------
+
+    @Override
+    Promise<T> whenComplete(java.util.function.BiConsumer<T, Throwable> action) {
+        if (action == null) return this
+
+        // Register for both success and error
+        this.onSuccess { T v ->
+            try {
+                action.accept(v, null)
+            } catch (Throwable t) {
+                log.error("Error in whenComplete callback (success path)", t)
+            }
+        }
+
+        this.onError { Throwable e ->
+            try {
+                action.accept(null, e)
+            } catch (Throwable t) {
+                log.error("Error in whenComplete callback (error path)", t)
+            }
+        }
+
+        return this
+    }
+
+    // -------------------------------------------------------------------------
+    // Tap - Side Effects
+    // -------------------------------------------------------------------------
+
+    @Override
+    Promise<T> tap(Consumer<T> action) {
+        if (action == null) return this
+
+        return this.then { T v ->
+            try {
+                action.accept(v)
+            } catch (Throwable t) {
+                log.warn("Error in tap action (continuing)", t)
+            }
+            return v  // Return original value unchanged
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Timeout Operations
+    // -------------------------------------------------------------------------
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit) {
+        DataflowVariable<T> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<T> next = new DataflowPromise<>(nextVar)
+
+        // Schedule timeout
+        def scheduler = variable.executor
+        def timeoutFuture = CompletableFuture.runAsync({
+            try {
+                unit.sleep(timeout)
+                next.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+            }
+        }, scheduler)
+
+        // Wire up this promise completion
+        this.onSuccess { T v ->
+            timeoutFuture.cancel(true)
+            next.accept(v)
+        }
+
+        this.onError { Throwable e ->
+            timeoutFuture.cancel(true)
+            next.fail(e)
+        }
+
+        return next
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit, T fallbackValue) {
+        DataflowVariable<T> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<T> next = new DataflowPromise<>(nextVar)
+
+        // Schedule timeout with fallback
+        def scheduler = variable.executor
+        def timeoutFuture = CompletableFuture.runAsync({
+            try {
+                unit.sleep(timeout)
+                next.accept(fallbackValue)
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+            }
+        }, scheduler)
+
+        // Wire up this promise completion
+        this.onSuccess { T v ->
+            timeoutFuture.cancel(true)
+            next.accept(v)
+        }
+
+        this.onError { Throwable e ->
+            timeoutFuture.cancel(true)
+            next.fail(e)
+        }
+
+        return next
+    }
+
+    @Override
+    Promise<T> orTimeout(long timeout, TimeUnit unit) {
+        // Schedule timeout that modifies THIS promise
+        def scheduler = variable.executor
+        CompletableFuture.runAsync({
+            try {
+                unit.sleep(timeout)
+                this.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+            }
+        }, scheduler)
+
+        return this
+    }
+
+    // -------------------------------------------------------------------------
+    // Combining Operations
+    // -------------------------------------------------------------------------
+
+    @Override
+    <U, R> Promise<R> zip(Promise<U> other, java.util.function.BiFunction<T, U, R> combiner) {
+        Objects.requireNonNull(other, "other promise must not be null")
+        Objects.requireNonNull(combiner, "combiner must not be null")
+
+        DataflowVariable<R> nextVar = new DataflowVariable<>(variable.pool)
+        DataflowPromise<R> next = new DataflowPromise<>(nextVar)
+
+        // Use atomic reference to store values as they arrive
+        def thisValue = new java.util.concurrent.atomic.AtomicReference<T>()
+        def otherValue = new java.util.concurrent.atomic.AtomicReference<U>()
+        def thisCompleted = new java.util.concurrent.atomic.AtomicBoolean(false)
+        def otherCompleted = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+        // When THIS completes
+        this.onSuccess { T v ->
+            thisValue.set(v)
+            if (thisCompleted.compareAndSet(false, true)) {
+                // Check if other is also complete
+                if (otherCompleted.get()) {
+                    try {
+                        def result = combiner.apply(v, otherValue.get())
+                        next.accept(result)
+                    } catch (Throwable t) {
+                        next.fail(t)
+                    }
+                }
+            }
+        }
+
+        this.onError { Throwable e -> next.fail(e) }
+
+        // When OTHER completes
+        other.onSuccess { U u ->
+            otherValue.set(u)
+            if (otherCompleted.compareAndSet(false, true)) {
+                // Check if this is also complete
+                if (thisCompleted.get()) {
+                    try {
+                        def result = combiner.apply(thisValue.get(), u)
+                        next.accept(result)
+                    } catch (Throwable t) {
+                        next.fail(t)
+                    }
+                }
+            }
+        }
+
+        other.onError { Throwable e -> next.fail(e) }
+
+        return next
+    }
+
+    // -------------------------------------------------------------------------
+    // Type Coercion
+    // -------------------------------------------------------------------------
+
     @Override
     CompletableFuture<T> asType(Class clazz) {
         if (clazz == CompletableFuture) {

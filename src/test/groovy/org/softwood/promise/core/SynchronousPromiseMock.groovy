@@ -172,4 +172,68 @@ class SynchronousPromiseMock<T> implements Promise<T> {
     boolean isCancelled() {
         return cancelled
     }
+
+    // =========================================================================
+    // NEW: Enhanced Promise Methods
+    // =========================================================================
+
+    @Override
+    Promise<T> whenComplete(java.util.function.BiConsumer<T, Throwable> action) {
+        // Execute immediately since this is synchronous
+        if (failed) {
+            action.accept(null, error)
+        } else if (completed) {
+            action.accept(value, null)
+        }
+        return this
+    }
+
+    @Override
+    Promise<T> tap(java.util.function.Consumer<T> action) {
+        // Execute side effect immediately if completed successfully
+        if (completed && !failed) {
+            try {
+                action.accept(value)
+            } catch (Throwable t) {
+                // Log but don't propagate (tap doesn't break the chain)
+                System.err.println("Exception in tap: ${t.message}")
+            }
+        }
+        return this
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit) {
+        // Synchronous mock - already complete, so no timeout needed
+        return this
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit, T fallbackValue) {
+        // Synchronous mock - already complete, so no timeout needed
+        return this
+    }
+
+    @Override
+    Promise<T> orTimeout(long timeout, TimeUnit unit) {
+        // Synchronous mock - already complete, so no timeout needed
+        return this
+    }
+
+    @Override
+    <U, R> Promise<R> zip(Promise<U> other, java.util.function.BiFunction<T, U, R> combiner) {
+        // Synchronous implementation - combine immediately
+        if (failed) {
+            return new SynchronousPromiseMock<R>().fail(error)
+        }
+
+        try {
+            U otherValue = other.get()
+            R combined = combiner.apply(value, otherValue)
+            return new SynchronousPromiseMock<R>().accept(combined)
+        } catch (Throwable t) {
+            return new SynchronousPromiseMock<R>().fail(t)
+        }
+    }
+
 }

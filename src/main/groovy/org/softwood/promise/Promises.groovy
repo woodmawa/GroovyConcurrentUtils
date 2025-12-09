@@ -8,6 +8,7 @@ import org.softwood.promise.core.PromisePoolContext
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
 
 /**
@@ -410,5 +411,288 @@ class Promises {
     //alias for all
     static <T> Promise<List<T>> allOf(Iterable<Promise<T>> promises) {
         return all(promises)
+    }
+
+    // =========================================================================
+    // TIER 1 Enhancements - Timeout with static helper
+    // =========================================================================
+
+    /**
+     * Execute a task with a timeout. Returns the task result if it completes
+     * in time, otherwise fails with TimeoutException.
+     *
+     * @param timeout timeout duration
+     * @param unit time unit
+     * @param task task to execute
+     * @return promise that times out
+     */
+    static <T> Promise<T> timeout(long timeout, TimeUnit unit, Closure<T> task) {
+        return async(task).timeout(timeout, unit)
+    }
+
+    // =========================================================================
+    // TIER 2 Enhancements - Delay Operations
+    // =========================================================================
+
+    /**
+     * Returns a promise that completes after the specified delay.
+     * Useful for scheduling or rate limiting.
+     *
+     * @param delay delay duration
+     * @param unit time unit
+     * @return promise that completes after delay
+     */
+    static Promise<Void> delay(long delay, TimeUnit unit) {
+        Promise<Void> promise = newPromise()
+        
+        // Get current pool's executor
+        def pool = getCurrentPool()
+        def executor = pool ? pool.getExecutor() : java.util.concurrent.ForkJoinPool.commonPool()
+        
+        CompletableFuture.runAsync({
+            try {
+                unit.sleep(delay)
+                promise.accept(null)
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+                promise.fail(e)
+            }
+        }, executor)
+        
+        return promise
+    }
+
+    /**
+     * Execute a task after a delay.
+     *
+     * @param delay delay duration
+     * @param unit time unit  
+     * @param task task to execute after delay
+     * @return promise that completes with task result after delay
+     */
+    static <T> Promise<T> delay(long delay, TimeUnit unit, Closure<T> task) {
+        return delay(delay, unit).then { task.call() }
+    }
+
+    // =========================================================================
+    // TIER 2 Enhancements - Zip (Combining)
+    // =========================================================================
+
+    /**
+     * Combine two promises using a combining function.
+     * The result promise completes when both input promises complete successfully.
+     * If either fails, the result fails.
+     *
+     * @param p1 first promise
+     * @param p2 second promise
+     * @param combiner function to combine the two values
+     * @return combined promise
+     */
+    static <T, U, R> Promise<R> zip(Promise<T> p1, Promise<U> p2, 
+                                      java.util.function.BiFunction<T, U, R> combiner) {
+        return p1.zip(p2, combiner)
+    }
+
+    // =========================================================================
+    // TIER 2 Enhancements - Retry Logic
+    // =========================================================================
+
+    /**
+     * Execute a task with retry logic. Retries on failure up to maxAttempts.
+     * No delay between retries.
+     *
+     * @param maxAttempts maximum number of attempts (including initial try)
+     * @param task task to execute
+     * @return promise that succeeds on first success or fails after all attempts
+     */
+    static <T> Promise<T> retry(int maxAttempts, Closure<T> task) {
+        return retry(maxAttempts, 0, TimeUnit.MILLISECONDS, task)
+    }
+
+    /**
+     * Execute a task with retry logic and delay between attempts.
+     *
+     * @param maxAttempts maximum number of attempts (including initial try)
+     * @param delayBetweenAttempts delay between retry attempts
+     * @param unit time unit for delay
+     * @param task task to execute
+     * @return promise that succeeds on first success or fails after all attempts
+     */
+    static <T> Promise<T> retry(int maxAttempts, long delayBetweenAttempts, TimeUnit unit, Closure<T> task) {
+        if (maxAttempts < 1) {
+            return failed(new IllegalArgumentException("maxAttempts must be at least 1"))
+        }
+
+        Promise<T> resultPromise = newPromise()
+        def attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+        def errors = Collections.synchronizedList(new ArrayList<Throwable>())
+
+        Closure<Void> attemptTask
+        attemptTask = {
+            def currentAttempt = attemptCount.incrementAndGet()
+            
+            async(task)
+                .onComplete { T value ->
+                    resultPromise.accept(value)
+                }
+                .onError { Throwable error ->
+                    errors.add(error)
+                    
+                    if (currentAttempt >= maxAttempts) {
+                        // All attempts failed
+                        def aggregateError = new RuntimeException(
+                            "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
+                        )
+                        errors.each { aggregateError.addSuppressed(it) }
+                        resultPromise.fail(aggregateError)
+                    } else {
+                        // Retry after delay
+                        if (delayBetweenAttempts > 0) {
+                            delay(delayBetweenAttempts, unit).onComplete { attemptTask.call() }
+                        } else {
+                            attemptTask.call()
+                        }
+                    }
+                }
+        }
+
+        attemptTask.call()
+        return resultPromise
+    }
+
+    // =========================================================================
+    // TIER 3 Enhancements - Race
+    // =========================================================================
+
+    /**
+     * Returns a promise that completes when the first promise completes
+     * (either success or failure). Unlike {@link #any}, this doesn't wait
+     * for a success - it returns the first completion of any kind.
+     *
+     * @param promises iterable of promises to race
+     * @return promise that completes with first result
+     */
+    static <T> Promise<T> race(Iterable<Promise<T>> promises) {
+        Promise<T> resultPromise = newPromise()
+        def completed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+        def promiseList = promises.findAll { it != null }
+        
+        if (promiseList.isEmpty()) {
+            return newPromise(null)
+        }
+
+        promiseList.each { Promise<T> p ->
+            p.onComplete { T v ->
+                if (completed.compareAndSet(false, true)) {
+                    resultPromise.accept(v)
+                }
+            }
+
+            p.onError { Throwable e ->
+                if (completed.compareAndSet(false, true)) {
+                    resultPromise.fail(e)
+                }
+            }
+        }
+
+        return resultPromise
+    }
+
+    // =========================================================================
+    // TIER 3 Enhancements - Sequential Operations
+    // =========================================================================
+
+    /**
+     * Transform a collection of items into promises sequentially.
+     * Each promise is started only after the previous one completes.
+     * This is useful when you need to control concurrency or maintain order.
+     *
+     * @param items collection to transform
+     * @param mapper function that creates a promise for each item
+     * @return promise with list of results in order
+     */
+    static <T, R> Promise<List<R>> traverse(Iterable<T> items, 
+                                            java.util.function.Function<T, Promise<R>> mapper) {
+        def itemList = items?.toList() ?: []
+        
+        if (itemList.isEmpty()) {
+            return newPromise(Collections.emptyList())
+        }
+
+        Promise<List<R>> resultPromise = newPromise()
+        def results = Collections.synchronizedList(new ArrayList<R>())
+        def index = new java.util.concurrent.atomic.AtomicInteger(0)
+
+        Closure<Void> processNext
+        processNext = {
+            def currentIndex = index.getAndIncrement()
+            
+            if (currentIndex >= itemList.size()) {
+                // All done
+                resultPromise.accept(new ArrayList<R>(results))
+                return
+            }
+
+            T item = itemList[currentIndex]
+            Promise<R> promise = mapper.apply(item)
+
+            promise
+                .onComplete { R value ->
+                    results.add(value)
+                    processNext.call()
+                }
+                .onError { Throwable error ->
+                    resultPromise.fail(error)
+                }
+        }
+
+        processNext.call()
+        return resultPromise
+    }
+
+    /**
+     * Execute an iterable of promises sequentially (one after another).
+     * Unlike {@link #all} which runs in parallel, this waits for each
+     * promise to complete before starting the next.
+     *
+     * @param promises iterable of promises
+     * @return promise with list of results in order
+     */
+    static <T> Promise<List<T>> sequence(Iterable<Promise<T>> promises) {
+        def promiseList = promises?.findAll { it != null }?.toList() ?: []
+        
+        if (promiseList.isEmpty()) {
+            return newPromise(Collections.emptyList())
+        }
+
+        Promise<List<T>> resultPromise = newPromise()
+        def results = Collections.synchronizedList(new ArrayList<T>())
+        def index = new java.util.concurrent.atomic.AtomicInteger(0)
+
+        Closure<Void> processNext
+        processNext = {
+            def currentIndex = index.getAndIncrement()
+            
+            if (currentIndex >= promiseList.size()) {
+                // All done
+                resultPromise.accept(new ArrayList<T>(results))
+                return
+            }
+
+            Promise<T> promise = promiseList[currentIndex]
+
+            promise
+                .onComplete { T value ->
+                    results.add(value)
+                    processNext.call()
+                }
+                .onError { Throwable error ->
+                    resultPromise.fail(error)
+                }
+        }
+
+        processNext.call()
+        return resultPromise
     }
 }

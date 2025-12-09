@@ -303,4 +303,65 @@ class CompletableFuturePromise<T> implements Promise<T> {
         }
         throw new RuntimeException("conversion to type $clazz not supported")
     }
+
+    // =========================================================================
+    // TIER 1 Enhancements - Implemented for CompletableFuture backend
+    // =========================================================================
+
+    @Override
+    Promise<T> whenComplete(java.util.function.BiConsumer<T, Throwable> callback) {
+        future.whenComplete(callback)
+        return this
+    }
+
+    @Override
+    Promise<T> tap(Consumer<T> action) {
+        future.thenAccept { T value ->
+            try {
+                action.accept(value)
+            } catch (Throwable t) {
+                log.warn("Exception in tap: ${t.message}", t)
+            }
+        }
+        return this
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit) {
+        // CompletableFuture has built-in orTimeout that throws TimeoutException
+        CompletableFuture<T> timeoutFuture = future.orTimeout(timeout, unit)
+        return new CompletableFuturePromise<T>(timeoutFuture)
+    }
+
+    @Override
+    Promise<T> timeout(long timeout, TimeUnit unit, T fallbackValue) {
+        // Use completeOnTimeout which provides fallback instead of exception
+        CompletableFuture<T> timeoutFuture = future.completeOnTimeout(fallbackValue, timeout, unit)
+        return new CompletableFuturePromise<T>(timeoutFuture)
+    }
+
+    @Override
+    Promise<T> orTimeout(long timeout, TimeUnit unit) {
+        // Mutates this promise to timeout
+        future.orTimeout(timeout, unit)
+        return this
+    }
+
+    @Override
+    <U, R> Promise<R> zip(Promise<U> other, java.util.function.BiFunction<T, U, R> combiner) {
+        // Extract the CompletableFuture from the other promise
+        CompletableFuture<U> otherFuture
+        if (other instanceof CompletableFuturePromise) {
+            otherFuture = ((CompletableFuturePromise<U>) other).future
+        } else {
+            // Convert to CompletableFuture if it's a different implementation
+            otherFuture = new CompletableFuture<U>()
+            other.onComplete { U value -> otherFuture.complete(value) }
+            other.onError { Throwable error -> otherFuture.completeExceptionally(error) }
+        }
+
+        // Use thenCombine which waits for both to complete
+        CompletableFuture<R> combined = future.thenCombine(otherFuture, combiner)
+        return new CompletableFuturePromise<R>(combined)
+    }
 }

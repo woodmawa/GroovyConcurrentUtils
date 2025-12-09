@@ -424,6 +424,24 @@ class DataflowPromise<T> implements Promise<T> {
             }
         }
 
+        // CRITICAL: Handle already-completed promises synchronously
+        if (this.isCompleted()) {
+            try {
+                next.accept((R)variable.get())
+            } catch (Throwable t) {
+                next.fail(t)
+            }
+        } else if (this.isCancelled()) {
+            next.cancel(false)
+        } else if (this.isDone()) {
+            // Already failed - apply recovery function synchronously
+            try {
+                next.accept(fn.apply(variable.getError()))
+            } catch (Throwable t) {
+                next.fail(t)
+            }
+        }
+
         return next
     }
 

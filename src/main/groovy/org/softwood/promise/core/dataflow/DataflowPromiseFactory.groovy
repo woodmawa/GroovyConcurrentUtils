@@ -129,9 +129,19 @@ class DataflowPromiseFactory implements PromiseFactory {
         DataflowVariable<T> variable = dataflowFactory.createDataflowVariable()
         def promise = new DataflowPromise<T>(variable)
 
+        // Use try-catch to handle already-completed futures gracefully
         future.whenComplete { value, error ->
-            if (error != null) variable.bindError(error)
-            else variable.bind(value)
+            try {
+                if (error != null) {
+                    variable.bindError(error)
+                } else {
+                    variable.bind(value)
+                }
+            } catch (IllegalStateException e) {
+                // DataflowVariable already bound - this can happen with
+                // already-completed futures that trigger callback synchronously
+                log.debug("DataflowVariable already bound when adapting CompletableFuture")
+            }
         }
 
         return promise
@@ -140,11 +150,27 @@ class DataflowPromiseFactory implements PromiseFactory {
     /** {@inheritDoc} */
     @Override
     <T> Promise<T> from(Promise<T> otherPromise) {
+        // If it's already a DataflowPromise, return as-is (no wrapping needed)
+        if (otherPromise instanceof DataflowPromise) {
+            return otherPromise
+        }
+
         DataflowVariable<T> variable = dataflowFactory.createDataflowVariable()
         def promise = new DataflowPromise<T>(variable)
 
-        otherPromise.onComplete { val -> variable.bind(val) }
-        otherPromise.onError { err -> variable.bindError(err) }
+        // Use a flag to ensure single-assignment
+        def completed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+        otherPromise.onComplete { val ->
+            if (completed.compareAndSet(false, true)) {
+                variable.bind(val)
+            }
+        }
+        otherPromise.onError { err ->
+            if (completed.compareAndSet(false, true)) {
+                variable.bindError(err)
+            }
+        }
 
         return promise
     }

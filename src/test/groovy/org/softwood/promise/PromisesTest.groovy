@@ -394,7 +394,8 @@ class PromisesTest {
             "recovered value"
         }
         
-        def result = promise.get()
+        // Give async task time to fail and recover
+        def result = promise.get(2, TimeUnit.SECONDS)
         assertEquals("recovered value", result)
     }
 

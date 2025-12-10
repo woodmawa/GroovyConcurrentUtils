@@ -8,7 +8,12 @@ import org.softwood.promise.core.PromisePoolContext
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.function.BiFunction
+import java.util.function.Function
 import java.util.function.Supplier
 
 /**
@@ -50,21 +55,22 @@ import java.util.function.Supplier
  * @author Will Woodman
  * @since 2025
  */
+
 @Slf4j
 class Promises {
 
     /**
-    * Execute a closure with a specific pool active.
-    * All promises created within this scope will use the given pool.
-    *
-    * Example:
-    * <pre>
-    * def customPool = new ConcurrentPool(4)
-            * Promises.withPool(customPool) {
-        *     def p = Promises.async { ... }  // uses customPool
-                *     return p.get()
-                * }
-            * </pre>
+     * Execute a closure with a specific pool active.
+     * All promises created within this scope will use the given pool.
+     *
+     * Example:
+     * <pre>
+     * def customPool = new ConcurrentPool(4)
+     * Promises.withPool(customPool) {
+     *     def p = Promises.async { ... }  // uses customPool
+     *     return p.get()
+     * }
+     * </pre>
      */
     static <T> T withPool(ExecutorPool pool, Closure<T> closure) {
         return PromisePoolContext.withPool(pool, closure)
@@ -278,7 +284,7 @@ class Promises {
         }
 
         // 2. if result is a DataflowVariable? Adapt via DataflowPromiseFactory / DATAFLOW impl
-        if (result instanceof org.softwood.dataflow.DataflowVariable) {
+        if (result instanceof DataflowVariable) {
             // Use the DATAFLOW implementation factory to wrap it
             def implFactory = PromiseConfiguration.getFactory(PromiseImplementation.DATAFLOW)
             if (implFactory instanceof DataflowPromiseFactory) {
@@ -310,50 +316,80 @@ class Promises {
     }
 
     /**
-     * Wait for any of the given promises to complete successfully.
+     * Execute multiple promises and return the first one that succeeds.
+     * If all promises fail, returns a failed promise with aggregated errors.
      *
-     * <p>Returns a Promise that completes with the value of the first
-     * Promise in the iterable to complete successfully.
-     * If all promises fail, this promise will fail with an aggregation
-     * of errors or the error of the last promise to fail.</p>
-     *
-     * @param promises iterable of promises to wait on
+     * @param promises iterable of promises to race
      * @param <T> value type
-     * @return new Promise
+     * @return promise that completes with the first successful result
      */
     static <T> Promise<T> any(Iterable<Promise<T>> promises) {
-        Promise<T> resultPromise = newPromise()
-        def errorCount = 0
-        def totalPromises = 0
-        // Simple list to collect errors, but typically you'd want a more
-        // robust structure or just the last error for 'any' failure.
-        def errors = []
-
-        // 1. Convert to a list to count and iterate safely
-        def promiseList = promises.findAll { it != null }  // ✅ Filter out nulls!
-        totalPromises = promiseList.size()
+        List<Promise<T>> promiseList = promises.findAll { it != null }
+        int totalPromises = promiseList.size()
 
         if (totalPromises == 0) {
-            // Resolve immediately if there are no promises
-            return newPromise(null) // or newPromise(T) if T is non-void
+            // Return a failed promise instead of null
+            return failed(new IllegalArgumentException("No promises provided to any()"))
         }
 
-        // 2. Iterate and register completion handlers
-        promiseList.each { Promise<T> p ->
-            p.onComplete { T v ->
-                // Fulfills immediately on first success
-                resultPromise.accept(v)
+        // For already-completed promises, try to handle synchronously
+        // But we can't rely on isDone() - just try to get values immediately
+        try {
+            // Try to find a successful promise by checking if get() works immediately
+            for (Promise<T> p in promiseList) {
+                try {
+                    // Try non-blocking get with timeout
+                    def value = p.get(0, TimeUnit.MILLISECONDS)
+                    // If we got here, this promise is already successful
+                    return newPromise(value)
+                } catch (java.util.concurrent.TimeoutException e) {
+                    // Promise not done yet, continue
+                    continue
+                } catch (Exception e) {
+                    // Promise failed, continue looking
+                    continue
+                }
+            }
+        } catch (Exception e) {
+            // If immediate check fails, fall through to async handling
+        }
+
+        // Not all done yet OR all failed - register async handlers
+        Promise<T> resultPromise = newPromise()
+        AtomicInteger errorCount = new AtomicInteger(0)
+        AtomicBoolean completed = new AtomicBoolean(false)
+        Set<String> errorMessages = Collections.synchronizedSet(new HashSet<String>())
+        List<Throwable> errors = Collections.synchronizedList(new ArrayList<Throwable>())
+
+        promiseList.each { p ->
+            // Success handler - accept first successful result
+            p.onComplete { value ->
+                if (completed.compareAndSet(false, true)) {
+                    resultPromise.accept(value)
+                }
             }
 
-            p.onError { Throwable e ->
-                errors.add(e)
-                errorCount++
+            // Error handler - track failures
+            p.onError { error ->
+                // Deduplicate by error message to avoid counting same error twice
+                boolean isNewError = errorMessages.add(error.message)
+                if (isNewError) {
+                    synchronized(errors) {
+                        errors.add(error)
+                    }
+                    int currentErrorCount = errorCount.incrementAndGet()
 
-                // If all promises have failed, fail the resultPromise
-                if (errorCount == totalPromises) {
-                    // For simplicity, we'll fail with a generic exception wrapping the errors.
-                    // A production version might use a specific 'AggregateException'.
-                    resultPromise.fail(new RuntimeException("All promises failed: " + errors))
+                    // If all promises have failed, fail the result
+                    if (currentErrorCount == totalPromises) {
+                        if (completed.compareAndSet(false, true)) {
+                            resultPromise.fail(
+                                    new RuntimeException(
+                                            "All ${totalPromises} promises failed. Errors: ${errors*.message.join(', ')}",
+                                            errors[0]
+                                    )
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -372,34 +408,34 @@ class Promises {
      * @param <T> value type
      * @return new Promise<List<T>>
      */
+    //alias for all
+    static <T> Promise<List<T>> allOf (Iterable<Promise<T>> promises) {
+        all(promises)
+    }
+
     static <T> Promise<List<T>> all(Iterable<Promise<T>> promises) {
         Promise<List<T>> resultPromise = newPromise()
 
-        // 1. Convert to a list and set up result storage
-        def promiseList = promises.findAll { it != null }  // ✅ Filter out nulls!
+        def promiseList = promises.findAll { it != null }
         def totalPromises = promiseList.size()
         def results = new ArrayList(Collections.nCopies(totalPromises, null))
-        def successCount = 0
+        def successCount = new AtomicInteger(0)
 
         if (totalPromises == 0) {
-            // Resolve immediately if there are no promises
             return newPromise(Collections.emptyList())
         }
 
-        // 2. Register failure and success handlers
-        promiseList.eachWithIndex { Promise<T> p, int index ->
-            // Failure: Fail the result immediately
-            p.onError { Throwable e ->
+        // ✅ FIX: Remove explicit types "Promise<T> p, int index"
+        promiseList.eachWithIndex { p, index ->
+            p.onError { e ->
                 resultPromise.fail(e)
             }
 
-            // Success: Store result and check if all are complete
-            p.onComplete { T v ->
-                results[index] = v // Store result in the correct position
-                successCount++
+            p.onComplete { v ->
+                results[index] = v
+                int currentCount = successCount.incrementAndGet()
 
-                // If all have succeeded, fulfill the resultPromise
-                if (successCount == totalPromises) {
+                if (currentCount == totalPromises) {
                     resultPromise.accept(results)
                 }
             }
@@ -408,10 +444,6 @@ class Promises {
         return resultPromise
     }
 
-    //alias for all
-    static <T> Promise<List<T>> allOf(Iterable<Promise<T>> promises) {
-        return all(promises)
-    }
 
     // =========================================================================
     // TIER 1 Enhancements - Timeout with static helper
@@ -442,23 +474,21 @@ class Promises {
      * @param unit time unit
      * @return promise that completes after delay
      */
-    static Promise<Void> delay(long delay, TimeUnit unit) {
+    static Promise<Void> delay(long delay, TimeUnit unit = TimeUnit.MILLISECONDS) {
         Promise<Void> promise = newPromise()
-        
-        // Get current pool's executor
-        def pool = getCurrentPool()
-        def executor = pool ? pool.getExecutor() : java.util.concurrent.ForkJoinPool.commonPool()
-        
+        def executor = PromisePoolContext.getCurrentPool()?.executor ?: ForkJoinPool.commonPool()
+
         CompletableFuture.runAsync({
             try {
                 unit.sleep(delay)
-                promise.accept(null)
+                // ✅ FIX: Cast null to Void
+                promise.accept((Void) null)
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt()
                 promise.fail(e)
             }
         }, executor)
-        
+
         return promise
     }
 
@@ -466,7 +496,7 @@ class Promises {
      * Execute a task after a delay.
      *
      * @param delay delay duration
-     * @param unit time unit  
+     * @param unit time unit
      * @param task task to execute after delay
      * @return promise that completes with task result after delay
      */
@@ -488,8 +518,8 @@ class Promises {
      * @param combiner function to combine the two values
      * @return combined promise
      */
-    static <T, U, R> Promise<R> zip(Promise<T> p1, Promise<U> p2, 
-                                      java.util.function.BiFunction<T, U, R> combiner) {
+    static <T, U, R> Promise<R> zip(Promise<T> p1, Promise<U> p2,
+                                    BiFunction<T, U, R> combiner) {
         return p1.zip(p2, combiner)
     }
 
@@ -497,17 +527,6 @@ class Promises {
     // TIER 2 Enhancements - Retry Logic
     // =========================================================================
 
-    /**
-     * Execute a task with retry logic. Retries on failure up to maxAttempts.
-     * No delay between retries.
-     *
-     * @param maxAttempts maximum number of attempts (including initial try)
-     * @param task task to execute
-     * @return promise that succeeds on first success or fails after all attempts
-     */
-    static <T> Promise<T> retry(int maxAttempts, Closure<T> task) {
-        return retry(maxAttempts, 0, TimeUnit.MILLISECONDS, task)
-    }
 
     /**
      * Execute a task with retry logic and delay between attempts.
@@ -518,47 +537,45 @@ class Promises {
      * @param task task to execute
      * @return promise that succeeds on first success or fails after all attempts
      */
-    static <T> Promise<T> retry(int maxAttempts, long delayBetweenAttempts, TimeUnit unit, Closure<T> task) {
-        if (maxAttempts < 1) {
-            return failed(new IllegalArgumentException("maxAttempts must be at least 1"))
-        }
-
+    static <T> Promise<T> retry(int maxAttempts, long delayBetweenAttempts = 0,
+                                TimeUnit unit = TimeUnit.MILLISECONDS,
+                                Closure<T> task) {
         Promise<T> resultPromise = newPromise()
-        def attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+        def attemptCount = new AtomicInteger(0)
         def errors = Collections.synchronizedList(new ArrayList<Throwable>())
 
-        Closure<Void> attemptTask
+        // ✅ FIX: Don't specify Closure<Void>, just use Closure
+        Closure attemptTask
         attemptTask = {
             def currentAttempt = attemptCount.incrementAndGet()
-            
+
             async(task)
-                .onComplete { T value ->
-                    resultPromise.accept(value)
-                }
-                .onError { Throwable error ->
-                    errors.add(error)
-                    
-                    if (currentAttempt >= maxAttempts) {
-                        // All attempts failed
-                        def aggregateError = new RuntimeException(
-                            "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
-                        )
-                        errors.each { aggregateError.addSuppressed(it) }
-                        resultPromise.fail(aggregateError)
-                    } else {
-                        // Retry after delay
-                        if (delayBetweenAttempts > 0) {
-                            delay(delayBetweenAttempts, unit).onComplete { attemptTask.call() }
+                    .onComplete { value ->
+                        resultPromise.accept(value)
+                    }
+                    .onError { error ->
+                        errors.add(error)
+
+                        if (currentAttempt >= maxAttempts) {
+                            def aggregateError = new RuntimeException(
+                                    "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
+                            )
+                            errors.each { aggregateError.addSuppressed(it) }
+                            resultPromise.fail(aggregateError)
                         } else {
-                            attemptTask.call()
+                            if (delayBetweenAttempts > 0) {
+                                delay(delayBetweenAttempts, unit).onComplete { attemptTask.call() }
+                            } else {
+                                attemptTask.call()
+                            }
                         }
                     }
-                }
         }
 
         attemptTask.call()
         return resultPromise
     }
+
 
     // =========================================================================
     // TIER 3 Enhancements - Race
@@ -574,22 +591,23 @@ class Promises {
      */
     static <T> Promise<T> race(Iterable<Promise<T>> promises) {
         Promise<T> resultPromise = newPromise()
-        def completed = new java.util.concurrent.atomic.AtomicBoolean(false)
+        AtomicBoolean completed = new AtomicBoolean(false)
 
         def promiseList = promises.findAll { it != null }
-        
+
         if (promiseList.isEmpty()) {
             return newPromise(null)
         }
 
-        promiseList.each { Promise<T> p ->
-            p.onComplete { T v ->
+        // ✅ FIX: Remove explicit type "Promise<T> p"
+        promiseList.each { p ->
+            p.onComplete { v ->
                 if (completed.compareAndSet(false, true)) {
                     resultPromise.accept(v)
                 }
             }
 
-            p.onError { Throwable e ->
+            p.onError { e ->
                 if (completed.compareAndSet(false, true)) {
                     resultPromise.fail(e)
                 }
@@ -598,6 +616,7 @@ class Promises {
 
         return resultPromise
     }
+
 
     // =========================================================================
     // TIER 3 Enhancements - Sequential Operations
@@ -612,22 +631,22 @@ class Promises {
      * @param mapper function that creates a promise for each item
      * @return promise with list of results in order
      */
-    static <T, R> Promise<List<R>> traverse(Iterable<T> items, 
-                                            java.util.function.Function<T, Promise<R>> mapper) {
+    static <T, R> Promise<List<R>> traverse(Iterable<T> items,
+                                            Function<T, Promise<R>> mapper) {
         def itemList = items?.toList() ?: []
-        
+
         if (itemList.isEmpty()) {
             return newPromise(Collections.emptyList())
         }
 
         Promise<List<R>> resultPromise = newPromise()
         def results = Collections.synchronizedList(new ArrayList<R>())
-        def index = new java.util.concurrent.atomic.AtomicInteger(0)
+        def index = new AtomicInteger(0)
 
-        Closure<Void> processNext
+        Closure processNext
         processNext = {
             def currentIndex = index.getAndIncrement()
-            
+
             if (currentIndex >= itemList.size()) {
                 // All done
                 resultPromise.accept(new ArrayList<R>(results))
@@ -638,13 +657,13 @@ class Promises {
             Promise<R> promise = mapper.apply(item)
 
             promise
-                .onComplete { R value ->
-                    results.add(value)
-                    processNext.call()
-                }
-                .onError { Throwable error ->
-                    resultPromise.fail(error)
-                }
+                    .onComplete { R value ->
+                        results.add(value)
+                        processNext.call()
+                    }
+                    .onError { Throwable error ->
+                        resultPromise.fail(error)
+                    }
         }
 
         processNext.call()
@@ -661,35 +680,35 @@ class Promises {
      */
     static <T> Promise<List<T>> sequence(Iterable<Promise<T>> promises) {
         def promiseList = promises?.findAll { it != null }?.toList() ?: []
-        
+
         if (promiseList.isEmpty()) {
             return newPromise(Collections.emptyList())
         }
 
         Promise<List<T>> resultPromise = newPromise()
         def results = Collections.synchronizedList(new ArrayList<T>())
-        def index = new java.util.concurrent.atomic.AtomicInteger(0)
+        def index = new AtomicInteger(0)
 
-        Closure<Void> processNext
+        Closure processNext
         processNext = {
             def currentIndex = index.getAndIncrement()
-            
+
             if (currentIndex >= promiseList.size()) {
                 // All done
                 resultPromise.accept(new ArrayList<T>(results))
                 return
             }
 
-            Promise<T> promise = promiseList[currentIndex]
+            Promise<T> promise = promiseList[currentIndex] as Promise<T>
 
             promise
-                .onComplete { T value ->
-                    results.add(value)
-                    processNext.call()
-                }
-                .onError { Throwable error ->
-                    resultPromise.fail(error)
-                }
+                    .onComplete { T value ->
+                        results.add(value)
+                        processNext.call()
+                    }
+                    .onError { Throwable error ->
+                        resultPromise.fail(error)
+                    }
         }
 
         processNext.call()

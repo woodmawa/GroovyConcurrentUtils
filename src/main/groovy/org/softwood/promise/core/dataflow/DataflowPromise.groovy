@@ -6,6 +6,7 @@ import org.softwood.promise.Promise
 import org.softwood.promise.core.PromiseState
 
 import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.*
 
@@ -55,15 +56,20 @@ class DataflowPromise<T> implements Promise<T> {
 
         // When DFV resolves successfully
         variable.whenAvailable { T v ->
-            state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+            log.debug("whenAvailable callback fired, value: ${v}, current state: ${state.get()}")
+            boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+            log.debug("whenAvailable CAS PENDING->COMPLETED: ${casResult}, final state: ${state.get()}")
         }
 
         // When DFV resolves with an error
         variable.whenError { Throwable err ->
+            log.debug("whenError callback fired, error: ${err.class.simpleName}: ${err.message}, current state: ${state.get()}")
             if (err instanceof CancellationException) {
-                state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
+                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
+                log.debug("whenError CAS PENDING->CANCELLED: ${casResult}, final state: ${state.get()}")
             } else {
-                state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+                log.debug("whenError CAS PENDING->FAILED: ${casResult}, final state: ${state.get()}")
             }
         }
     }
@@ -74,22 +80,70 @@ class DataflowPromise<T> implements Promise<T> {
 
     private PromiseState deriveStateFromVariable() {
         PromiseState s = state.get()
-        if (s != PromiseState.PENDING) return s
+        log.debug("deriveStateFromVariable() called, current state: ${s}, variable.isBound(): ${variable.isBound()}")
 
-        if (!variable.isBound()) return s
-
-        if (variable.hasError()) {
-            Throwable err = variable.getError()
-            if (err instanceof CancellationException) {
-                state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
-            } else {
-                state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-            }
-        } else {
-            state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+        if (s != PromiseState.PENDING) {
+            log.debug("deriveStateFromVariable() returning early, state: ${s}")
+            return s
         }
 
-        return state.get()
+        // State is PENDING - check if variable is actually bound
+        if (!variable.isBound()) {
+            log.debug("deriveStateFromVariable() variable not bound, returning PENDING")
+            return s
+        }
+
+        // Variable is bound - update state based on variable's state
+        log.debug("deriveStateFromVariable() variable is bound, hasError: ${variable.hasError()}")
+        if (variable.hasError()) {
+            Throwable err = variable.getError()
+            log.debug("deriveStateFromVariable() variable has error: ${err.class.simpleName}: ${err.message}")
+            if (err instanceof CancellationException) {
+                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
+                log.debug("deriveStateFromVariable() CAS PENDING->CANCELLED: ${casResult}")
+            } else {
+                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+                log.debug("deriveStateFromVariable() CAS PENDING->FAILED: ${casResult}")
+            }
+        } else {
+            boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+            log.debug("deriveStateFromVariable() CAS PENDING->COMPLETED: ${casResult}")
+        }
+
+        PromiseState finalState = state.get()
+        log.debug("deriveStateFromVariable() returning state: ${finalState}")
+        return finalState
+    }
+
+    /**
+     * Aggressively check if this promise is done by checking both state and variable.
+     * This is needed because of potential race conditions between state updates and
+     * variable binding.
+     */
+    private boolean isDoneInternal() {
+        // First check cached state
+        PromiseState s = state.get()
+        log.debug("isDoneInternal() called, state: ${s}, variable.isBound(): ${variable.isBound()}")
+
+        if (s != PromiseState.PENDING) {
+            log.debug("isDoneInternal() returning true (state != PENDING)")
+            return true
+        }
+
+        // State says PENDING - double-check with variable directly
+        if (variable.isBound()) {
+            log.debug("isDoneInternal() state is PENDING but variable is bound! Forcing sync...")
+            // Variable is bound but state hasn't been updated yet
+            // Force synchronization
+            deriveStateFromVariable()
+            PromiseState newState = state.get()
+            boolean result = newState != PromiseState.PENDING
+            log.debug("isDoneInternal() after sync, state: ${newState}, returning: ${result}")
+            return result
+        }
+
+        log.debug("isDoneInternal() returning false (state PENDING, variable not bound)")
+        return false
     }
 
     private void registerDependent(Promise<?> other) {
@@ -192,18 +246,49 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     Promise<T> fail(Throwable error) {
+        log.debug("fail() called with error: ${error.class.simpleName}: ${error.message}, current state: ${state.get()}")
+
         if (error instanceof CancellationException) {
             cancel(false)
             return this
         }
 
-        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
+        // Always try to transition to FAILED state
+        boolean transitioned = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
+        log.debug("fail() CAS result: ${transitioned}, state after CAS: ${state.get()}")
+
+        if (transitioned) {
+            // We transitioned from PENDING → FAILED
             try {
+                log.debug("fail() calling variable.bindError(), variable.isBound() = ${variable.isBound()}")
                 variable.bindError(error)
+                log.debug("fail() variable.bindError() completed, variable.isBound() = ${variable.isBound()}, variable.hasError() = ${variable.hasError()}")
             } catch (IllegalStateException e) {
                 log.debug("DFV already bound in fail(): ${e.message}")
             }
+        } else {
+            // State was already non-PENDING (COMPLETED, FAILED, or CANCELLED)
+            // Force state to FAILED if not already terminal
+            PromiseState currentState = state.get()
+            log.debug("fail() CAS failed, current state: ${currentState}")
+            if (currentState != PromiseState.FAILED && currentState != PromiseState.CANCELLED) {
+                state.set(PromiseState.FAILED)
+                log.debug("fail() forced state to FAILED")
+            }
+            // Try to bind error anyway (will fail silently if already bound)
+            try {
+                variable.bindError(error)
+            } catch (IllegalStateException e) {
+                log.debug("DFV already bound in fail() (force): ${e.message}")
+            }
         }
+
+        // CRITICAL: Force state synchronization from variable to ensure isDone() works
+        // This handles race conditions where callbacks haven't fired yet
+        log.debug("fail() calling deriveStateFromVariable() before return, state: ${state.get()}, variable.isBound(): ${variable.isBound()}")
+        deriveStateFromVariable()
+        log.debug("fail() returning, final state: ${state.get()}, variable.isBound(): ${variable.isBound()}, variable.hasError(): ${variable.hasError()}")
+
         return this
     }
 
@@ -300,7 +385,7 @@ class DataflowPromise<T> implements Promise<T> {
     // State Queries
     // -------------------------------------------------------------------------
 
-    @Override boolean isDone()       { deriveStateFromVariable() != PromiseState.PENDING }
+    @Override boolean isDone()       { isDoneInternal() }
     @Override boolean isCompleted()  { deriveStateFromVariable() == PromiseState.COMPLETED }
     @Override boolean isCancelled()  { deriveStateFromVariable() == PromiseState.CANCELLED }
 
@@ -312,7 +397,7 @@ class DataflowPromise<T> implements Promise<T> {
     Promise<T> onSuccess(Consumer<T> c) {
         if (c == null) return this
         variable.whenAvailable { v -> c.accept(v) }
-        
+
         // CRITICAL: If already completed, invoke callback immediately
         if (this.isCompleted()) {
             try {
@@ -321,7 +406,7 @@ class DataflowPromise<T> implements Promise<T> {
                 log.error("Error in onSuccess callback (immediate invocation)", t)
             }
         }
-        
+
         return this
     }
 
@@ -329,7 +414,7 @@ class DataflowPromise<T> implements Promise<T> {
     Promise<T> onError(Consumer<Throwable> c) {
         if (c == null) return this
         variable.whenError { e -> c.accept(e) }
-        
+
         // CRITICAL: If already failed, invoke callback immediately
         if (this.isDone() && !this.isCompleted() && !this.isCancelled()) {
             try {
@@ -338,7 +423,7 @@ class DataflowPromise<T> implements Promise<T> {
                 log.error("Error in onError callback (immediate invocation)", t)
             }
         }
-        
+
         return this
     }
 
@@ -717,7 +802,7 @@ class DataflowPromise<T> implements Promise<T> {
                 log.warn("Error in tap action (continuing)", t)
             }
             return v  // Return original value unchanged
-        }
+        } as Promise<T>
     }
 
     // -------------------------------------------------------------------------
@@ -813,10 +898,10 @@ class DataflowPromise<T> implements Promise<T> {
         DataflowPromise<R> next = new DataflowPromise<>(nextVar)
 
         // Use atomic reference to store values as they arrive
-        def thisValue = new java.util.concurrent.atomic.AtomicReference<T>()
-        def otherValue = new java.util.concurrent.atomic.AtomicReference<U>()
-        def thisCompleted = new java.util.concurrent.atomic.AtomicBoolean(false)
-        def otherCompleted = new java.util.concurrent.atomic.AtomicBoolean(false)
+        def thisValue = new AtomicReference<T>()
+        def otherValue = new AtomicReference<U>()
+        def thisCompleted = new AtomicBoolean(false)
+        def otherCompleted = new AtomicBoolean(false)
 
         // When THIS completes
         this.onSuccess { T v ->

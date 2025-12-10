@@ -69,10 +69,16 @@ class Tasks {
             promises.add(resultPromise)
         }
 
-        // Wait for all to complete
+        // ✅ FIX: Wait individually and collect manually instead of Promises.all()
         log.debug "Tasks.all(): waiting for ${promises.size()} tasks to complete"
-        Promise<List<T>> allPromise = Promises.all(promises)
-        return allPromise.get()
+        List<T> results = []
+        for (Promise<?> promise : promises) {
+            def result = promise.get()  // Wait for this promise
+            results.add(result as T)     // Collect the result
+        }
+        log.debug "Tasks.all(): all tasks completed, returning ${results.size()} results"
+
+        return results
     }
 
     /**
@@ -98,12 +104,14 @@ class Tasks {
         dsl.resolveStrategy = Closure.DELEGATE_FIRST
         dsl.call(ctx)
 
-        // Execute all tasks and collect promises
-        List<Promise<?>> promises = tasksDsl.tasks.collect { task ->
+        // Execute all tasks and collect promises - use EXPLICIT LOOP
+        List<Promise<?>> promises = []
+        for (ITask task : tasksDsl.tasks) {
             log.debug "Tasks.any(): executing task ${task.id}"
             Promise<?> nullPromise = ctx.promiseFactory.createPromise()
             nullPromise.accept(null)
-            task.execute(nullPromise)
+            Promise<?> resultPromise = task.execute(nullPromise)
+            promises.add(resultPromise)
         }
 
         // Wait for first to complete
@@ -279,14 +287,19 @@ class Tasks {
         dsl.resolveStrategy = Closure.DELEGATE_FIRST
         dsl.call(ctx)
 
-        // Execute all tasks and return promises
-        return tasksDsl.tasks.collect { task ->
+        // Execute all tasks and return promises - EXPLICIT LOOP
+        List<Promise<?>> promises = []
+        for (ITask task : tasksDsl.tasks) {
             log.debug "Tasks.parallel(): starting task ${task.id}"
             Promise<?> nullPromise = ctx.promiseFactory.createPromise()
             nullPromise.accept(null)
-            task.execute(nullPromise)
+            Promise<?> resultPromise = task.execute(nullPromise)
+            promises.add(resultPromise)
         }
+
+        return promises
     }
+
 
     /**
      * Execute tasks with a shared context and return the context.
@@ -311,16 +324,22 @@ class Tasks {
         dsl.resolveStrategy = Closure.DELEGATE_FIRST
         dsl.call(ctx)
 
-        // Execute all tasks
-        List<Promise<?>> promises = tasksDsl.tasks.collect { task ->
+        // Execute all tasks - EXPLICIT LOOP
+        List<Promise<?>> promises = []
+        for (ITask task : tasksDsl.tasks) {
             log.debug "Tasks.withContext(): executing task ${task.id}"
             Promise<?> nullPromise = ctx.promiseFactory.createPromise()
             nullPromise.accept(null)
-            task.execute(nullPromise)
+            Promise<?> resultPromise = task.execute(nullPromise)
+            promises.add(resultPromise)
         }
 
-        // Wait for all to complete
-        Promises.all(promises).get()
+        // ✅ FIX: Wait for each promise individually instead of Promises.all()
+        log.debug "Tasks.withContext(): waiting for ${promises.size()} tasks individually"
+        for (Promise<?> promise : promises) {
+            promise.get()  // Wait for this promise to complete
+        }
+        log.debug "Tasks.withContext(): all tasks completed"
 
         return ctx
     }

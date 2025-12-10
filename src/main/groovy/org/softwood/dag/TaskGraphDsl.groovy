@@ -1,6 +1,8 @@
 package org.softwood.dag
 
 import org.softwood.dag.task.DefaultTaskEventDispatcher
+import org.softwood.dag.task.TaskFactory
+import org.softwood.dag.task.TaskType
 import org.softwood.dag.task.ServiceTask
 import org.softwood.dag.task.ITask
 
@@ -27,11 +29,16 @@ class TaskGraphDsl {
         this.graph = graph
     }
 
-    // ----------------------------------------------------
-    // Create service task
-    // ----------------------------------------------------
+    // ============================================================================
+    // ENHANCED: Task Creation with TaskFactory
+    // ============================================================================
+
+    /**
+     * Create a service task (ENHANCED with TaskFactory)
+     */
     ITask serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
-        def t = new ServiceTask(id, id, graph.ctx)
+        // Use TaskFactory instead of direct instantiation
+        def t = TaskFactory.createServiceTask(id, id, graph.ctx)
         t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
@@ -40,7 +47,47 @@ class TaskGraphDsl {
         return t
     }
 
-    // Generic task declaration
+    /**
+     * Create a task by type string (for flexibility)
+     * 
+     * Usage:
+     *   task("myTask", "service") { ... }
+     *   task("router1", "dynamic-router") { ... }
+     */
+    ITask task(String id, String typeString, @DelegatesTo(ITask) Closure config) {
+        // Parse type string and create task via factory
+        def t = TaskFactory.createTask(typeString, id, id, graph.ctx)
+        t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.delegate = t
+        config.call()
+        graph.addTask(t)
+        return t
+    }
+
+    /**
+     * Create a task by TaskType enum (MOST TYPE-SAFE)
+     * 
+     * Usage:
+     *   task("myTask", TaskType.SERVICE) { ... }
+     *   task("router1", TaskType.DYNAMIC_ROUTER) { ... }
+     */
+    ITask task(String id, TaskType type, @DelegatesTo(ITask) Closure config) {
+        def t = TaskFactory.createTask(type, id, id, graph.ctx)
+        t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.delegate = t
+        config.call()
+        graph.addTask(t)
+        return t
+    }
+
+    /**
+     * Generic task declaration (defaults to SERVICE type)
+     * 
+     * Usage:
+     *   task("myTask") { ... }  // Creates ServiceTask
+     */
     ITask task(String id, @DelegatesTo(ITask) Closure config) {
         return serviceTask(id, config)
     }

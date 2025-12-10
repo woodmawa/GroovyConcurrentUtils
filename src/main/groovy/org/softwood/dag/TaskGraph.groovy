@@ -216,12 +216,14 @@ class TaskGraph {
         log.debug "router ${router.id} selected targets: $chosen"
         log.debug "router ${router.id} all possible targets: $allTargets"
 
-        // Mark unselected targets as SKIPPED
-        allTargets.each { tid ->
-            if (!chosen.contains(tid)) {
-                tasks[tid]?.markSkipped()
-                // Check completion after marking tasks as skipped
-                checkGraphCompletion()
+        // Mark unselected targets as SKIPPED (but not for sharding routers)
+        if (!(router instanceof ShardingRouterTask)) {
+            allTargets.each { tid ->
+                if (!chosen.contains(tid)) {
+                    tasks[tid]?.markSkipped()
+                    // Check completion after marking tasks as skipped
+                    checkGraphCompletion()
+                }
             }
         }
 

@@ -1,8 +1,11 @@
 package org.softwood.dag
 
 import groovy.util.logging.Slf4j
-import org.softwood.dag.task.ConditionalForkTask
 import org.softwood.dag.task.DefaultTaskEventDispatcher
+import org.softwood.dag.task.TaskFactory
+import org.softwood.dag.task.TaskType
+import org.softwood.dag.task.TaskContext
+import org.softwood.dag.task.ConditionalForkTask
 import org.softwood.dag.task.DynamicRouterTask
 import org.softwood.dag.task.RouterTask
 import org.softwood.dag.task.ShardingRouterTask
@@ -17,6 +20,8 @@ import org.softwood.dag.task.ITask
  *   - void addTask(Task)
  *   - void registerRouter(RouterTask)
  *   - finalizeWiring() that infers predecessors from successors.
+ *
+ * ENHANCED: Now uses TaskFactory for type-safe router creation.
  */
 @Slf4j
 class ForkDsl {
@@ -114,7 +119,7 @@ class ForkDsl {
         }
 
         // We assume all tasks in the graph share a TaskContext; reuse the source's ctx
-        def ctx = source.ctx
+        TaskContext ctx = source.ctx as TaskContext
 
         boolean hasConditional = !conditionalRules.isEmpty()
         boolean hasDynamic = dynamicRouteLogic != null
@@ -127,7 +132,8 @@ class ForkDsl {
         // --------------------------------------------------------------------
         if (hasSharding) {
             String rid = "__shardRouter_${id}_${UUID.randomUUID()}"
-            router = new ShardingRouterTask(rid, rid, ctx)
+            // ENHANCED: Use TaskFactory instead of direct instantiation
+            router = TaskFactory.createShardingRouter(rid, rid, ctx)
             router.templateTargetId = shardTemplateId
             router.shardSource = shardSource
             router.shardCount = shardCount
@@ -136,7 +142,7 @@ class ForkDsl {
             graph.addTask(router)
             graph.registerRouter(router)
 
-            log.debug "ForkDsl: created sharding router ${rid}"
+            log.debug "ForkDsl: created sharding router ${rid} via TaskFactory"
 
             if (shardCount == null || shardCount <= 0) {
                 throw new IllegalStateException(
@@ -145,7 +151,7 @@ class ForkDsl {
             }
 
             // Compute shard task IDs based on the template
-            List<String> shardTargetIds = (0..<shardCount).collect { "${shardTemplateId}_shard_${it}" }
+            List<String> shardTargetIds = (0..<shardCount).collect { int i -> "${shardTemplateId}_shard_${i}" as String }
             router.targetIds.addAll(shardTargetIds)
 
             log.debug "ForkDsl: sharding router targets: $shardTargetIds"
@@ -178,25 +184,27 @@ class ForkDsl {
             // ----------- router creation -----------
             if (hasDynamic) {
                 String rid = "__dynamicRouter_${id}_${UUID.randomUUID()}"
-                router = new DynamicRouterTask(rid, rid, ctx)
+                // ENHANCED: Use TaskFactory
+                router = TaskFactory.createDynamicRouter(rid, rid, ctx)
                 router.routingLogic = dynamicRouteLogic
 
                 List<String> allTargets = (staticTargets + conditionalRules.keySet()).unique().toList()
                 router.allowedTargets = allTargets
                 router.targetIds.addAll(allTargets)
 
-                log.debug "ForkDsl: created dynamic router ${rid} with targets: $allTargets"
+                log.debug "ForkDsl: created dynamic router ${rid} via TaskFactory with targets: $allTargets"
 
             } else { // conditional only
                 String rid = "__conditionalRouter_${id}_${UUID.randomUUID()}"
-                router = new ConditionalForkTask(rid, rid, ctx)
+                // ENHANCED: Use TaskFactory
+                router = TaskFactory.createConditionalFork(rid, rid, ctx)
                 router.staticTargets.addAll(staticTargets)
                 router.conditionalRules.putAll(conditionalRules)
 
                 List<String> allTargets = (staticTargets + conditionalRules.keySet()).unique().toList()
                 router.targetIds.addAll(allTargets)
 
-                log.debug "ForkDsl: created conditional router ${rid} with targets: $allTargets"
+                log.debug "ForkDsl: created conditional router ${rid} via TaskFactory with targets: $allTargets"
             }
 
             router.eventDispatcher = new DefaultTaskEventDispatcher(graph)

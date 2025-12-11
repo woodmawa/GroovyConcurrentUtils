@@ -16,28 +16,28 @@
         </encoder>
     </appender>
 
-    <!-- Root logger - WARN level by default for tests (quiet) -->
-    <root level="WARN">
+    <!-- Root logger - INFO level by default for tests -->
+    <root level="INFO">
         <appender-ref ref="CONSOLE" />
     </root>
 
-    <!-- Our code - WARN level for quiet test logging -->
-    <logger name="org.softwood.promise" level="WARN" additivity="false">
+    <!-- Our code - DEBUG level for thorough test logging -->
+    <logger name="org.softwood.promise" level="DEBUG" additivity="false">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="TEST_FILE" />
     </logger>
 
-    <logger name="org.softwood.dataflow" level="WARN" additivity="false">
+    <logger name="org.softwood.dataflow" level="DEBUG" additivity="false">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="TEST_FILE" />
     </logger>
 
-    <logger name="org.softwood.pool" level="WARN" additivity="false">
+    <logger name="org.softwood.pool" level="DEBUG" additivity="false">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="TEST_FILE" />
     </logger>
 
-    <logger name="org.softwood.task" level="WARN" additivity="false">
+    <logger name="org.softwood.task" level="DEBUG" additivity="false">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="TEST_FILE" />
     </logger>

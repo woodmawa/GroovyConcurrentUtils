@@ -344,36 +344,28 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * </ul>
      *
      * <p>Each call returns a new, independent CF.</p>
-     *
-     * <p><b>Thread Safety:</b> This method is race-condition free. Listeners are registered
-     * BEFORE checking the bound state to ensure completion is never missed.</p>
      */
     CompletableFuture<T> toFuture() {
         CompletableFuture<T> cf = new CompletableFuture<>()
 
-        // CRITICAL FIX: Always register listeners FIRST (even if already bound)
-        // This prevents race condition where completion happens between isBound() check
-        // and listener registration
+        // Already complete?
+        if (isBound()) {
+            if (hasError()) {
+                cf.completeExceptionally(getError())
+            } else {
+                try { cf.complete(get()) }
+                catch (Throwable t) { cf.completeExceptionally(t) }
+            }
+            return cf
+        }
+
+        // Pending → wire listeners
         whenAvailable { T v ->
             if (!cf.isDone()) cf.complete(v)
         }
 
         whenError { Throwable e ->
             if (!cf.isDone()) cf.completeExceptionally(e)
-        }
-
-        // THEN check if already bound and complete immediately if so
-        // If already bound, the listeners above will fire immediately
-        if (isBound()) {
-            if (hasError()) {
-                if (!cf.isDone()) cf.completeExceptionally(getError())
-            } else {
-                try {
-                    if (!cf.isDone()) cf.complete(get())
-                } catch (Throwable t) {
-                    if (!cf.isDone()) cf.completeExceptionally(t)
-                }
-            }
         }
 
         return cf
@@ -431,6 +423,19 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     DataflowVariable<T> whenAvailable(Consumer<? super T> callback) {
         if (callback == null) return this
 
+        // CRITICAL: If already bound and successful, invoke callback immediately
+        if (isBound() && !hasError()) {
+            try {
+                callback.accept(get())
+            } catch (Throwable t) {
+                String errorMsg = "Error in whenAvailable callback for ${type?.simpleName ?: 'Object'}: ${t.message}"
+                log.error(errorMsg, t)
+                collectListenerError(errorMsg)
+            }
+            return this
+        }
+
+        // Otherwise register for future completion
         whenBoundAsync { T v ->
             // Full state guard
             if (isBound() && !hasError()) {
@@ -439,7 +444,6 @@ class DataflowVariable<T> extends DataflowExpression<T> {
                 } catch (Throwable t) {
                     String errorMsg = "Error in whenAvailable callback for ${type?.simpleName ?: 'Object'}: ${t.message}"
                     log.error(errorMsg, t)
-                    // Collect the error using the protected method
                     collectListenerError(errorMsg)
                 }
             }
@@ -456,6 +460,17 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     DataflowVariable<T> whenError(Closure<?> handler) {
         if (handler == null) return this
 
+        // CRITICAL: If already failed/cancelled, invoke handler immediately
+        if (hasError()) {
+            try {
+                handler.call(getError())
+            } catch (Throwable t) {
+                log.error("Error in whenError callback", t)
+            }
+            return this
+        }
+
+        // Otherwise register for future error
         whenBoundAsync {
             if (hasError()) {
                 try { handler.call(getError()) }

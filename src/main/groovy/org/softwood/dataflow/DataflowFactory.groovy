@@ -50,7 +50,7 @@ class DataflowFactory {
 
     <T> DataflowVariable<T> createDataflowVariable(T initialValue) {
         def variable = new DataflowVariable<T>(pool)
-        variable.set(initialValue)
+        variable.bind(initialValue)
         return variable
     }
 

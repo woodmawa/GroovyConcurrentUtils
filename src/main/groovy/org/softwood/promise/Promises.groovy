@@ -8,6 +8,7 @@ import org.softwood.promise.core.PromisePoolContext
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -55,7 +56,6 @@ import java.util.function.Supplier
  * @author Will Woodman
  * @since 2025
  */
-
 @Slf4j
 class Promises {
 
@@ -328,8 +328,8 @@ class Promises {
         int totalPromises = promiseList.size()
 
         if (totalPromises == 0) {
-            // Return a failed promise instead of null
-            return failed(new IllegalArgumentException("No promises provided to any()"))
+            // Return a completed promise with null for empty list
+            return newPromise(null)
         }
 
         // For already-completed promises, try to handle synchronously
@@ -384,7 +384,7 @@ class Promises {
                         if (completed.compareAndSet(false, true)) {
                             resultPromise.fail(
                                     new RuntimeException(
-                                            "All ${totalPromises} promises failed. Errors: ${errors*.message.join(', ')}",
+                                            "All promises failed (${totalPromises} total). Errors: ${errors*.message.join(', ')}",
                                             errors[0]
                                     )
                             )
@@ -543,30 +543,68 @@ class Promises {
         Promise<T> resultPromise = newPromise()
         def attemptCount = new AtomicInteger(0)
         def errors = Collections.synchronizedList(new ArrayList<Throwable>())
+        def completed = new AtomicBoolean(false)
+        // Map to track if retry has been scheduled for each attempt
+        def retryScheduledMap = new ConcurrentHashMap<Integer, AtomicBoolean>()
+
 
         // ✅ FIX: Don't specify Closure<Void>, just use Closure
+        // Map to track which attempts have been handled (prevents duplicate callback firing)
+        def attemptHandledMap = new ConcurrentHashMap<Integer, AtomicBoolean>()
+
         Closure attemptTask
         attemptTask = {
+            if (completed.get()) {
+                return
+            }
+
             def currentAttempt = attemptCount.incrementAndGet()
+
+            // Guard against duplicate callback execution - one per attempt number
+            def attemptHandled = new AtomicBoolean(false)
+            attemptHandledMap.put(currentAttempt, attemptHandled)
 
             async(task)
                     .onComplete { value ->
-                        resultPromise.accept(value)
+                        if (!attemptHandled.compareAndSet(false, true)) {
+                            log.debug("retry() attempt ${currentAttempt} onComplete callback already handled, skipping")
+                            return
+                        }
+                        if (completed.compareAndSet(false, true)) {
+                            resultPromise.accept(value)
+                        } else {
+                        }
                     }
                     .onError { error ->
+                        if (!attemptHandled.compareAndSet(false, true)) {
+                            log.debug("retry() attempt ${currentAttempt} onError callback already handled, skipping")
+                            return
+                        }
                         errors.add(error)
 
                         if (currentAttempt >= maxAttempts) {
-                            def aggregateError = new RuntimeException(
-                                    "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
-                            )
-                            errors.each { aggregateError.addSuppressed(it) }
-                            resultPromise.fail(aggregateError)
-                        } else {
-                            if (delayBetweenAttempts > 0) {
-                                delay(delayBetweenAttempts, unit).onComplete { attemptTask.call() }
+                            if (completed.compareAndSet(false, true)) {
+                                def aggregateError = new RuntimeException(
+                                        "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
+                                )
+                                errors.each { aggregateError.addSuppressed(it) }
+                                resultPromise.fail(aggregateError)
                             } else {
-                                attemptTask.call()
+                            }
+                        } else {
+                            // Get or create retry guard for this attempt
+                            def retryScheduled = retryScheduledMap.computeIfAbsent(currentAttempt) { new AtomicBoolean(false) }
+
+                            if (retryScheduled.compareAndSet(false, true)) {
+                                if (delayBetweenAttempts > 0) {
+                                    delay(delayBetweenAttempts, unit).onComplete {
+                                        attemptTask.call()
+                                    }
+                                } else {
+                                    attemptTask.call()
+                                }
+                            } else {
+                                log.debug("retry() attempt ${currentAttempt} retry already scheduled by another thread, skipping")
                             }
                         }
                     }

@@ -56,20 +56,15 @@ class DataflowPromise<T> implements Promise<T> {
 
         // When DFV resolves successfully
         variable.whenAvailable { T v ->
-            log.debug("whenAvailable callback fired, value: ${v}, current state: ${state.get()}")
             boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
-            log.debug("whenAvailable CAS PENDING->COMPLETED: ${casResult}, final state: ${state.get()}")
         }
 
         // When DFV resolves with an error
         variable.whenError { Throwable err ->
-            log.debug("whenError callback fired, error: ${err.class.simpleName}: ${err.message}, current state: ${state.get()}")
             if (err instanceof CancellationException) {
                 boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
-                log.debug("whenError CAS PENDING->CANCELLED: ${casResult}, final state: ${state.get()}")
             } else {
                 boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-                log.debug("whenError CAS PENDING->FAILED: ${casResult}, final state: ${state.get()}")
             }
         }
     }
@@ -80,38 +75,29 @@ class DataflowPromise<T> implements Promise<T> {
 
     private PromiseState deriveStateFromVariable() {
         PromiseState s = state.get()
-        log.debug("deriveStateFromVariable() called, current state: ${s}, variable.isBound(): ${variable.isBound()}")
 
         if (s != PromiseState.PENDING) {
-            log.debug("deriveStateFromVariable() returning early, state: ${s}")
             return s
         }
 
         // State is PENDING - check if variable is actually bound
         if (!variable.isBound()) {
-            log.debug("deriveStateFromVariable() variable not bound, returning PENDING")
             return s
         }
 
         // Variable is bound - update state based on variable's state
-        log.debug("deriveStateFromVariable() variable is bound, hasError: ${variable.hasError()}")
         if (variable.hasError()) {
             Throwable err = variable.getError()
-            log.debug("deriveStateFromVariable() variable has error: ${err.class.simpleName}: ${err.message}")
             if (err instanceof CancellationException) {
                 boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
-                log.debug("deriveStateFromVariable() CAS PENDING->CANCELLED: ${casResult}")
             } else {
                 boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-                log.debug("deriveStateFromVariable() CAS PENDING->FAILED: ${casResult}")
             }
         } else {
             boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
-            log.debug("deriveStateFromVariable() CAS PENDING->COMPLETED: ${casResult}")
         }
 
         PromiseState finalState = state.get()
-        log.debug("deriveStateFromVariable() returning state: ${finalState}")
         return finalState
     }
 
@@ -123,26 +109,21 @@ class DataflowPromise<T> implements Promise<T> {
     private boolean isDoneInternal() {
         // First check cached state
         PromiseState s = state.get()
-        log.debug("isDoneInternal() called, state: ${s}, variable.isBound(): ${variable.isBound()}")
 
         if (s != PromiseState.PENDING) {
-            log.debug("isDoneInternal() returning true (state != PENDING)")
             return true
         }
 
         // State says PENDING - double-check with variable directly
         if (variable.isBound()) {
-            log.debug("isDoneInternal() state is PENDING but variable is bound! Forcing sync...")
             // Variable is bound but state hasn't been updated yet
             // Force synchronization
             deriveStateFromVariable()
             PromiseState newState = state.get()
             boolean result = newState != PromiseState.PENDING
-            log.debug("isDoneInternal() after sync, state: ${newState}, returning: ${result}")
             return result
         }
 
-        log.debug("isDoneInternal() returning false (state PENDING, variable not bound)")
         return false
     }
 
@@ -172,7 +153,6 @@ class DataflowPromise<T> implements Promise<T> {
             try {
                 variable.bind(value)
             } catch (IllegalStateException e) {
-                log.debug("DFV already bound in accept(T): ${e.message}")
             }
         }
         return this
@@ -255,37 +235,29 @@ class DataflowPromise<T> implements Promise<T> {
 
         // Always try to transition to FAILED state
         boolean transitioned = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-        log.debug("fail() CAS result: ${transitioned}, state after CAS: ${state.get()}")
 
         if (transitioned) {
             // We transitioned from PENDING → FAILED
             try {
-                log.debug("fail() calling variable.bindError(), variable.isBound() = ${variable.isBound()}")
                 variable.bindError(error)
-                log.debug("fail() variable.bindError() completed, variable.isBound() = ${variable.isBound()}, variable.hasError() = ${variable.hasError()}")
             } catch (IllegalStateException e) {
-                log.debug("DFV already bound in fail(): ${e.message}")
             }
         } else {
             // State was already non-PENDING (COMPLETED, FAILED, or CANCELLED)
             // Force state to FAILED if not already terminal
             PromiseState currentState = state.get()
-            log.debug("fail() CAS failed, current state: ${currentState}")
             if (currentState != PromiseState.FAILED && currentState != PromiseState.CANCELLED) {
                 state.set(PromiseState.FAILED)
-                log.debug("fail() forced state to FAILED")
             }
             // Try to bind error anyway (will fail silently if already bound)
             try {
                 variable.bindError(error)
             } catch (IllegalStateException e) {
-                log.debug("DFV already bound in fail() (force): ${e.message}")
             }
         }
 
         // CRITICAL: Force state synchronization from variable to ensure isDone() works
         // This handles race conditions where callbacks haven't fired yet
-        log.debug("fail() calling deriveStateFromVariable() before return, state: ${state.get()}, variable.isBound(): ${variable.isBound()}")
         deriveStateFromVariable()
         log.debug("fail() returning, final state: ${state.get()}, variable.isBound(): ${variable.isBound()}, variable.hasError(): ${variable.hasError()}")
 
@@ -371,7 +343,6 @@ class DataflowPromise<T> implements Promise<T> {
         try {
             variable.bindCancelled(new CancellationException("Promise was explicitly cancelled"))
         } catch (IllegalStateException e) {
-            log.debug("DFV already bound in cancel(): ${e.message}")
         }
 
         // Propagate cancellation to all dependents

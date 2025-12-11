@@ -94,7 +94,6 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      */
     void bind(Object v) {
         setValue((T) v)
-        log.debug("DataflowVariable bound to value: $v")
     }
 
     /**
@@ -104,7 +103,6 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      */
     DataflowVariable<T> bindError(Throwable t) {
         setError(t)
-        log.debug("DataflowVariable bound to error: ${t.message}")
         return this
     }
 
@@ -118,7 +116,6 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      */
     DataflowVariable<T> bindCancelled(Throwable cause = null) {
         setCancelled(cause)
-        log.debug("DataflowVariable cancelled: ${cause?.message ?: 'cancelled'}")
         return this
     }
 

@@ -273,21 +273,17 @@ class PromisesConcurrencyTest {
             resultPromise.get()
         }
 
-        assertTrue(exception.message.contains("All 3 promises failed"))
+        assertTrue(exception.message.contains("All promises failed"))
     }
 
     @Test
-    void "any() with empty list fails with IllegalArgumentException"() {
+    void "any() with empty list returns null"() {
         def resultPromise = Promises.any([])
 
         await().atMost(1, TimeUnit.SECONDS).until { resultPromise.isDone() }
 
-        def exception = assertThrows(RuntimeException) {
-            resultPromise.get()
-        }
-
-        // FIX: The exception message is directly on the exception, not on a cause
-        assertTrue(exception.message.contains("No promises provided"))
+        def result = resultPromise.get()
+        assertNull(result)
     }
 
     @Test

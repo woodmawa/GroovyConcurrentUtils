@@ -64,7 +64,7 @@ class ConcurrentPool implements ExecutorPool {
     private static ExecutorService sharedVirtualThreadExecutor
     private static ScheduledExecutorService sharedScheduledExecutor
     private static AtomicBoolean virtualThreadsAvailable = new AtomicBoolean(false)
-    private static ConcurrentLinkedQueue errors = new ConcurrentLinkedQueue<>()
+    private static ConcurrentLinkedQueue<String> errors = new ConcurrentLinkedQueue<>()
 
     // ─────────────────────────────────────────────────────────────
     // Instance state
@@ -159,7 +159,7 @@ class ConcurrentPool implements ExecutorPool {
      * @param poolSize number of platform threads in the pool (must be > 0)
      */
     ConcurrentPool(int poolSize) {
-        assert poolSize > 0, "Pool size must be greater than 0"
+        if (poolSize <= 0) throw new IllegalArgumentException("Pool size must be greater than 0, got: ${poolSize}")
         this.executor = Executors.newFixedThreadPool(poolSize)
         this.ownsExecutor = true
     }
@@ -172,11 +172,17 @@ class ConcurrentPool implements ExecutorPool {
      * @param scheduledExecutor optional scheduled executor (uses shared if {@code null})
      */
     ConcurrentPool(ExecutorService executor, ScheduledExecutorService scheduledExecutor = null) {
-        assert executor != null, "Executor cannot be null"
+        if (executor == null) throw new IllegalArgumentException("Executor cannot be null")
+        if (executor.isShutdown()) {
+            log.warn("Provided executor is already shut down - pool may not function correctly")
+        }
         this.executor = executor
         this.ownsExecutor = false  // Don't shut down externally provided executors
 
         if (scheduledExecutor != null) {
+            if (scheduledExecutor.isShutdown()) {
+                log.warn("Provided scheduled executor is already shut down - scheduling may not function correctly")
+            }
             this.scheduledExecutor = scheduledExecutor
             this.ownsScheduledExecutor = false
         }
@@ -273,7 +279,7 @@ class ConcurrentPool implements ExecutorPool {
      */
     @NotNull
     void setExecutor(ExecutorService executor) {
-        assert executor != null, "Executor cannot be null"
+        if (executor == null) throw new IllegalArgumentException("Executor cannot be null")
 
         if (ownsExecutor && this.executor != null) {
             this.executor.shutdown()
@@ -317,10 +323,12 @@ class ConcurrentPool implements ExecutorPool {
     ScheduledExecutorService getScheduledExecutor() {
         if (scheduledExecutor == null) {
             scheduledExecutor = sharedScheduledExecutor
+            if (scheduledExecutor == null) {
+                throw new IllegalStateException("Scheduled executor not available - initialization failed")
+            }
         }
-        scheduledExecutor
+        return scheduledExecutor
     }
-
     // ─────────────────────────────────────────────────────────────
     // High-level execution API
     // ─────────────────────────────────────────────────────────────
@@ -411,6 +419,46 @@ class ConcurrentPool implements ExecutorPool {
     }
 
     /**
+     * Non-throwing variant of {@link #execute(Callable)}.
+     * Attempts to submit a Callable task.
+     *
+     * @param task callable to execute
+     * @return {@code true} if the task was accepted, {@code false} if the pool is closed
+     *         or the executor rejected the task
+     */
+    boolean tryExecute(Callable task) {
+        if (this.closed.get()) {
+            return false
+        }
+        try {
+            this.executor.submit(task)
+            return true
+        } catch (RejectedExecutionException ignored) {
+            return false
+        }
+    }
+
+    /**
+     * Non-throwing variant of {@link #execute(Runnable)}.
+     * Attempts to submit a Runnable task.
+     *
+     * @param task runnable to execute
+     * @return {@code true} if the task was accepted, {@code false} if the pool is closed
+     *         or the executor rejected the task
+     */
+    boolean tryExecute(Runnable task) {
+        if (this.closed.get()) {
+            return false
+        }
+        try {
+            this.executor.submit(task)
+            return true
+        } catch (RejectedExecutionException ignored) {
+            return false
+        }
+    }
+
+    /**
      * Helper function to take the {@link Future} returned by the executor submit and wrap it
      * as a {@link CompletableFuture}. The wrapping itself is performed by submitting a small
      * task to the same executor.
@@ -421,15 +469,25 @@ class ConcurrentPool implements ExecutorPool {
      */
     private CompletableFuture transformFutureToCFuture(Future future, ExecutorService executorService) {
         CompletableFuture cf = new CompletableFuture()
-        executorService.submit(() -> {
-            try {
-                cf.complete(future.get())
-            } catch (Exception e) {
-                cf.completeExceptionally(e)
-            }
-        })
+        try {
+            executorService.submit(() -> {
+                try {
+                    def result = future.get()
+                    cf.complete(result)
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt()
+                    cf.completeExceptionally(e)
+                } catch (Exception e) {
+                    cf.completeExceptionally(e)
+                }
+            })
+        } catch (RejectedExecutionException e) {
+            // Executor is shutting down or at capacity
+            cf.completeExceptionally(e)
+        }
         return cf
     }
+
 
     // ─────────────────────────────────────────────────────────────
     // Scheduling API
@@ -531,6 +589,51 @@ class ConcurrentPool implements ExecutorPool {
     }
 
     /**
+     * Checks if this pool is healthy and able to accept tasks.
+     * A pool is healthy if it's not closed and any owned executor is not shut down.
+     *
+     * @return true if the pool is operational, false otherwise
+     */
+    boolean isHealthy() {
+        if (closed.get()) {
+            return false
+        }
+        if (ownsExecutor && executor != null && executor.isShutdown()) {
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Returns diagnostic metrics about this pool for monitoring and debugging.
+     * Useful for production monitoring and troubleshooting.
+     *
+     * @return map containing pool metrics
+     */
+    Map<String, Object> getMetrics() {
+        def metrics = [:]
+        metrics.name = name ?: "unnamed"
+        metrics.closed = closed.get()
+        metrics.healthy = isHealthy()
+        metrics.usingVirtualThreads = isUsingVirtualThreads()
+        metrics.ownsExecutor = ownsExecutor
+        metrics.poolSize = getPoolSize()
+
+        if (executor instanceof ThreadPoolExecutor) {
+            def tpe = (ThreadPoolExecutor) executor
+            metrics.activeCount = tpe.activeCount
+            metrics.taskCount = tpe.taskCount
+            metrics.completedTaskCount = tpe.completedTaskCount
+            metrics.queueSize = tpe.queue.size()
+            metrics.largestPoolSize = tpe.largestPoolSize
+            metrics.corePoolSize = tpe.corePoolSize
+            metrics.maximumPoolSize = tpe.maximumPoolSize
+        }
+
+        return metrics as Map<String, Object>
+    }
+
+    /**
      * Checks if owned executors are shut down.
      * Returns the closed state for shared executors.
      */
@@ -590,9 +693,12 @@ class ConcurrentPool implements ExecutorPool {
      * accidental global shutdown of shared executors that may be used by arbitrary code
      * across the application. It is preserved only for backward compatibility.
      * </p>
+     *
+     * @deprecated This method no longer performs any action. Shared executors live for the JVM lifetime.
      */
+    @Deprecated
     static void shutdownSharedExecutors() {
-        log.warn("shutdownSharedExecutors() is now a no-op; shared executors live for the JVM lifetime")
+        log.warn("shutdownSharedExecutors() is deprecated and is now a no-op; shared executors live for the JVM lifetime")
         // Intentionally do nothing – shared executors are treated as JVM-wide resources.
     }
 }

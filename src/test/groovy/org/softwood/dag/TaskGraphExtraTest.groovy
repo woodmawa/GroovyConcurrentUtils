@@ -5,7 +5,6 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.softwood.dag.task.TaskContext
 import org.softwood.pool.ExecutorPool
-import org.softwood.pool.WorkerPool
 import org.softwood.promise.Promise
 import org.softwood.promise.PromiseFactory
 import org.softwood.promise.core.PromiseState

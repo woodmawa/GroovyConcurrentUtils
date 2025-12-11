@@ -14,6 +14,7 @@ import java.time.LocalDateTime
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * A {@code DataflowExpression} represents a single-assignment, asynchronously-completing value.
@@ -86,6 +87,9 @@ class DataflowExpression<T> {
     /** Asynchronous listeners invoked on the pool (legacy alias). */
     private final List<Closure> asyncWhenBoundListeners = new CopyOnWriteArrayList<Closure>()
 
+    /** Error collection for listener failures (static, application-wide). */
+    private static final ConcurrentLinkedQueue<String> listenerErrors = new ConcurrentLinkedQueue<>()
+
     /**
      * Create a new expression backed by the given pool.
      *
@@ -93,7 +97,9 @@ class DataflowExpression<T> {
      */
     DataflowExpression(ExecutorPool pool) {
         this(pool, (Class<T>) Object)
-        assert pool != null : "DataflowExpression requires a non-null ExecutorPool"
+        if (pool == null) {
+            throw new IllegalArgumentException("DataflowExpression requires a non-null ExecutorPool")
+        }
     }
 
     /**
@@ -103,7 +109,9 @@ class DataflowExpression<T> {
      * @param type runtime type token for the value (purely informational)
      */
     DataflowExpression(ExecutorPool pool, Class<T> type) {
-        assert pool != null : "DataflowExpression requires a non-null ExecutorPool"
+        if (pool == null) {
+            throw new IllegalArgumentException("DataflowExpression requires a non-null ExecutorPool")
+        }
         this.pool = pool
         this.type = type
     }
@@ -121,6 +129,38 @@ class DataflowExpression<T> {
      */
     ExecutorPool getPool() {
         return pool
+    }
+
+    /**
+     * Get immutable view of listener errors collected across all DataflowExpression instances.
+     * <p>
+     * This is a static method that returns errors from ALL DataflowExpression instances
+     * in the application. Useful for monitoring and debugging listener failures.
+     * </p>
+     *
+     * @return list of error messages from failed listeners
+     */
+    static List<String> getListenerErrors() {
+        return Collections.unmodifiableList(new ArrayList<>(listenerErrors))
+    }
+
+    /**
+     * Clear accumulated listener errors.
+     * <p>
+     * This is a static method that clears errors from ALL DataflowExpression instances.
+     * Typically called during test cleanup or after error processing.
+     * </p>
+     */
+    static void clearListenerErrors() {
+        listenerErrors.clear()
+    }
+
+    /**
+     * Protected method for subclasses to collect listener errors.
+     * @param errorMsg the error message to collect
+     */
+    protected static void collectListenerError(String errorMsg) {
+        listenerErrors.offer(errorMsg)
     }
 
     // --------------------------------------------------------------------------------------------
@@ -439,7 +479,9 @@ class DataflowExpression<T> {
                     listener.call(value)
             }
         } catch (Throwable t) {
-            log.error("Error in whenBound listener", t)
+            String errorMsg = "Error in ${message} listener for ${type?.simpleName ?: 'Object'}: ${t.message}"
+            log.error(errorMsg, t)
+            listenerErrors.offer(errorMsg)
         }
     }
 

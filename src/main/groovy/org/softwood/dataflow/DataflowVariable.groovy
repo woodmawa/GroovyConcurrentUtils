@@ -7,6 +7,7 @@ import groovy.util.logging.Slf4j
 import org.codehaus.groovy.runtime.InvokerHelper
 import org.softwood.pool.ConcurrentPool
 import org.softwood.pool.ExecutorPool
+import org.softwood.gstream.Gstream
 
 import java.time.Duration
 import java.util.Optional
@@ -17,6 +18,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
+import java.util.function.Supplier
 import org.softwood.promise.core.PromisePoolContext
 
 /**
@@ -119,15 +121,8 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         return this
     }
 
-    /** Alias for {@link #bind(Object)}. */
-    @Deprecated
-    DataflowVariable<T> set(T v) {
-        bind(v)
-        return this
-    }
 
     /** Operator alias for {@link #bind(Object)}. */
-    @Deprecated
     DataflowVariable<T> leftShift(T v) {
         bind(v)
         return this
@@ -186,6 +181,135 @@ class DataflowVariable<T> extends DataflowExpression<T> {
 
 
     // =====================================================================================================
+    // Task Execution & Auto-Binding
+    // =====================================================================================================
+
+    /**
+     * Execute a Closure asynchronously and bind the result to this DataflowVariable.
+     * <p>
+     * The closure is executed on the backing pool, and upon completion (success or error),
+     * this DataflowVariable is automatically bound to the result or error.
+     * </p>
+     *
+     * <p>Example usage:</p>
+     * <pre>
+     * def dfv = new DataflowVariable&lt;String&gt;(pool)
+     * dfv.task { -&gt;
+     *     // This runs async on the pool
+     *     fetchDataFromAPI()
+     * }
+     * println dfv.get()  // Blocks until task completes
+     * </pre>
+     *
+     * @param closure the task to execute
+     * @return this DataflowVariable for fluent chaining
+     */
+    DataflowVariable<T> task(Closure<T> closure) {
+        pool.executor.submit {
+            try {
+                T result = closure.call()
+                this.setValue(result)
+            } catch (Throwable e) {
+                this.bindError(e)
+                log.error("DataflowVariable.task(Closure): execution failed", e)
+            }
+        }
+        return this
+    }
+
+    /**
+     * Execute a Callable asynchronously and bind the result to this DataflowVariable.
+     * <p>
+     * Java lambda-friendly variant of {@link #task(Closure)}.
+     * </p>
+     *
+     * <p>Example usage:</p>
+     * <pre>
+     * def dfv = new DataflowVariable&lt;Integer&gt;(pool)
+     * dfv.task(() -&gt; calculateExpensiveValue())
+     * </pre>
+     *
+     * @param callable the task to execute
+     * @return this DataflowVariable for fluent chaining
+     */
+    DataflowVariable<T> task(java.util.concurrent.Callable<T> callable) {
+        pool.executor.submit {
+            try {
+                T result = callable.call()
+                this.setValue(result)
+            } catch (Throwable e) {
+                this.bindError(e)
+                log.error("DataflowVariable.task(Callable): execution failed", e)
+            }
+        }
+        return this
+    }
+
+    /**
+     * Execute a Supplier asynchronously and bind the result to this DataflowVariable.
+     * <p>
+     * Java lambda-friendly variant using Supplier functional interface.
+     * </p>
+     *
+     * <p>Example usage:</p>
+     * <pre>
+     * def dfv = new DataflowVariable&lt;String&gt;(pool)
+     * dfv.task(() -&gt; "computed value")
+     * </pre>
+     *
+     * @param supplier the task to execute
+     * @return this DataflowVariable for fluent chaining
+     */
+    DataflowVariable<T> task(java.util.function.Supplier<T> supplier) {
+        pool.executor.submit {
+            try {
+                T result = supplier.get()
+                this.setValue(result)
+            } catch (Throwable e) {
+                this.bindError(e)
+                log.error("DataflowVariable.task(Supplier): execution failed", e)
+            }
+        }
+        return this
+    }
+
+
+    // =====================================================================================================
+    // Observability & Metrics
+    // =====================================================================================================
+
+    /**
+     * Get diagnostic metrics about this DataflowVariable.
+     * <p>
+     * Useful for monitoring, debugging, and health checks in production systems.
+     * Returns comprehensive state information without blocking.
+     * </p>
+     *
+     * <p>Example usage:</p>
+     * <pre>
+     * def metrics = dfv.metrics
+     * if (!metrics.success) {
+     *     log.warn("DFV not successful: ${metrics.state}, error: ${metrics.errorMessage}")
+     * }
+     * </pre>
+     *
+     * @return map containing state, listener count, and completion details
+     */
+    Map<String, Object> getMetrics() {
+        return [
+            type: type?.simpleName ?: 'Unknown',
+            bound: isBound(),
+            success: isSuccess(),
+            hasError: hasError(),
+            completedAt: getCompletedAt()?.toString(),
+            errorMessage: getError()?.message,
+            errorType: getError()?.class?.simpleName,
+            poolName: pool.name
+        ]
+    }
+
+
+    // =====================================================================================================
     // State Introspection
     // =====================================================================================================
 
@@ -220,22 +344,16 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * </ul>
      *
      * <p>Each call returns a new, independent CF.</p>
+     *
+     * <p><b>Thread Safety:</b> This method is race-condition free. Listeners are registered
+     * BEFORE checking the bound state to ensure completion is never missed.</p>
      */
     CompletableFuture<T> toFuture() {
         CompletableFuture<T> cf = new CompletableFuture<>()
 
-        // Already complete?
-        if (isBound()) {
-            if (hasError()) {
-                cf.completeExceptionally(getError())
-            } else {
-                try { cf.complete(get()) }
-                catch (Throwable t) { cf.completeExceptionally(t) }
-            }
-            return cf
-        }
-
-        // Pending → wire listeners
+        // CRITICAL FIX: Always register listeners FIRST (even if already bound)
+        // This prevents race condition where completion happens between isBound() check
+        // and listener registration
         whenAvailable { T v ->
             if (!cf.isDone()) cf.complete(v)
         }
@@ -244,7 +362,60 @@ class DataflowVariable<T> extends DataflowExpression<T> {
             if (!cf.isDone()) cf.completeExceptionally(e)
         }
 
+        // THEN check if already bound and complete immediately if so
+        // If already bound, the listeners above will fire immediately
+        if (isBound()) {
+            if (hasError()) {
+                if (!cf.isDone()) cf.completeExceptionally(getError())
+            } else {
+                try {
+                    if (!cf.isDone()) cf.complete(get())
+                } catch (Throwable t) {
+                    if (!cf.isDone()) cf.completeExceptionally(t)
+                }
+            }
+        }
+
         return cf
+    }
+
+    /**
+     * Convert this DataflowVariable to a {@link Gstream} containing zero or one elements.
+     * <p>
+     * This enables seamless integration with Gstream pipelines:
+     * <ul>
+     *   <li>On success → Gstream with one element (the value)</li>
+     *   <li>On error/cancel → Empty Gstream (errors are logged)</li>
+     *   <li>On pending → Blocks until bound, then returns appropriate stream</li>
+     * </ul>
+     * </p>
+     *
+     * <p>Example usage:</p>
+     * <pre>
+     * def dfv = factory.task { fetchData() }
+     * def results = dfv.toGstream()
+     *     .map { it * 2 }
+     *     .filter { it > 10 }
+     *     .toList()
+     * </pre>
+     *
+     * <p><b>Note:</b> Null values result in an empty stream.</p>
+     *
+     * @return Gstream containing the value or empty
+     */
+    Gstream<T> toGstream() {
+        if (hasError()) {
+            log.debug("toGstream: DFV has error, returning empty stream (error: {})", error?.message)
+            return Gstream.empty()
+        }
+
+        try {
+            T value = get()
+            return value != null ? Gstream.of(value) : Gstream.empty()
+        } catch (Exception e) {
+            log.warn("toGstream: Failed to get value, returning empty stream", e)
+            return Gstream.empty()
+        }
     }
 
 
@@ -266,7 +437,10 @@ class DataflowVariable<T> extends DataflowExpression<T> {
                 try {
                     callback.accept(v)
                 } catch (Throwable t) {
-                    log.error("Error in whenAvailable callback", t)
+                    String errorMsg = "Error in whenAvailable callback for ${type?.simpleName ?: 'Object'}: ${t.message}"
+                    log.error(errorMsg, t)
+                    // Collect the error using the protected method
+                    collectListenerError(errorMsg)
                 }
             }
         }

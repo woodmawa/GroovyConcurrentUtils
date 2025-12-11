@@ -160,7 +160,7 @@ class Dataflows extends GroovyObjectSupport {
         try {
             bindToDFV(name, value)
             return ensureDFV(name).getNonBlocking()
-        } catch (DataflowException e) {
+        } catch (IllegalStateException e) {
             throw new IllegalStateException("Property '$name' already bound", e)
         }
     }

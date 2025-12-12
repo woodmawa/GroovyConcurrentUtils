@@ -177,6 +177,47 @@ interface Agent<T> {
      */
     void setMaxQueueSize(int max)
 
+    /**
+     * Returns the agent's name for debugging and logging.
+     *
+     * @return agent name
+     * @since 1.1.0
+     */
+    String getName()
+
+    /**
+     * Returns the current state version number.
+     * Increments each time getValue() is called.
+     *
+     * @return state version
+     * @since 1.1.0
+     */
+    long getStateVersion()
+
+    // ----------------------------------------------------------------------
+    // Batch Operations
+    // ----------------------------------------------------------------------
+
+    /**
+     * Submits multiple tasks for execution.
+     * All tasks are queued sequentially.
+     *
+     * @param actions list of closures to execute
+     * @return this Agent for chaining
+     * @since 1.1.0
+     */
+    Agent<T> sendBatch(List<Closure> actions)
+
+    /**
+     * Submits multiple tasks and waits for all results.
+     *
+     * @param actions list of closures to execute
+     * @param timeoutSeconds timeout in seconds
+     * @return list of results from each closure
+     * @since 1.1.0
+     */
+    List<Object> sendAndGetBatch(List<Closure> actions, long timeoutSeconds)
+
     // ----------------------------------------------------------------------
     // Health & Metrics
     // ----------------------------------------------------------------------

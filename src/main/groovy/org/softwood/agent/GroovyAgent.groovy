@@ -90,8 +90,17 @@ class GroovyAgent<T> implements Agent<T> {
     /** Recent errors (limited queue) */
     private final ConcurrentLinkedQueue<Map<String, Object>> recentErrors = new ConcurrentLinkedQueue<>()
 
-    /** Maximum errors to retain */
-    private static final int MAX_ERRORS_RETAINED = 100
+    /** Maximum errors to retain (configurable) */
+    private final int maxErrorsRetained
+
+    /** Agent name for debugging */
+    private final String name
+
+    /** State version counter */
+    private final AtomicLong stateVersion = new AtomicLong(0)
+
+    /** Deep copy failures counter */
+    private final AtomicLong deepCopyFailures = new AtomicLong(0)
 
     // ----------------------------------------------------------------------
     // TASK TYPES
@@ -163,12 +172,21 @@ class GroovyAgent<T> implements Agent<T> {
      * @param copy strategy for defensive snapshot cloning; defaults to reflection-based deep copy
      * @param pool ExecutorPool for task execution
      * @param ownsPool whether this agent owns the pool and should shut it down
+     * @param name agent name for debugging (default: auto-generated)
+     * @param maxErrorsRetained maximum number of errors to retain (default: 100)
      */
-    GroovyAgent(@NotNull T wrappedObject, Supplier<T> copy = null, ExecutorPool pool = null, boolean ownsPool = false) {
+    GroovyAgent(@NotNull T wrappedObject, 
+                Supplier<T> copy = null, 
+                ExecutorPool pool = null, 
+                boolean ownsPool = false,
+                String name = null,
+                int maxErrorsRetained = 100) {
         this.wrappedObject = wrappedObject
         this.immutableCopySupplier = copy ?: { deepCopy(wrappedObject) } as Supplier<T>
         this.pool = pool ?: AgentFactory.defaultPool()
         this.ownsPool = ownsPool
+        this.name = name ?: "Agent-${UUID.randomUUID().toString().take(8)}"
+        this.maxErrorsRetained = maxErrorsRetained
     }
 
     // ----------------------------------------------------------------------
@@ -181,7 +199,7 @@ class GroovyAgent<T> implements Agent<T> {
         if (v == null) return null
         // Immutable types - return as-is
         if (v instanceof String || v instanceof Number || v instanceof Boolean || 
-            v instanceof Character || v instanceof Enum || v instanceof groovy.lang.GString)
+            v instanceof Character || v instanceof Enum || v instanceof GString)
             return v
         
         // Fast path for Cloneable
@@ -214,7 +232,7 @@ class GroovyAgent<T> implements Agent<T> {
         def cls = o.class
         def inst = cls.getDeclaredConstructor().newInstance()
 
-        def classes = []
+        List classes = []
         for (def c = cls; c != Object; c = c.superclass) classes.add(0, c)
 
         classes.each { c ->
@@ -264,7 +282,7 @@ class GroovyAgent<T> implements Agent<T> {
 
     /** Synchronous update with optional timeout */
     @Override
-    def <R> R sync(Closure<R> c, long t = 0) { sendAndGet(c, t) }
+    <R> R sync(Closure<R> c, long t = 0) { sendAndGet(c, t) }
 
     /** Operator: agent >> closure */
     @Override
@@ -272,7 +290,7 @@ class GroovyAgent<T> implements Agent<T> {
 
     /** Operator: agent << closure returning R */
     @Override
-    def <R> R leftShift(Closure<R> c) { sync(c) }
+    <R> R leftShift(Closure<R> c) { sync(c) }
 
     /**
      * Submits a closure and blocks until it completes.
@@ -282,7 +300,7 @@ class GroovyAgent<T> implements Agent<T> {
      * @return closure return value
      */
     @Override
-    def <R> R sendAndGet(Closure<R> action, long timeoutSeconds = 0L) {
+    <R> R sendAndGet(Closure<R> action, long timeoutSeconds = 0L) {
         if (shuttingDown.get()) throw new IllegalStateException("Agent is shutting down")
         def task = new SendAndGetTask<R>(action)
         def latch = new CountDownLatch(1)
@@ -306,7 +324,66 @@ class GroovyAgent<T> implements Agent<T> {
 
     /** Returns an immutable defensive snapshot of state */
     @Override
-    T getValue() { immutableCopySupplier?.get() ?: wrappedObject }
+    T getValue() {
+        stateVersion.incrementAndGet()
+        
+        try {
+            return immutableCopySupplier?.get() ?: wrappedObject
+        } catch (Exception e) {
+            deepCopyFailures.incrementAndGet()
+            log.warn("[${name}] Deep copy failed, returning direct reference (NOT SAFE)", e)
+            return wrappedObject  // Fallback - not ideal but better than crash
+        }
+    }
+
+    /**
+     * Returns the agent's name.
+     */
+    @Override
+    String getName() {
+        return name
+    }
+
+    /**
+     * Returns the current state version.
+     */
+    @Override
+    long getStateVersion() {
+        return stateVersion.get()
+    }
+
+    /**
+     * Submits multiple tasks for execution.
+     */
+    @Override
+    Agent<T> sendBatch(List<Closure> actions) {
+        if (actions == null || actions.isEmpty()) {
+            return this
+        }
+        
+        actions.each { action ->
+            send(action)
+        }
+        
+        return this
+    }
+
+    /**
+     * Submits multiple tasks and waits for all results.
+     */
+    @Override
+    List<Object> sendAndGetBatch(List<Closure> actions, long timeoutSeconds = 0L) {
+        if (actions == null || actions.isEmpty()) {
+            return []
+        }
+        
+        def results = []
+        actions.each { action ->
+            results << sendAndGet(action, timeoutSeconds)
+        }
+        
+        return results
+    }
 
     // ----------------------------------------------------------------------
     // LIFECYCLE MANAGEMENT
@@ -395,8 +472,8 @@ class GroovyAgent<T> implements Agent<T> {
      */
     @Override
     List<Map<String, Object>> getErrors(int maxCount = Integer.MAX_VALUE) {
-        def errors = recentErrors.toArray() as Map<String, Object>[]
-        return errors.take(Math.min(maxCount, errors.length)).toList()
+        Map<String, Object>[] errors = recentErrors.toArray() as Map<String, Object>[]
+        return Arrays.asList(errors).take(Math.min(maxCount, errors.length))
     }
 
     /**
@@ -418,11 +495,11 @@ class GroovyAgent<T> implements Agent<T> {
             timestamp: System.currentTimeMillis(),
             errorType: e.class.name,
             message: e.message ?: "No message",
-            stackTrace: e.stackTrace.take(5)*.toString()
+            stackTrace: Arrays.asList(e.stackTrace).take(5).collect { it.toString() }
         ]
         
-        recentErrors.offer(errorInfo)
-        while (recentErrors.size() > MAX_ERRORS_RETAINED) {
+        recentErrors.offer(errorInfo as Map<String, Object>)
+        while (recentErrors.size() > maxErrorsRetained) {
             recentErrors.poll()
         }
         
@@ -431,11 +508,11 @@ class GroovyAgent<T> implements Agent<T> {
             try {
                 errorHandler.call(e)
             } catch (Throwable handlerError) {
-                log.error("Error handler failed", handlerError)
+                log.error("[${name}] Error handler failed", handlerError)
             }
         }
         
-        log.error("Agent task failed", e)
+        log.error("[${name}] Agent task failed", e)
     }
 
     // ----------------------------------------------------------------------
@@ -486,6 +563,7 @@ class GroovyAgent<T> implements Agent<T> {
         }
         
         return [
+                name: name,
                 status: status,
                 shuttingDown: isShuttingDown,
                 terminated: isTerminated(),
@@ -495,7 +573,7 @@ class GroovyAgent<T> implements Agent<T> {
                 queueUtilization: maxQueueSize > 0 ? (queueSize * 100.0 / maxQueueSize) : 0.0,
                 recentErrorCount: recentErrors.size(),
                 timestamp: System.currentTimeMillis()
-        ]
+        ] as Map<String, Object>
     }
 
     /**
@@ -510,10 +588,12 @@ class GroovyAgent<T> implements Agent<T> {
         long completed = tasksCompleted.get()
         long errored = tasksErrored.get()
         long rejections = queueRejections.get()
+        long copyFailures = deepCopyFailures.get()
         int qDepth = taskQueue.size()
         boolean proc = processing.get()
         boolean shutdown = shuttingDown.get()
         long lastCompleted = lastTaskCompletedAt
+        long version = stateVersion.get()
         
         long now = System.currentTimeMillis()
         long uptime = now - createdAt
@@ -525,11 +605,14 @@ class GroovyAgent<T> implements Agent<T> {
         
         // Return consistent snapshot
         return [
+                name: name,
+                stateVersion: version,
                 tasksSubmitted: submitted,
                 tasksCompleted: completed,
                 tasksPending: pending,
                 tasksErrored: errored,
                 queueRejections: rejections,
+                deepCopyFailures: copyFailures,
                 queueDepth: qDepth,
                 maxQueueSize: maxQueueSize,
                 processing: proc,
@@ -541,7 +624,7 @@ class GroovyAgent<T> implements Agent<T> {
                 lastTaskCompletedAt: lastCompleted,
                 createdAt: createdAt,
                 timestamp: now
-        ]
+        ] as Map<String, Object>
     }
 
     // ----------------------------------------------------------------------

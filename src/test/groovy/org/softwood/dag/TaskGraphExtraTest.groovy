@@ -30,7 +30,7 @@ import java.util.function.Supplier
 import static java.util.concurrent.TimeUnit.SECONDS
 import static org.awaitility.Awaitility.await
 
-@org.junit.jupiter.api.Disabled("Multiple tests hang due to TaskGraph/Promise async issues - needs separate investigation")
+//@org.junit.jupiter.api.Disabled("Multiple tests hang due to TaskGraph/Promise async issues - needs separate investigation")
 class TaskGraphExtraTest {
 
     static <T> T awaitValue(Promise<T> promise) {
@@ -91,7 +91,6 @@ class TaskGraphExtraTest {
     // ---------------------------------------------------------------
     // Retry logic test
     // ---------------------------------------------------------------
-    @org.junit.jupiter.api.Disabled("Hangs - needs investigation separately from Dataflow work")
     @Test
     @DisplayName("Task retries until success")
     void testTaskRetries() {

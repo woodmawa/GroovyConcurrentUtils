@@ -265,7 +265,7 @@ class TaskGraphRoutingTest {
     // ------------------------------------------------------------
     // Test D – Mixed static + conditional routing
     // ------------------------------------------------------------
-    @org.junit.jupiter.api.Disabled("Hangs - investigating cause")
+    //@org.junit.jupiter.api.Disabled("Hangs - investigating cause")
     @Test
     void testMixedRouting() {
 

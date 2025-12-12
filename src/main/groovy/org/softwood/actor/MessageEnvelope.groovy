@@ -14,10 +14,10 @@ import java.util.concurrent.CompletableFuture
 class MessageEnvelope {
     final Object payload
     final CompletableFuture<Object> replyFuture
-    final ScopedValueActor sender  // Optional: for reply-to patterns
+    final Actor sender  // Optional: for reply-to patterns
 
     // Main constructor
-    MessageEnvelope(Object payload, CompletableFuture<Object> replyFuture, ScopedValueActor sender) {
+    MessageEnvelope(Object payload, CompletableFuture<Object> replyFuture, Actor sender) {
         this.payload = payload
         this.replyFuture = replyFuture
         this.sender = sender

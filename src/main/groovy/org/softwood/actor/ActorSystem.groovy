@@ -49,14 +49,19 @@ class ActorSystem implements Closeable {
     // Actor Creation & Management
     // ─────────────────────────────────────────────────────────────
 
-    ScopedValueActor createActor(String actorName, Closure handler, Map initialState = [:]) {
+    Actor createActor(String actorName, Closure handler, Map initialState = [:]) {
         if (registry.contains(actorName)) {
             throw new IllegalArgumentException("Actor '$actorName' already exists in system '$name'")
         }
 
-        def actor = new ScopedValueActor(actorName, initialState, handler)
+        def actor = ActorFactory.builder(actorName, handler)
+                .initialState(initialState)
+                .build()
+        
         // inject back-reference to system for context-enabled operations
-        actor.setSystem(this)
+        if (actor instanceof GroovyActor) {
+            ((GroovyActor) actor).setSystem(this)
+        }
         registry.register(actorName, actor)
 
         log.debug "Created actor: $actorName"
@@ -79,7 +84,7 @@ class ActorSystem implements Closeable {
     // Registry Access (delegated)
     // ─────────────────────────────────────────────────────────────
 
-    ScopedValueActor getActor(String actorName) {
+    Actor getActor(String actorName) {
         registry.get(actorName)
     }
 
@@ -138,7 +143,7 @@ class ActorSystem implements Closeable {
      *       onMessage { msg, ctx -> ... }
      *   }
      */
-    ScopedValueActor actor(
+    Actor actor(
             @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
                     Closure<?> spec) {
         ActorDSL.actor(this, spec)

@@ -20,6 +20,15 @@ dependencies {
     implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
     implementation 'io.vertx:vertx-core:5.0.5'
     implementation 'io.projectreactor:reactor-core:3.8.0'
+    // RSocket Core
+    implementation 'io.rsocket:rsocket-core:1.1.5'
+    implementation 'io.rsocket:rsocket-transport-netty:1.1.5'
+
+    // Netty (if not already included)
+    implementation 'io.netty:netty-all:4.2.7.Final'
+
+    // Optional: RSocket Load Balancer
+    implementation 'io.rsocket:rsocket-load-balancer:1.1.5'
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'

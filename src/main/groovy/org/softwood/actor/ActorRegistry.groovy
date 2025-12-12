@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 @Slf4j
 class ActorRegistry {
-    private final Map<String, ScopedValueActor> storage
+    private final Map<String, Actor> storage
     private final boolean isDistributed
 
     ActorRegistry() {
@@ -28,7 +28,7 @@ class ActorRegistry {
     // Uniform Registry API (works for both local & distributed)
     // ─────────────────────────────────────────────────────────────
 
-    void register(String name, ScopedValueActor actor) {
+    void register(String name, Actor actor) {
         storage.put(name, actor)
         log.debug "Registered actor: $name (distributed: $isDistributed)"
     }
@@ -38,7 +38,7 @@ class ActorRegistry {
         log.debug "Unregistered actor: $name"
     }
 
-    ScopedValueActor get(String name) {
+    Actor get(String name) {
         storage.get(name)
     }
 
@@ -50,7 +50,7 @@ class ActorRegistry {
         storage.keySet()
     }
 
-    Collection<ScopedValueActor> getAllActors() {
+    Collection<Actor> getAllActors() {
         storage.values()
     }
 
@@ -71,12 +71,12 @@ class ActorRegistry {
     // Storage Strategy Creation
     // ─────────────────────────────────────────────────────────────
 
-    private Map<String, ScopedValueActor> createLocalStorage() {
+    private Map<String, Actor> createLocalStorage() {
         log.info "Using local ConcurrentHashMap for actor registry"
         return new ConcurrentHashMap<>()
     }
 
-    private Map<String, ScopedValueActor> createDistributedStorage(Map config) {
+    private Map<String, Actor> createDistributedStorage(Map config) {
         def clusterName = ConfigLoader.getString(config, 'hazelcast.cluster.name', 'default-cluster')
         def port = ConfigLoader.getInt(config, 'hazelcast.port', 5701)
 

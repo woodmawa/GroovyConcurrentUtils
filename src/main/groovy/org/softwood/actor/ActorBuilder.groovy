@@ -121,7 +121,7 @@ class ActorBuilder {
     // Build
     // ─────────────────────────────────────────────────────────────
 
-    ScopedValueActor build() {
+    Actor build() {
         // If patterns are defined, build pattern-matching handler
         if (!patterns.isEmpty()) {
             this.handler = buildPatternHandler()

@@ -28,7 +28,7 @@ class ActorContext {
     final ActorSystem system
 
     // Optional: track sender for reply-to patterns
-    final ScopedValueActor sender
+    final Actor sender
 
     private final CompletableFuture<Object> replyFuture
 
@@ -38,7 +38,7 @@ class ActorContext {
             Map state,
             ActorSystem system,
             CompletableFuture<Object> replyFuture,
-            ScopedValueActor sender = null) {
+            Actor sender = null) {
         this.actorName = actorName
         this.message = message
         this.state = state
@@ -92,7 +92,7 @@ class ActorContext {
     /**
      * Forward to actor instance directly.
      */
-    void forward(ScopedValueActor target, Object msg) {
+    void forward(Actor target, Object msg) {
         if (target) {
             target.tell(msg)
             log.debug "[$actorName] forwarded message to [${target.name}]"
@@ -132,7 +132,7 @@ class ActorContext {
     /**
      * Forward to actor instance and reply with response.
      */
-    void forwardAndReply(ScopedValueActor target, Object msg, Duration timeout = Duration.ofSeconds(5)) {
+    void forwardAndReply(Actor target, Object msg, Duration timeout = Duration.ofSeconds(5)) {
         if (!target) {
             throw new IllegalArgumentException("Target actor is null")
         }
@@ -150,7 +150,7 @@ class ActorContext {
      *   def worker = ctx.actorRef("Worker")
      *   worker.tell("do work")
      */
-    ScopedValueActor actorRef(String name) {
+    Actor actorRef(String name) {
         system.getActor(name)
     }
 
@@ -217,7 +217,7 @@ class ActorContext {
     /**
      * Get reference to self (useful for passing to other actors).
      */
-    ScopedValueActor self() {
+    Actor self() {
         system.getActor(actorName)
     }
 

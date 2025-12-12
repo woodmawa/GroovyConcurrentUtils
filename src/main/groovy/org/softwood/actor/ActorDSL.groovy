@@ -33,7 +33,7 @@ class ActorDSL {
     /**
      * Create an actor using builder DSL.
      */
-    static ScopedValueActor actor(
+    static Actor actor(
             ActorSystem system,
             @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
                     Closure<?> spec) {

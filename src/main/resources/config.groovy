@@ -3,6 +3,8 @@
 distributed = false
 
 // Remote Actor Transport Configuration
+import org.softwood.actor.remote.security.SecretsResolver
+
 actor {
     remote {
         // Transport: 'rsocket' (default) or 'http'
@@ -20,10 +22,10 @@ actor {
             // TLS/SSL configuration (optional)
             tls {
                 enabled = false
-                keyStore = '/path/to/keystore.jks'
-                keyStorePassword = 'changeit'
-                trustStore = '/path/to/truststore.jks'
-                trustStorePassword = 'changeit'
+                keyStore = '/etc/actors/server-keystore.jks'
+                keyStorePassword = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
+                trustStore = '/etc/actors/truststore.jks'
+                trustStorePassword = SecretsResolver.resolve('TLS_TRUSTSTORE_PASSWORD', 'changeit')
             }
         }
         
@@ -36,8 +38,8 @@ actor {
             // HTTPS/TLS configuration (optional)
             tls {
                 enabled = false
-                keyStore = '/path/to/keystore.jks'
-                keyStorePassword = 'changeit'
+                keyStore = '/etc/actors/server-keystore.jks'
+                keyStorePassword = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
             }
         }
     }

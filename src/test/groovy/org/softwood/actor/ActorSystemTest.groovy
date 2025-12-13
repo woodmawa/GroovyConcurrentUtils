@@ -51,40 +51,35 @@ class ActorSystemTest {
     void testGetActorDelegatesToRegistry() {
         // 1. Arrange
 
-        // 1a. Setup mock actor (typed correctly via anonymous subclass)
+        // 1a. Setup mock actor using ActorFactory
         def dummyHandler = { msg, ctx -> /* no-op */ }
-        def mockActor = new ScopedValueActor("myActor", [:], dummyHandler) {}
+        def mockActor = ActorFactory.create("myActor", dummyHandler)
 
-        // 🚨 FINAL FIX: Create a stable, anonymous subclass of ActorRegistry.
-        // This allows us to override the required methods reliably without using StubFor.
+        // Create a stable, anonymous subclass of ActorRegistry.
         def mockRegistry = new ActorRegistry() {
 
-            // This method is called in the ActorSystem constructor (line 45)
             @Override
             boolean isDistributed() {
-                return false // Return a stable value to satisfy logging
+                return false
             }
 
-            // This method is the core delegation logic we are testing
             @Override
-            ScopedValueActor get(String name) {
-                assertEquals "myActor", name // Verify the argument passed by the system
+            Actor get(String name) {
+                assertEquals "myActor", name
                 return mockActor
             }
-
-            // You may need to add overrides for any other methods ActorSystem uses (e.g., size(), clear(), register())
         }
 
-        // 1b. Inject the stable mock registry.
-        // No StubFor/MockFor needed.
         def system = new ActorSystem("test-system", mockRegistry)
 
         // 2. Act
-        // No 'use' block needed.
         def result = system.getActor("myActor")
 
         // 3. Assert
         assertEquals(mockActor, result)
+        
+        // Cleanup
+        mockActor.stop()
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -94,56 +89,67 @@ class ActorSystemTest {
     @Test
     @CompileDynamic
     void testRemoveActorStopsAndUnregisters() {
-        // 1. Arrange
-
         // Manual verification flags/counters
         def stopCalled = false
         def unregisterCalled = false
 
-        // 1a. Create a STABLE ANONYMOUS MOCK ACTOR
+        // Create mock actor using ActorFactory
         def dummyHandler = { msg, ctx -> /* no-op */ }
-
-        // This object is correctly typed and overrides 'stop' for tracking
-        def mockActor = new ScopedValueActor("actor-to-remove", [:], dummyHandler) {
-            @Override
-            void stop() {
-                stopCalled = true // Track the stop call manually
+        def mockActor = ActorFactory.create("actor-to-remove", dummyHandler)
+        
+        // Wrap it to track stop calls
+        def trackedActor = new Actor() {
+            @Override void tell(Object msg) { mockActor.tell(msg) }
+            @Override void tell(Object msg, Actor sender) { mockActor.tell(msg, sender) }
+            @Override void send(Object msg) { mockActor.send(msg) }
+            @Override Object ask(Object msg, Duration timeout) { mockActor.ask(msg, timeout) }
+            @Override Object askSync(Object msg, Duration timeout) { mockActor.askSync(msg, timeout) }
+            @Override void sendAndContinue(Object msg, Closure continuation, Duration timeout) { 
+                mockActor.sendAndContinue(msg, continuation, timeout) 
             }
+            @Override Object sendAndWait(Object msg, Duration timeout) { mockActor.sendAndWait(msg, timeout) }
+            @Override String getName() { mockActor.getName() }
+            @Override Map getState() { mockActor.getState() }
+            @Override void stop() { stopCalled = true; mockActor.stop() }
+            @Override boolean stop(Duration timeout) { stopCalled = true; return mockActor.stop(timeout) }
+            @Override void stopNow() { stopCalled = true; mockActor.stopNow() }
+            @Override boolean isStopped() { mockActor.isStopped() }
+            @Override boolean isTerminated() { mockActor.isTerminated() }
+            @Override Actor onError(Closure handler) { mockActor.onError(handler) }
+            @Override List getErrors(int maxCount) { mockActor.getErrors(maxCount) }
+            @Override void clearErrors() { mockActor.clearErrors() }
+            @Override void setMaxMailboxSize(int max) { mockActor.setMaxMailboxSize(max) }
+            @Override int getMaxMailboxSize() { mockActor.getMaxMailboxSize() }
+            @Override Map health() { mockActor.health() }
+            @Override Map metrics() { mockActor.metrics() }
         }
 
-        // 1b. Create a STABLE ANONYMOUS MOCK REGISTRY
-        // This object is correctly typed and handles all required delegation/logic.
+        // Create mock registry
         def mockRegistry = new ActorRegistry() {
-
-            // Handles the call in ActorSystem constructor: log.info "... (distributed: ${registry.isDistributed()})"
             @Override
             boolean isDistributed() {
                 return false
             }
 
-            // Handles system.removeActor() calling registry.get(name)
             @Override
-            ScopedValueActor get(String name) {
+            Actor get(String name) {
                 assertEquals "actor-to-remove", name
-                return mockActor // Returns the stable mock actor
+                return trackedActor
             }
 
-            // Handles system.removeActor() calling registry.unregister(name)
             @Override
             void unregister(String name) {
                 assertEquals "actor-to-remove", name
-                unregisterCalled = true // Track the unregister call manually
+                unregisterCalled = true
             }
         }
 
-        // Inject the stable mock registry.
         def system = new ActorSystem("test-system", mockRegistry)
 
-        // 2. Act
-        // No 'use' block is necessary as we are not using MockFor/StubFor.
+        // Act
         system.removeActor("actor-to-remove")
 
-        // 3. Assert
+        // Assert
         assertTrue(stopCalled, "Expected actor.stop() to be called once by removeActor.")
         assertTrue(unregisterCalled, "Expected registry.unregister() to be called once by removeActor.")
     }
@@ -151,60 +157,93 @@ class ActorSystemTest {
     @Test
     @CompileDynamic
     void testShutdownStopsAllActorsAndClearsRegistry() {
-        // 1. Arrange
-
         // Manual tracking flags/counters
         def stopCount = 0
         def clearCalled = false
 
-        // Define the mandatory Closure argument for the ScopedValueActor constructor
         def dummyHandler = { msg, ctx -> /* no-op */ }
 
-        // 1a. Create anonymous subclass mocks for the actors
-        def mockActor1 = new ScopedValueActor("A1", [:], dummyHandler) {
-            @Override
-            void stop() {
-                stopCount++
+        // Create actors using ActorFactory
+        def mockActor1 = ActorFactory.create("A1", dummyHandler)
+        def mockActor2 = ActorFactory.create("A2", dummyHandler)
+        
+        // Wrap them to track stop calls
+        def trackedActor1 = new Actor() {
+            @Override void tell(Object msg) { mockActor1.tell(msg) }
+            @Override void tell(Object msg, Actor sender) { mockActor1.tell(msg, sender) }
+            @Override void send(Object msg) { mockActor1.send(msg) }
+            @Override Object ask(Object msg, Duration timeout) { mockActor1.ask(msg, timeout) }
+            @Override Object askSync(Object msg, Duration timeout) { mockActor1.askSync(msg, timeout) }
+            @Override void sendAndContinue(Object msg, Closure continuation, Duration timeout) { 
+                mockActor1.sendAndContinue(msg, continuation, timeout) 
             }
+            @Override Object sendAndWait(Object msg, Duration timeout) { mockActor1.sendAndWait(msg, timeout) }
+            @Override String getName() { mockActor1.getName() }
+            @Override Map getState() { mockActor1.getState() }
+            @Override void stop() { stopCount++; mockActor1.stop() }
+            @Override boolean stop(Duration timeout) { stopCount++; return mockActor1.stop(timeout) }
+            @Override void stopNow() { stopCount++; mockActor1.stopNow() }
+            @Override boolean isStopped() { mockActor1.isStopped() }
+            @Override boolean isTerminated() { mockActor1.isTerminated() }
+            @Override Actor onError(Closure handler) { mockActor1.onError(handler) }
+            @Override List getErrors(int maxCount) { mockActor1.getErrors(maxCount) }
+            @Override void clearErrors() { mockActor1.clearErrors() }
+            @Override void setMaxMailboxSize(int max) { mockActor1.setMaxMailboxSize(max) }
+            @Override int getMaxMailboxSize() { mockActor1.getMaxMailboxSize() }
+            @Override Map health() { mockActor1.health() }
+            @Override Map metrics() { mockActor1.metrics() }
+        }
+        
+        def trackedActor2 = new Actor() {
+            @Override void tell(Object msg) { mockActor2.tell(msg) }
+            @Override void tell(Object msg, Actor sender) { mockActor2.tell(msg, sender) }
+            @Override void send(Object msg) { mockActor2.send(msg) }
+            @Override Object ask(Object msg, Duration timeout) { mockActor2.ask(msg, timeout) }
+            @Override Object askSync(Object msg, Duration timeout) { mockActor2.askSync(msg, timeout) }
+            @Override void sendAndContinue(Object msg, Closure continuation, Duration timeout) { 
+                mockActor2.sendAndContinue(msg, continuation, timeout) 
+            }
+            @Override Object sendAndWait(Object msg, Duration timeout) { mockActor2.sendAndWait(msg, timeout) }
+            @Override String getName() { mockActor2.getName() }
+            @Override Map getState() { mockActor2.getState() }
+            @Override void stop() { stopCount++; mockActor2.stop() }
+            @Override boolean stop(Duration timeout) { stopCount++; return mockActor2.stop(timeout) }
+            @Override void stopNow() { stopCount++; mockActor2.stopNow() }
+            @Override boolean isStopped() { mockActor2.isStopped() }
+            @Override boolean isTerminated() { mockActor2.isTerminated() }
+            @Override Actor onError(Closure handler) { mockActor2.onError(handler) }
+            @Override List getErrors(int maxCount) { mockActor2.getErrors(maxCount) }
+            @Override void clearErrors() { mockActor2.clearErrors() }
+            @Override void setMaxMailboxSize(int max) { mockActor2.setMaxMailboxSize(max) }
+            @Override int getMaxMailboxSize() { mockActor2.getMaxMailboxSize() }
+            @Override Map health() { mockActor2.health() }
+            @Override Map metrics() { mockActor2.metrics() }
         }
 
-        def mockActor2 = new ScopedValueActor("A2", [:], dummyHandler) {
-            @Override
-            void stop() {
-                stopCount++
-            }
-        }
-
-        // 1b. 🚨 FIX: Create a STABLE ANONYMOUS MOCK REGISTRY.
+        // Create mock registry
         def mockRegistry = new ActorRegistry() {
-
-            // Handles the call in ActorSystem constructor: log.info "... (distributed: ${registry.isDistributed()})"
             @Override
             boolean isDistributed() {
-                return false // Guarantees stable return value
+                return false
             }
 
-            // Handles system.shutdown() calling registry.getAllActors()
             @Override
-            List<ScopedValueActor> getAllActors() {
-                return [mockActor1, mockActor2]
+            List<Actor> getAllActors() {
+                return [trackedActor1, trackedActor2]
             }
 
-            // Handles system.shutdown() calling registry.clear()
             @Override
             void clear() {
-                clearCalled = true // Manual verification
+                clearCalled = true
             }
         }
 
-        // Inject the stable mock registry.
         def system = new ActorSystem("test-system", mockRegistry)
 
-        // 2. Act
-        // No 'use' block is necessary as we are not using StubFor.
+        // Act
         system.shutdown()
 
-        // 3. Assert (Verification)
+        // Assert
         assertEquals(2, stopCount, "Expected stop() to be called twice on the actors.")
         assertTrue(clearCalled, "Expected registry.clear() to be called once.")
     }

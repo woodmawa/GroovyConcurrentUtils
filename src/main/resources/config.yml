@@ -1,6 +1,28 @@
 # base yaml can have config-<env>.yml overrides
 
 distributed: false
+
+# Remote Actor Transport Configuration
+actor:
+  remote:
+    # Transport: 'rsocket' (default) or 'http'
+    transport: rsocket
+    
+    # Serialization: 'messagepack' (default, recommended), 'json' (debugging), 'microstream' (experimental)
+    serialization: messagepack
+    
+    # RSocket configuration
+    rsocket:
+      enabled: true
+      port: 7000
+      host: 0.0.0.0
+    
+    # HTTP configuration (fallback)
+    http:
+      enabled: false
+      port: 8080
+      host: 0.0.0.0
+
 hazelcast:
   cluster:
     name: local-cluster

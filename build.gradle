@@ -17,7 +17,10 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
     implementation "org.yaml:snakeyaml:2.5"
+    //two serialisers
     implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
+    implementation 'org.msgpack:msgpack-core:0.9.10'  //will be our default
+
     implementation 'io.vertx:vertx-core:5.0.5'
     implementation 'io.projectreactor:reactor-core:3.8.0'
     // RSocket Core

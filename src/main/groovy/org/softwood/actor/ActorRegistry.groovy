@@ -103,7 +103,7 @@ $configSummary
      * Prefer using the typed methods above.
      */
     @Deprecated
-    Map<String, ScopedValueActor> getRegistry() {
-        storage
+    Map<String, Actor> getRegistry() {
+        storage.asImmutable ()
     }
 }

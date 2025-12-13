@@ -116,7 +116,7 @@ class ActorSystem implements Closeable {
         for (Object actorRef : registry.getAllActors()) {
             try {
                 // We know these objects are ScopedValueActor types
-                ((ScopedValueActor)actorRef).stop()
+                ((Actor)actorRef).stop()
             } catch (Exception e) {
                 // Assuming 'actorRef' has a 'name' property for logging
                 log.warn "Error stopping actor ${actorRef}: ${e.message}"

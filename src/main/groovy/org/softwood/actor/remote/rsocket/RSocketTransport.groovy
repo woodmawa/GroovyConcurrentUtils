@@ -392,12 +392,31 @@ class RSocketTransport implements RemotingTransport {
         return connections.computeIfAbsent(key, new java.util.function.Function<String, RSocket>() {
             @Override
             RSocket apply(String k) {
-                log.info("Creating RSocket connection to ${k}")
+                log.info("Creating RSocket connection to ${k} (TLS: ${tlsConfig.enabled})")
                 
                 try {
-                    return RSocketConnector.create()
-                        .connect(TcpClientTransport.create(host, port))
-                        .block() // Block to get connection
+                    if (tlsConfig.enabled) {
+                        // TLS-enabled client
+                        def sslContext = createClientSslContext()
+                        
+                        return RSocketConnector.create()
+                            .connect(
+                                TcpClientTransport.create(
+                                    TcpClient.create()
+                                        .host(host)
+                                        .port(port)
+                                        .secure { spec ->
+                                            spec.sslContext(sslContext)
+                                        }
+                                )
+                            )
+                            .block()
+                    } else {
+                        // Plain TCP client
+                        return RSocketConnector.create()
+                            .connect(TcpClientTransport.create(host, port))
+                            .block()
+                    }
                         
                 } catch (Exception e) {
                     log.error("Failed to connect to ${k}", e)
@@ -405,6 +424,61 @@ class RSocketTransport implements RemotingTransport {
                 }
             }
         })
+    }
+    
+    /**
+     * Creates SSL context for client connections.
+     */
+    private SslContext createClientSslContext() {
+        try {
+            // Build Netty SSL context for client
+            def sslContextBuilder = SslContextBuilder.forClient()
+            
+            // Add truststore (required for client to verify server)
+            if (tlsConfig.trustStorePath) {
+                def trustStore = java.security.KeyStore.getInstance("JKS")
+                new FileInputStream(tlsConfig.trustStorePath).withCloseable { fis ->
+                    trustStore.load(fis, tlsConfig.trustStorePassword.toCharArray())
+                }
+                
+                def tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+                )
+                tmf.init(trustStore)
+                
+                sslContextBuilder.trustManager(tmf)
+            } else {
+                log.warn("TLS enabled but no truststore configured - using system default")
+            }
+            
+            // Add client certificate if configured (for mTLS)
+            if (tlsConfig.keyStorePath) {
+                log.debug("Configuring client certificate for mutual TLS")
+                
+                def keyStore = java.security.KeyStore.getInstance("JKS")
+                new FileInputStream(tlsConfig.keyStorePath).withCloseable { fis ->
+                    keyStore.load(fis, tlsConfig.keyStorePassword.toCharArray())
+                }
+                
+                def kmf = javax.net.ssl.KeyManagerFactory.getInstance(
+                    javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+                )
+                kmf.init(keyStore, tlsConfig.keyStorePassword.toCharArray())
+                
+                sslContextBuilder.keyManager(kmf)
+            }
+            
+            // Set protocols (TLS 1.3, TLS 1.2)
+            if (tlsConfig.protocols) {
+                sslContextBuilder.protocols(tlsConfig.protocols as String[])
+            }
+            
+            return sslContextBuilder.build()
+            
+        } catch (Exception e) {
+            log.error("Failed to create client SSL context", e)
+            throw new RuntimeException("TLS client configuration error", e)
+        }
     }
     
     /**

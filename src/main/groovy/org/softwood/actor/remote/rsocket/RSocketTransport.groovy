@@ -291,6 +291,9 @@ class RSocketTransport implements RemotingTransport {
             try {
                 def message = deserialize(payload)
                 
+                // Create auth context from token
+                def authContext = null
+                
                 // Check authentication if enabled
                 if (authConfig.enabled && authConfig.requireToken) {
                     def token = message.token as String
@@ -301,6 +304,7 @@ class RSocketTransport implements RemotingTransport {
                     
                     try {
                         def claims = jwtService.validateToken(token)
+                        authContext = new org.softwood.actor.remote.security.AuthContext(claims, token)
                         log.debug("Authenticated tell from: ${claims.subject}")
                     } catch (JwtTokenService.ExpiredTokenException e) {
                         log.warn("Rejected tell - token expired: ${e.message}")
@@ -318,6 +322,7 @@ class RSocketTransport implements RemotingTransport {
                 log.debug("Available actors: ${localSystem?.getActorNames()}")
                 
                 if (localSystem?.hasActor(actorName)) {
+                    // Pass auth context to actor (future: for per-message authorization)
                     localSystem.getActor(actorName).tell(msg)
                     log.debug("Delivered tell to actor: ${actorName}")
                 } else {
@@ -339,6 +344,9 @@ class RSocketTransport implements RemotingTransport {
             try {
                 def message = deserialize(payload)
                 
+                // Create auth context from token
+                def authContext = null
+                
                 // Check authentication if enabled
                 if (authConfig.enabled && authConfig.requireToken) {
                     def token = message.token as String
@@ -353,6 +361,7 @@ class RSocketTransport implements RemotingTransport {
                     
                     try {
                         def claims = jwtService.validateToken(token)
+                        authContext = new org.softwood.actor.remote.security.AuthContext(claims, token)
                         log.debug("Authenticated ask from: ${claims.subject}")
                     } catch (JwtTokenService.ExpiredTokenException e) {
                         log.warn("Rejected ask - token expired: ${e.message}")
@@ -379,6 +388,7 @@ class RSocketTransport implements RemotingTransport {
                 log.debug("Available actors: ${localSystem?.getActorNames()}")
                 
                 if (localSystem?.hasActor(actorName)) {
+                    // Pass auth context to actor (future: for per-message authorization)
                     def reply = localSystem.getActor(actorName)
                         .askSync(msg, Duration.ofMillis(timeoutMs))
                     

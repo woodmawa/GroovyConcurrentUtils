@@ -5,6 +5,7 @@ package org.softwood.actor
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
+import org.softwood.actor.remote.security.AuthContext as SecurityAuthContext
 
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
@@ -29,6 +30,9 @@ class ActorContext {
 
     // Optional: track sender for reply-to patterns
     final Actor sender
+    
+    // Optional: authentication context (for RBAC)
+    final SecurityAuthContext authContext
 
     private final CompletableFuture<Object> replyFuture
 
@@ -38,13 +42,15 @@ class ActorContext {
             Map state,
             ActorSystem system,
             CompletableFuture<Object> replyFuture,
-            Actor sender = null) {
+            Actor sender = null,
+            SecurityAuthContext authContext = null) {
         this.actorName = actorName
         this.message = message
         this.state = state
         this.system = system
         this.replyFuture = replyFuture
         this.sender = sender
+        this.authContext = authContext ?: new SecurityAuthContext() // Unauthenticated by default
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -227,6 +233,106 @@ class ActorContext {
      */
     void tellSelf(Object msg) {
         self()?.tell(msg)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Authorization & Security
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Check if request is authenticated.
+     * 
+     * @return true if authenticated
+     */
+    boolean isAuthenticated() {
+        return authContext.authenticated
+    }
+    
+    /**
+     * Get authenticated subject (username/service ID).
+     * 
+     * @return subject or null if not authenticated
+     */
+    String getSubject() {
+        return authContext.subject
+    }
+    
+    /**
+     * Get authenticated user's roles.
+     * 
+     * @return list of roles or empty if not authenticated
+     */
+    List<String> getRoles() {
+        return authContext.roles
+    }
+    
+    /**
+     * Check if authenticated user has a specific role.
+     * 
+     * @param role role name
+     * @return true if user has role
+     */
+    boolean hasRole(String role) {
+        return authContext.hasRole(role)
+    }
+    
+    /**
+     * Check if authenticated user has any of the specified roles.
+     * 
+     * @param roles list of role names
+     * @return true if user has at least one role
+     */
+    boolean hasAnyRole(List<String> roles) {
+        return authContext.hasAnyRole(roles)
+    }
+    
+    /**
+     * Check if authenticated user has all of the specified roles.
+     * 
+     * @param roles list of role names
+     * @return true if user has all roles
+     */
+    boolean hasAllRoles(List<String> roles) {
+        return authContext.hasAllRoles(roles)
+    }
+    
+    /**
+     * Require authentication - throws if not authenticated.
+     * 
+     * @throws SecurityAuthContext.AuthenticationException if not authenticated
+     */
+    void requireAuthenticated() {
+        authContext.requireAuthenticated()
+    }
+    
+    /**
+     * Require specific role - throws if not present.
+     * 
+     * @param role required role
+     * @throws SecurityAuthContext.AuthorizationException if role not present
+     */
+    void requireRole(String role) {
+        authContext.requireRole(role)
+    }
+    
+    /**
+     * Require any of the specified roles - throws if none present.
+     * 
+     * @param roles required roles
+     * @throws SecurityAuthContext.AuthorizationException if no roles present
+     */
+    void requireAnyRole(List<String> roles) {
+        authContext.requireAnyRole(roles)
+    }
+    
+    /**
+     * Require all of the specified roles - throws if not all present.
+     * 
+     * @param roles required roles
+     * @throws SecurityAuthContext.AuthorizationException if not all roles present
+     */
+    void requireAllRoles(List<String> roles) {
+        authContext.requireAllRoles(roles)
     }
 
     // ─────────────────────────────────────────────────────────────

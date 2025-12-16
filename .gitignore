@@ -41,3 +41,37 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+# Certificates and Keys (SECURITY)
+*.cer
+*.crt
+*.key
+*.jks
+*.p12
+*.pfx
+
+# TLS Configuration (SECURITY)
+tls-config.properties
+
+# Log Files
+*.log
+logs/
+
+# Test Certificates (if you have a test directory)
+scripts/certs/*.cer
+scripts/certs/*.jks
+
+# Environment Variables (if you create .env files)
+.env
+.env.local
+.env.*.local
+
+# Secrets (if you create secret files)
+secrets/
+*.secrets
+
+# Database files (if you add persistence)
+*.db
+*.sqlite
+*.h2.db
+

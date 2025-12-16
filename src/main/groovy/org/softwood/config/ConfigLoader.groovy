@@ -1,263 +1,362 @@
 package org.softwood.config
 
 import groovy.json.JsonSlurper
+import groovy.transform.CompileStatic
+import groovy.util.ConfigSlurper
 import groovy.util.logging.Slf4j
 import org.yaml.snakeyaml.Yaml
 
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+
 @Slf4j
+@CompileStatic
 class ConfigLoader {
 
-    private static final String DEFAULT_PROFILE = 'dev'
+    static ConfigResult load(Map options = [:]) {
 
-    /**
-     * Loads and merges config from multiple sources with profile support.
-     *
-     * Profile resolution order:
-     * 1. Environment variable: APP_PROFILE or PROFILE
-     * 2. System property: -Dapp.profile=xxx
-     * 3. Default: 'dev'
-     *
-     * Config loading order (later overrides earlier):
-     * 1. Base configs (config.json, config.groovy, config.yml, config.properties)
-     * 2. Profile-specific configs (config-{profile}.json, etc.)
-     * 3. System properties (-Dapp.xxx=yyy)
-     * 4. Environment variables (USE_DISTRIBUTED, etc.)
-     */
-    static Map loadConfig() {
-        String profile = resolveProfile()
-        log.debug "Active profile: $profile"
+        ConfigSpec spec = options.spec instanceof ConfigSpec
+                ? (ConfigSpec) options.spec
+                : ConfigSpec.defaultSpec()
 
-        Map mergedConfig = [:]
+        String profile = options.profile instanceof String
+                ? (String) options.profile
+                : resolveProfile(spec)
 
-        // Load base configs first
-        mergedConfig = deepMerge(mergedConfig, loadJsonConfig(null))
-        mergedConfig = deepMerge(mergedConfig, loadGroovyConfig(null))
-        mergedConfig = deepMerge(mergedConfig, loadYamlConfig(null))
-        mergedConfig = deepMerge(mergedConfig, loadPropertiesConfig(null))
+        Trace trace = new Trace()
+        Map<String, Object> merged = new LinkedHashMap<>()
 
-        // Load profile-specific configs (override base configs)
-        mergedConfig = deepMerge(mergedConfig, loadJsonConfig(profile))
-        mergedConfig = deepMerge(mergedConfig, loadGroovyConfig(profile))
-        mergedConfig = deepMerge(mergedConfig, loadYamlConfig(profile))
-        mergedConfig = deepMerge(mergedConfig, loadPropertiesConfig(profile))
+        // ============================================================
+        // 1) Classpath configs (library → user)
+        // ============================================================
 
-        // Add profile to config
-        mergedConfig.profile = profile
+        merged = mergeAll(
+                merged,
+                trace,
+                ClasspathConfigSource.load(
+                        spec.libraryDefaultsPath,
+                        spec.libraryBaseNames,
+                        profile
+                )
+        )
 
-        // Override with system properties
-        mergedConfig = deepMerge(mergedConfig, loadSystemProperties())
+        merged = mergeAll(
+                merged,
+                trace,
+                ClasspathConfigSource.load(
+                        '',
+                        spec.userBaseNames,
+                        profile
+                )
+        )
 
-        // Override with environment variables (highest priority)
-        mergedConfig = deepMerge(mergedConfig, loadEnvironmentVariables())
+        // ============================================================
+        // 2) External config files
+        // ============================================================
 
-        return mergedConfig
-    }
-
-    /**
-     * Resolve the active profile from environment or system properties
-     */
-    private static String resolveProfile() {
-        // Check environment variables first
-        def envProfile = System.getenv('APP_PROFILE') ?: System.getenv('PROFILE')
-        if (envProfile) {
-            return envProfile
+        List<Path> externalFiles = collectExternalFiles(options, spec, profile)
+        for (Path p : externalFiles) {
+            Map<String, Object> ext = loadExternalFile(p, profile, trace)
+            merged = deepMergeWithTrace(
+                    merged,
+                    ext,
+                    trace,
+                    "external:" + p.toAbsolutePath()
+            )
         }
 
-        // Check system properties
-        def sysProfile = System.getProperty('app.profile') ?: System.getProperty('profile')
-        if (sysProfile) {
-            return sysProfile
+        // ============================================================
+        // 3) System properties
+        // ============================================================
+
+        merged = deepMergeWithTrace(
+                merged,
+                loadSystemProperties(spec),
+                trace,
+                "system-properties"
+        )
+
+        // ============================================================
+        // 4) Environment variables
+        // ============================================================
+
+        merged = deepMergeWithTrace(
+                merged,
+                loadEnvironmentVariables(spec),
+                trace,
+                "environment"
+        )
+
+        // ============================================================
+        // 5) Profile marker
+        // ============================================================
+
+        merged.put(spec.profileKey, profile)
+        trace.record(
+                spec.profileKey,
+                profile,
+                "computed:profile",
+                TraceEvent.Kind.SET
+        )
+
+        // ------------------------------------------------------------
+        // 6) Explicit overrides (applied last)
+        // ------------------------------------------------------------
+        if (options.overrides instanceof Map) {
+            Map<String, Object> o = (Map<String, Object>) options.overrides
+            merged = deepMergeWithTrace(
+                    merged,
+                    o,
+                    trace,
+                    "overrides"
+            )
         }
 
-        return DEFAULT_PROFILE
-    }
+        // ============================================================
+        // 7) Schema validation + coercion
+        // ============================================================
 
-    private static Map loadJsonConfig(String profile) {
-        def filename = profile ? "/config-${profile}.json" : "/config.json"
-        def configStream = ConfigLoader.class.getResourceAsStream(filename)
-        if (configStream) {
+        List<String> errors = []
+        List<String> warnings = []
+
+        if (spec.schema != null) {
+            spec.schema.validate(merged, errors, warnings)
+        }
+
+        // ============================================================
+        // 8) Validators
+        // ============================================================
+
+        TraceSnapshot snapshot = trace.freeze()
+
+        for (ConfigValidator v : spec.validators) {
             try {
-                def json = new JsonSlurper().parse(configStream)
-                log.debug "Loaded ${filename}"
-                return flattenMap(json)
+                v.validate(merged, errors, warnings, profile, snapshot)
             } catch (Exception e) {
-                log.debug "Error loading ${filename}: ${e.message}"
-            }
-        }
-        return [:]
-    }
-
-    private static Map loadGroovyConfig(String profile) {
-        def filename = profile ? "/config-${profile}.groovy" : "/config.groovy"
-        def configUrl = ConfigLoader.class.getResource(filename)
-        if (configUrl) {
-            try {
-                def config = new ConfigSlurper(profile ?: '').parse(configUrl)
-                log.debug "Loaded ${filename}"
-                return config.flatten()
-            } catch (Exception e) {
-                log.debug "Error loading ${filename}: ${e.message}"
-            }
-        }
-        return [:]
-    }
-
-    private static Map loadYamlConfig(String profile) {
-        def filename = profile ? "/config-${profile}.yml" : "/config.yml"
-        def configStream = ConfigLoader.class.getResourceAsStream(filename)
-        if (!configStream && !profile) {
-            configStream = ConfigLoader.class.getResourceAsStream('/config.yaml')
-            filename = '/config.yaml'
-        }
-        if (configStream) {
-            try {
-                def yaml = new Yaml()
-                def data = yaml.load(configStream)
-                log.debug "Loaded ${filename}"
-                return flattenMap(data)
-            } catch (Exception e) {
-                log.debug "Error loading ${filename}: ${e.message}"
-            }
-        }
-        return [:]
-    }
-
-    private static Map loadPropertiesConfig(String profile) {
-        def filename = profile ? "/config-${profile}.properties" : "/config.properties"
-        def configStream = ConfigLoader.class.getResourceAsStream(filename)
-        if (configStream) {
-            try {
-                def props = new Properties()
-                props.load(configStream)
-                log.debug "Loaded ${filename}"
-                return props.collectEntries { k, v -> [(k.toString()): v] }
-            } catch (Exception e) {
-                log.debug "Error loading ${filename}: ${e.message}"
-            }
-        }
-        return [:]
-    }
-
-    private static Map loadSystemProperties() {
-        // Look for system properties with 'app.' prefix
-        def appProps = System.properties.findAll { k, v ->
-            k.toString().startsWith('app.') && k.toString() != 'app.profile'
-        }.collectEntries { k, v ->
-            // Remove 'app.' prefix: app.distributed -> distributed
-            [(k.toString().replaceFirst('app.', '')): v]
-        }
-
-        if (appProps) {
-            log.debug  "Loaded ${appProps.size()} system properties"
-        }
-        return appProps
-    }
-
-    private static Map loadEnvironmentVariables() {
-        // Map common environment variables to config keys
-        def envConfig = [:]
-
-        if (System.getenv('USE_DISTRIBUTED')) {
-            envConfig.distributed = System.getenv('USE_DISTRIBUTED') == 'true'
-        }
-        if (System.getenv('HAZELCAST_CLUSTER_NAME')) {
-            envConfig.'hazelcast.cluster.name' = System.getenv('HAZELCAST_CLUSTER_NAME')
-        }
-        if (System.getenv('HAZELCAST_PORT')) {
-            envConfig.'hazelcast.port' = System.getenv('HAZELCAST_PORT')
-        }
-        if (System.getenv('DB_URL')) {
-            envConfig.'database.url' = System.getenv('DB_URL')
-        }
-        if (System.getenv('DB_USERNAME')) {
-            envConfig.'database.username' = System.getenv('DB_USERNAME')
-        }
-        if (System.getenv('DB_PASSWORD')) {
-            envConfig.'database.password' = System.getenv('DB_PASSWORD')
-        }
-
-        if (envConfig) {
-            println "Loaded ${envConfig.size()} environment variables"
-        }
-        return envConfig
-    }
-
-    /**
-     * Deep merge two maps, with values from 'override' taking precedence
-     */
-    private static Map deepMerge(Map base, Map override) {
-        if (!override) return base
-        if (!base) return override
-
-        Map result = [:] + base
-
-        override.each { key, value ->
-            if (value instanceof Map && result[key] instanceof Map) {
-                result[key] = deepMerge((Map)result[key], (Map)value)
-            } else {
-                result[key] = value
+                errors.add(
+                        ("Validator " + v.getClass().getName() +
+                                " threw: " + e.getMessage()).toString()
+                )
             }
         }
 
-        return result
+        return new ConfigResult(
+                Collections.unmodifiableMap(merged),
+                snapshot,
+                errors,
+                warnings,
+                profile
+        )
     }
 
-    /**
-     * Flatten nested maps into dot-notation keys
-     * e.g., [hazelcast: [cluster: [name: 'test']]] -> ['hazelcast.cluster.name': 'test']
-     */
-    private static Map flattenMap(Map map, String prefix = '') {
-        Map result = [:]
+    // ============================================================
+    // Convenience (backward compatibility)
+    // ============================================================
 
-        map.each { key, value ->
-            def newKey = prefix ? "${prefix}.${key}" : key.toString()
+    static Map<String, Object> loadConfig() {
+        return load([:]).config
+    }
 
-            if (value instanceof Map) {
-                result.putAll(flattenMap((Map)value, newKey))
-            } else {
-                result[newKey] = value
+    // ============================================================
+    // Profile resolution
+    // ============================================================
+
+    private static String resolveProfile(ConfigSpec spec) {
+        for (String k : spec.profileEnvKeys) {
+            String v = System.getenv(k)
+            if (v != null && !v.isEmpty()) return v
+        }
+        for (String k : spec.profileSysKeys) {
+            String v = System.getProperty(k)
+            if (v != null && !v.isEmpty()) return v
+        }
+        return spec.defaultProfile
+    }
+
+    // ============================================================
+    // External config helpers
+    // ============================================================
+
+    private static List<Path> collectExternalFiles(
+            Map options,
+            ConfigSpec spec,
+            String profile
+    ) {
+        LinkedHashSet<Path> out = []
+
+        if (options.externalFiles instanceof List) {
+            options.externalFiles.each {
+                out.add(Paths.get(it.toString()))
             }
         }
 
-        return result
+        return out.toList()
     }
 
-    /**
-     * Get a config value with dot notation and optional default
-     */
-    static Object get(Map config, String key, Object defaultValue = null) {
-        config.getOrDefault(key, defaultValue)
-    }
-
-    /**
-     * Get a config value as boolean
-     */
-    static boolean getBoolean(Map config, String key, boolean defaultValue = false) {
-        def value = config.get(key)
-        if (value == null) return defaultValue
-        if (value instanceof Boolean) return value
-        return value.toString().toLowerCase() in ['true', '1', 'yes', 'on']
-    }
-
-    /**
-     * Get a config value as integer
-     */
-    static int getInt(Map config, String key, int defaultValue = 0) {
-        def value = config.get(key)
-        if (value == null) return defaultValue
-        if (value instanceof Number) return value.intValue()
+    private static Map<String, Object> loadExternalFile(
+            Path p,
+            String profile,
+            Trace trace
+    ) {
         try {
-            return value.toString().toInteger()
-        } catch (NumberFormatException e) {
-            return defaultValue
+            if (!Files.isRegularFile(p)) return [:]
+            String n = p.fileName.toString().toLowerCase()
+
+            if (n.endsWith(".yml") || n.endsWith(".yaml")) {
+                return flatten(new Yaml().load(Files.newInputStream(p)))
+            }
+            if (n.endsWith(".json")) {
+                return flatten(new JsonSlurper().parse(p.toFile()))
+            }
+            if (n.endsWith(".properties")) {
+                Properties props = new Properties()
+                props.load(Files.newInputStream(p))
+                return toMap(props)
+            }
+            if (n.endsWith(".groovy")) {
+                ConfigSlurper cs = new ConfigSlurper(profile)
+                return (Map<String, Object>) cs.parse(p.toUri().toURL()).flatten()
+            }
+        } catch (Exception e) {
+            trace.note("Failed to load external config " + p + ": " + e.message)
+        }
+        return [:]
+    }
+
+    // ============================================================
+    // System + env
+    // ============================================================
+
+    private static Map<String, Object> loadSystemProperties(ConfigSpec spec) {
+        Map<String, Object> out = [:]
+        Properties p = System.getProperties()
+        for (String k : p.stringPropertyNames()) {
+            if (k.startsWith(spec.sysPropPrefix)
+                    && !spec.profileSysKeys.contains(k)) {
+                out.put(
+                        k.substring(spec.sysPropPrefix.length()),
+                        p.getProperty(k)
+                )
+            }
+        }
+        return out
+    }
+
+    private static Map<String, Object> loadEnvironmentVariables(ConfigSpec spec) {
+        Map<String, Object> out = [:]
+        Map<String, String> env = System.getenv()
+        for (EnvMapping m : spec.envMappings) {
+            if (env.containsKey(m.envKey)) {
+                out.put(m.configKey, m.coerce(env.get(m.envKey)))
+            }
+        }
+        return out
+    }
+
+    // ============================================================
+    // Merge helpers
+    // ============================================================
+
+    private static Map<String, Object> mergeAll(
+            Map<String, Object> base,
+            Trace trace,
+            List<NamedMap> maps
+    ) {
+        Map<String, Object> out = base
+        for (NamedMap nm : maps) {
+            out = deepMergeWithTrace(out, nm.map, trace, nm.name)
+        }
+        return out
+    }
+
+    private static Map<String, Object> deepMergeWithTrace(
+            Map<String, Object> base,
+            Map<String, Object> override,
+            Trace trace,
+            String source
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>(base)
+        for (Map.Entry<String, Object> e : override.entrySet()) {
+            result.put(e.key, e.value)
+            trace.record(
+                    e.key,
+                    e.value,
+                    source,
+                    base.containsKey(e.key)
+                            ? TraceEvent.Kind.OVERRIDE
+                            : TraceEvent.Kind.SET
+            )
+        }
+        return result
+    }
+
+    // ============================================================
+    // Flatten helpers
+    // ============================================================
+
+    private static Map<String, Object> flatten(Object o) {
+        Map<String, Object> out = [:]
+        if (o instanceof Map) flattenRec("", (Map) o, out)
+        return out
+    }
+
+    private static void flattenRec(String p, Map m, Map<String, Object> out) {
+        for (Object k : m.keySet()) {
+            Object v = m.get(k)
+            String key = p.isEmpty() ? k.toString() : p + "." + k.toString()
+            if (v instanceof Map) {
+                flattenRec(key, (Map) v, out)
+            } else {
+                out.put(key, v)
+            }
         }
     }
 
-    /**
-     * Get a config value as String
-     */
-    static String getString(Map config, String key, String defaultValue = null) {
-        def value = config.get(key)
-        return value != null ? value.toString() : defaultValue
+    private static Map<String, Object> toMap(Properties p) {
+        Map<String, Object> m = [:]
+        for (String k : p.stringPropertyNames()) {
+            m.put(k, p.getProperty(k))
+        }
+        return m
     }
+
+    // ============================================================
+    // Typed accessors (backward compatible helpers)
+    // ============================================================
+
+    static String getString(Map<String, Object> config, String key) {
+        Object v = config.get(key)
+        return v != null ? v.toString() : null
+    }
+
+    static String getString(Map<String, Object> config, String key, String defaultValue) {
+        Object v = config.get(key)
+        return v != null ? v.toString() : defaultValue
+    }
+
+    static Boolean getBoolean(Map<String, Object> config, String key) {
+        Object v = config.get(key)
+        if (v instanceof Boolean) return (Boolean) v
+        if (v != null) return v.toString().toBoolean()
+        return null
+    }
+
+    static Boolean getBoolean(Map<String, Object> config, String key, Boolean defaultValue) {
+        Boolean v = getBoolean(config, key)
+        return v != null ? v : defaultValue
+    }
+
+    static Integer getInt(Map<String, Object> config, String key) {
+        Object v = config.get(key)
+        if (v instanceof Integer) return (Integer) v
+        if (v != null) return Integer.parseInt(v.toString())
+        return null
+    }
+
+    static Integer getInt(Map<String, Object> config, String key, Integer defaultValue) {
+        Integer v = getInt(config, key)
+        return v != null ? v : defaultValue
+    }
+
 }

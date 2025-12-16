@@ -9,6 +9,8 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.ActorSystem
 import org.softwood.actor.remote.RemotingTransport
+import org.softwood.actor.remote.security.AuthConfig
+import org.softwood.actor.remote.security.JwtTokenService
 
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.KeyManagerFactory
@@ -68,6 +70,15 @@ class HttpTransport implements RemotingTransport {
     /** TLS configuration */
     private final TlsConfig tlsConfig
     
+    /** Authentication configuration */
+    private final AuthConfig authConfig
+    
+    /** JWT token service (if auth enabled) */
+    private final JwtTokenService jwtService
+    
+    /** Client auth token */
+    private volatile String clientAuthToken
+    
     /**
      * TLS configuration holder.
      */
@@ -86,7 +97,7 @@ class HttpTransport implements RemotingTransport {
      * @param localSystem actor system for local delivery
      */
     HttpTransport(ActorSystem localSystem) {
-        this(localSystem, 8080, true, null)
+        this(localSystem, 8080, true, null, null)
     }
     
     /**
@@ -97,7 +108,7 @@ class HttpTransport implements RemotingTransport {
      * @param serverEnabled whether to start server
      */
     HttpTransport(ActorSystem localSystem, int localPort, boolean serverEnabled) {
-        this(localSystem, localPort, serverEnabled, null)
+        this(localSystem, localPort, serverEnabled, null, null)
     }
     
     /**
@@ -109,10 +120,37 @@ class HttpTransport implements RemotingTransport {
      * @param tlsConfig TLS configuration (null for plain HTTP)
      */
     HttpTransport(ActorSystem localSystem, int localPort, boolean serverEnabled, TlsConfig tlsConfig) {
+        this(localSystem, localPort, serverEnabled, tlsConfig, null)
+    }
+    
+    /**
+     * Creates HTTP transport with TLS and authentication.
+     * 
+     * @param localSystem actor system for local delivery
+     * @param localPort port to listen on (if server enabled)
+     * @param serverEnabled whether to start server
+     * @param tlsConfig TLS configuration (null for plain HTTP)
+     * @param authConfig authentication configuration (null for no auth)
+     */
+    HttpTransport(ActorSystem localSystem, int localPort, boolean serverEnabled, 
+                  TlsConfig tlsConfig, AuthConfig authConfig) {
         this.localSystem = localSystem
         this.localPort = localPort
         this.serverEnabled = serverEnabled
         this.tlsConfig = tlsConfig ?: new TlsConfig()
+        this.authConfig = authConfig ?: new AuthConfig()
+        
+        // Initialize JWT service if authentication enabled
+        if (this.authConfig.enabled) {
+            this.authConfig.validate()
+            this.jwtService = new JwtTokenService(
+                this.authConfig.jwtSecret,
+                this.authConfig.tokenExpiry
+            )
+            log.info("Authentication enabled with token expiry: ${this.authConfig.tokenExpiry}")
+        } else {
+            this.jwtService = null
+        }
     }
     
     @Override
@@ -292,6 +330,29 @@ class HttpTransport implements RemotingTransport {
      */
     private void handleTellRequest(HttpExchange exchange, String actorName, Map message) {
         try {
+            // Check authentication if enabled
+            if (authConfig.enabled && authConfig.requireToken) {
+                def token = extractToken(exchange, message)
+                if (!token) {
+                    log.warn("Rejected tell - missing authentication token")
+                    sendResponse(exchange, 401, [error: 'Authentication required', code: 401])
+                    return
+                }
+                
+                try {
+                    def claims = jwtService.validateToken(token)
+                    log.debug("Authenticated tell from: ${claims.subject}")
+                } catch (JwtTokenService.ExpiredTokenException e) {
+                    log.warn("Rejected tell - token expired: ${e.message}")
+                    sendResponse(exchange, 401, [error: 'Token expired', code: 401])
+                    return
+                } catch (JwtTokenService.InvalidTokenException e) {
+                    log.warn("Rejected tell - invalid token: ${e.message}")
+                    sendResponse(exchange, 401, [error: 'Invalid token', code: 401])
+                    return
+                }
+            }
+            
             if (localSystem?.hasActor(actorName)) {
                 localSystem.getActor(actorName).tell(message.payload)
                 sendResponse(exchange, 202, [status: 'accepted'])
@@ -311,6 +372,29 @@ class HttpTransport implements RemotingTransport {
      */
     private void handleAskRequest(HttpExchange exchange, String actorName, Map message) {
         try {
+            // Check authentication if enabled
+            if (authConfig.enabled && authConfig.requireToken) {
+                def token = extractToken(exchange, message)
+                if (!token) {
+                    log.warn("Rejected ask - missing authentication token")
+                    sendResponse(exchange, 401, [error: 'Authentication required', code: 401])
+                    return
+                }
+                
+                try {
+                    def claims = jwtService.validateToken(token)
+                    log.debug("Authenticated ask from: ${claims.subject}")
+                } catch (JwtTokenService.ExpiredTokenException e) {
+                    log.warn("Rejected ask - token expired: ${e.message}")
+                    sendResponse(exchange, 401, [error: 'Token expired', code: 401])
+                    return
+                } catch (JwtTokenService.InvalidTokenException e) {
+                    log.warn("Rejected ask - invalid token: ${e.message}")
+                    sendResponse(exchange, 401, [error: 'Invalid token', code: 401])
+                    return
+                }
+            }
+            
             if (localSystem?.hasActor(actorName)) {
                 def timeoutMs = (message.timeout ?: 5000) as long
                 def reply = localSystem.getActor(actorName)
@@ -349,7 +433,15 @@ class HttpTransport implements RemotingTransport {
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             
-            def payload = toJson([payload: message])
+            // Add auth token if present
+            if (clientAuthToken) {
+                connection.setRequestProperty(authConfig.tokenHeader, "${authConfig.tokenPrefix}${clientAuthToken}")
+            }
+            
+            def payload = toJson([
+                payload: message,
+                token: clientAuthToken  // Also include in body for compatibility
+            ])
             connection.outputStream.write(payload.bytes)
             
             def responseCode = connection.responseCode
@@ -389,9 +481,15 @@ class HttpTransport implements RemotingTransport {
                 connection.connectTimeout = (int) timeout.toMillis()
                 connection.readTimeout = (int) timeout.toMillis()
                 
+                // Add auth token if present
+                if (clientAuthToken) {
+                    connection.setRequestProperty(authConfig.tokenHeader, "${authConfig.tokenPrefix}${clientAuthToken}")
+                }
+                
                 def payload = toJson([
                     payload: message,
-                    timeout: timeout.toMillis()
+                    timeout: timeout.toMillis(),
+                    token: clientAuthToken  // Also include in body for compatibility
                 ])
                 connection.outputStream.write(payload.bytes)
                 
@@ -472,6 +570,58 @@ class HttpTransport implements RemotingTransport {
      */
     private static Map parseJson(String json) {
         return new groovy.json.JsonSlurper().parseText(json) as Map
+    }
+    
+    // ═════════════════════════════════════════════════════════════
+    // Authentication Methods
+    // ═════════════════════════════════════════════════════════════
+    
+    /**
+     * Extracts authentication token from HTTP request.
+     * Checks both Authorization header and message body.
+     */
+    private String extractToken(HttpExchange exchange, Map message) {
+        // Check Authorization header first (Bearer token)
+        def authHeader = exchange.requestHeaders.getFirst(authConfig.tokenHeader)
+        if (authHeader && authHeader.startsWith(authConfig.tokenPrefix)) {
+            return authHeader.substring(authConfig.tokenPrefix.length())
+        }
+        
+        // Fallback: check message body
+        return message.token as String
+    }
+    
+    /**
+     * Sets authentication token for client requests.
+     * 
+     * @param token JWT token
+     */
+    void setAuthToken(String token) {
+        if (authConfig.enabled && token && jwtService) {
+            // Validate token format
+            if (jwtService.isExpired(token)) {
+                log.warn("Setting expired authentication token")
+            }
+        }
+        this.clientAuthToken = token
+        log.debug("Auth token set for client")
+    }
+    
+    /**
+     * Gets current authentication token.
+     * 
+     * @return current token or null
+     */
+    String getAuthToken() {
+        return clientAuthToken
+    }
+    
+    /**
+     * Clears authentication token.
+     */
+    void clearAuthToken() {
+        this.clientAuthToken = null
+        log.debug("Auth token cleared")
     }
     
     @Override

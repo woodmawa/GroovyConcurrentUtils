@@ -14,6 +14,8 @@ import io.rsocket.transport.netty.server.TcpServerTransport
 import io.rsocket.util.DefaultPayload
 import org.softwood.actor.ActorSystem
 import org.softwood.actor.remote.RemotingTransport
+import org.softwood.actor.remote.security.AuthConfig
+import org.softwood.actor.remote.security.JwtTokenService
 import org.softwood.actor.remote.security.TlsContextBuilder
 import reactor.core.publisher.Mono
 import reactor.netty.tcp.TcpClient
@@ -71,6 +73,15 @@ class RSocketTransport implements RemotingTransport {
     /** TLS configuration */
     private final TlsConfig tlsConfig
     
+    /** Authentication configuration */
+    private final AuthConfig authConfig
+    
+    /** JWT token service (if auth enabled) */
+    private final JwtTokenService jwtService
+    
+    /** Client auth token */
+    private volatile String clientAuthToken
+    
     /**
      * TLS configuration holder.
      */
@@ -89,7 +100,7 @@ class RSocketTransport implements RemotingTransport {
      * @param localSystem actor system for local delivery
      */
     RSocketTransport(ActorSystem localSystem) {
-        this(localSystem, 7000, true, null)
+        this(localSystem, 7000, true, null, null)
     }
     
     /**
@@ -100,7 +111,7 @@ class RSocketTransport implements RemotingTransport {
      * @param serverEnabled whether to start server
      */
     RSocketTransport(ActorSystem localSystem, int localPort, boolean serverEnabled) {
-        this(localSystem, localPort, serverEnabled, null)
+        this(localSystem, localPort, serverEnabled, null, null)
     }
     
     /**
@@ -112,10 +123,37 @@ class RSocketTransport implements RemotingTransport {
      * @param tlsConfig TLS configuration (null for no TLS)
      */
     RSocketTransport(ActorSystem localSystem, int localPort, boolean serverEnabled, TlsConfig tlsConfig) {
+        this(localSystem, localPort, serverEnabled, tlsConfig, null)
+    }
+    
+    /**
+     * Creates RSocket transport with TLS and authentication.
+     * 
+     * @param localSystem actor system for local delivery
+     * @param localPort port to listen on (if server enabled)
+     * @param serverEnabled whether to start server
+     * @param tlsConfig TLS configuration (null for no TLS)
+     * @param authConfig authentication configuration (null for no auth)
+     */
+    RSocketTransport(ActorSystem localSystem, int localPort, boolean serverEnabled, 
+                     TlsConfig tlsConfig, AuthConfig authConfig) {
         this.localSystem = localSystem
         this.localPort = localPort
         this.serverEnabled = serverEnabled
         this.tlsConfig = tlsConfig ?: new TlsConfig()
+        this.authConfig = authConfig ?: new AuthConfig()
+        
+        // Initialize JWT service if authentication enabled
+        if (this.authConfig.enabled) {
+            this.authConfig.validate()
+            this.jwtService = new JwtTokenService(
+                this.authConfig.jwtSecret,
+                this.authConfig.tokenExpiry
+            )
+            log.info("Authentication enabled with token expiry: ${this.authConfig.tokenExpiry}")
+        } else {
+            this.jwtService = null
+        }
     }
     
     @Override
@@ -252,6 +290,27 @@ class RSocketTransport implements RemotingTransport {
         return Mono.fromRunnable {
             try {
                 def message = deserialize(payload)
+                
+                // Check authentication if enabled
+                if (authConfig.enabled && authConfig.requireToken) {
+                    def token = message.token as String
+                    if (!token) {
+                        log.warn("Rejected tell - missing authentication token")
+                        return
+                    }
+                    
+                    try {
+                        def claims = jwtService.validateToken(token)
+                        log.debug("Authenticated tell from: ${claims.subject}")
+                    } catch (JwtTokenService.ExpiredTokenException e) {
+                        log.warn("Rejected tell - token expired: ${e.message}")
+                        return
+                    } catch (JwtTokenService.InvalidTokenException e) {
+                        log.warn("Rejected tell - invalid token: ${e.message}")
+                        return
+                    }
+                }
+                
                 def actorName = message.actor as String
                 def msg = message.payload
                 
@@ -279,6 +338,39 @@ class RSocketTransport implements RemotingTransport {
         return Mono.fromCallable {
             try {
                 def message = deserialize(payload)
+                
+                // Check authentication if enabled
+                if (authConfig.enabled && authConfig.requireToken) {
+                    def token = message.token as String
+                    if (!token) {
+                        log.warn("Rejected ask - missing authentication token")
+                        return DefaultPayload.create(serialize([
+                            status: 'error',
+                            error: 'Authentication required',
+                            code: 401
+                        ]))
+                    }
+                    
+                    try {
+                        def claims = jwtService.validateToken(token)
+                        log.debug("Authenticated ask from: ${claims.subject}")
+                    } catch (JwtTokenService.ExpiredTokenException e) {
+                        log.warn("Rejected ask - token expired: ${e.message}")
+                        return DefaultPayload.create(serialize([
+                            status: 'error',
+                            error: 'Token expired',
+                            code: 401
+                        ]))
+                    } catch (JwtTokenService.InvalidTokenException e) {
+                        log.warn("Rejected ask - invalid token: ${e.message}")
+                        return DefaultPayload.create(serialize([
+                            status: 'error',
+                            error: 'Invalid token',
+                            code: 401
+                        ]))
+                    }
+                }
+                
                 def actorName = message.actor as String
                 def msg = message.payload
                 def timeoutMs = (message.timeout ?: 5000) as long
@@ -322,7 +414,8 @@ class RSocketTransport implements RemotingTransport {
             
             def envelope = [
                 actor: target.actor,
-                payload: message
+                payload: message,
+                token: clientAuthToken  // Include auth token
             ]
             
             // Fire and forget
@@ -349,7 +442,8 @@ class RSocketTransport implements RemotingTransport {
             def envelope = [
                 actor: target.actor,
                 payload: message,
-                timeout: timeout.toMillis()
+                timeout: timeout.toMillis(),
+                token: clientAuthToken  // Include auth token
             ]
             
             // Request/response
@@ -521,6 +615,43 @@ class RSocketTransport implements RemotingTransport {
     private static Map deserialize(Payload payload) {
         def json = payload.dataUtf8
         return new groovy.json.JsonSlurper().parseText(json) as Map
+    }
+    
+    // ═════════════════════════════════════════════════════════════
+    // Authentication Methods
+    // ═════════════════════════════════════════════════════════════
+    
+    /**
+     * Sets authentication token for client requests.
+     * 
+     * @param token JWT token
+     */
+    void setAuthToken(String token) {
+        if (authConfig.enabled && token && jwtService) {
+            // Validate token format
+            if (jwtService.isExpired(token)) {
+                log.warn("Setting expired authentication token")
+            }
+        }
+        this.clientAuthToken = token
+        log.debug("Auth token set for client")
+    }
+    
+    /**
+     * Gets current authentication token.
+     * 
+     * @return current token or null
+     */
+    String getAuthToken() {
+        return clientAuthToken
+    }
+    
+    /**
+     * Clears authentication token.
+     */
+    void clearAuthToken() {
+        this.clientAuthToken = null
+        log.debug("Auth token cleared")
     }
     
     @Override

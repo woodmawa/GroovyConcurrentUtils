@@ -96,6 +96,27 @@ interface Actor {
      * @return response from actor
      */
     Object sendAndWait(Object msg, Duration timeout)
+    
+    /**
+     * Groovy left-shift operator for synchronous message sending.
+     * Provides GPars-compatible syntax: {@code actor << message}
+     * 
+     * <p>This is a synchronous operation that blocks until a reply is received.
+     * Equivalent to {@link #askSync(Object, Duration)} with default timeout.</p>
+     * 
+     * <h2>Usage Examples</h2>
+     * <pre>
+     * def result = actor << "hello"           // Send and wait for reply
+     * def value = actor << [action: 'get']   // Send map message
+     * actor << "fire-forget"                  // Can ignore return value
+     * </pre>
+     * 
+     * @param msg message to send
+     * @return response from actor's message handler
+     * @throws java.util.concurrent.TimeoutException if timeout expires (default: 5s)
+     * @throws IllegalStateException if actor is stopped
+     */
+    Object leftShift(Object msg)
 
     // ----------------------------------------------------------------------
     // Identification

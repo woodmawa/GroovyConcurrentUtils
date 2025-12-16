@@ -86,6 +86,15 @@ class RemoteActorRef implements Actor {
         return askSync(message, timeout)
     }
     
+    /**
+     * Groovy left-shift operator for synchronous message sending.
+     * Provides GPars-compatible syntax: actor << message
+     */
+    @Override
+    Object leftShift(Object message) {
+        return askSync(message, Duration.ofSeconds(5))
+    }
+    
     @Override
     String getName() {
         return actorName

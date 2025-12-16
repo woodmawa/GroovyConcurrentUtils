@@ -40,7 +40,7 @@ dependencies {
     testImplementation 'io.vertx:vertx-junit5:5.0.5'
     testImplementation("io.projectreactor:reactor-test:3.8.0")
     testImplementation 'org.awaitility:awaitility:4.3.0'
-    //testImplementation 'org.spockframework:spock-core:2.4-M6-groovy-4.0'
+    testImplementation 'org.spockframework:spock-core:2.4-groovy-5.0'
 }
 
 //hack to use spock with version 5 groovy till put up on maven

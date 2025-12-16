@@ -170,6 +170,17 @@ class GroovyActor implements Actor {
     Object sendAndWait(Object msg, Duration timeout = Duration.ofSeconds(5)) {
         return askSync(msg, timeout)
     }
+    
+    /**
+     * Groovy left-shift operator for synchronous message sending.
+     * Provides GPars-compatible syntax: actor << message
+     * 
+     * <p>Delegates to askSync() with default 5 second timeout.</p>
+     */
+    @Override
+    Object leftShift(Object msg) {
+        return askSync(msg, Duration.ofSeconds(5))
+    }
 
     // ─────────────────────────────────────────────────────────────
     // Identification
@@ -471,6 +482,9 @@ class GroovyActor implements Actor {
     // ─────────────────────────────────────────────────────────────
 
     private void startMailboxLoop() {
+        // fix the ide warning type handling failure in the closure
+        final CountDownLatch terminatedLatch = this.terminated
+
         pool.execute({
             log.debug("[$name] Mailbox loop started")
 
@@ -494,7 +508,8 @@ class GroovyActor implements Actor {
                 Thread.currentThread().interrupt()
                 log.debug("[$name] Mailbox loop interrupted")
             } finally {
-                terminated.countDown()
+                // groovy type fix for the IDE
+                terminatedLatch.countDown()
                 log.debug("[$name] Mailbox loop terminated")
             }
         } as Runnable)

@@ -3,11 +3,18 @@ package org.softwood.actor.remote.http
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
+import com.sun.net.httpserver.HttpsConfigurator
+import com.sun.net.httpserver.HttpsServer
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.ActorSystem
 import org.softwood.actor.remote.RemotingTransport
 
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import java.security.KeyStore
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
@@ -58,13 +65,28 @@ class HttpTransport implements RemotingTransport {
     /** Whether server mode is enabled */
     private final boolean serverEnabled
     
+    /** TLS configuration */
+    private final TlsConfig tlsConfig
+    
+    /**
+     * TLS configuration holder.
+     */
+    static class TlsConfig {
+        boolean enabled = false
+        String keyStorePath
+        String keyStorePassword
+        String trustStorePath
+        String trustStorePassword
+        List<String> protocols = ['TLSv1.3', 'TLSv1.2']
+    }
+    
     /**
      * Creates HTTP transport with default configuration.
      * 
      * @param localSystem actor system for local delivery
      */
     HttpTransport(ActorSystem localSystem) {
-        this(localSystem, 8080, true)
+        this(localSystem, 8080, true, null)
     }
     
     /**
@@ -75,9 +97,22 @@ class HttpTransport implements RemotingTransport {
      * @param serverEnabled whether to start server
      */
     HttpTransport(ActorSystem localSystem, int localPort, boolean serverEnabled) {
+        this(localSystem, localPort, serverEnabled, null)
+    }
+    
+    /**
+     * Creates HTTP transport with TLS configuration.
+     * 
+     * @param localSystem actor system for local delivery
+     * @param localPort port to listen on (if server enabled)
+     * @param serverEnabled whether to start server
+     * @param tlsConfig TLS configuration (null for plain HTTP)
+     */
+    HttpTransport(ActorSystem localSystem, int localPort, boolean serverEnabled, TlsConfig tlsConfig) {
         this.localSystem = localSystem
         this.localPort = localPort
         this.serverEnabled = serverEnabled
+        this.tlsConfig = tlsConfig ?: new TlsConfig()
     }
     
     @Override
@@ -98,7 +133,22 @@ class HttpTransport implements RemotingTransport {
      */
     private void startServer() {
         try {
-            server = HttpServer.create(new InetSocketAddress(localPort), 0)
+            log.info("Starting HTTP${tlsConfig.enabled ? 'S' : ''} server on port ${localPort}")
+            
+            if (tlsConfig.enabled) {
+                // HTTPS server
+                def httpsServer = HttpsServer.create(new InetSocketAddress(localPort), 0)
+                
+                // Configure SSL
+                def sslContext = createSSLContext()
+                httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext))
+                
+                server = httpsServer
+            } else {
+                // Plain HTTP server
+                server = HttpServer.create(new InetSocketAddress(localPort), 0)
+            }
+            
             server.setExecutor(Executors.newCachedThreadPool())
             
             // POST /actor/{systemName}/{actorName}/tell
@@ -136,11 +186,104 @@ class HttpTransport implements RemotingTransport {
             })
             
             server.start()
-            log.info("HTTP server listening on port ${localPort}")
+            def protocol = tlsConfig.enabled ? "HTTPS" : "HTTP"
+            log.info("${protocol} server listening on port ${localPort}")
             
         } catch (Exception e) {
             log.error("Failed to start HTTP server on port ${localPort}", e)
             throw e
+        }
+    }
+    
+    /**
+     * Creates SSL context for HTTPS server.
+     */
+    private SSLContext createSSLContext() {
+        try {
+            // Verify keystore exists
+            if (!tlsConfig.keyStorePath) {
+                throw new IllegalStateException("HTTPS enabled but keyStorePath not configured")
+            }
+            
+            def keystoreFile = new File(tlsConfig.keyStorePath)
+            if (!keystoreFile.exists()) {
+                throw new FileNotFoundException("Keystore not found: ${tlsConfig.keyStorePath}")
+            }
+            
+            // Load keystore
+            def keyStore = KeyStore.getInstance("JKS")
+            new FileInputStream(keystoreFile).withCloseable { fis ->
+                keyStore.load(fis, tlsConfig.keyStorePassword.toCharArray())
+            }
+            
+            // Get key manager factory
+            def kmf = KeyManagerFactory.getInstance(
+                KeyManagerFactory.getDefaultAlgorithm()
+            )
+            kmf.init(keyStore, tlsConfig.keyStorePassword.toCharArray())
+            
+            // Load truststore if configured
+            TrustManagerFactory tmf = null
+            if (tlsConfig.trustStorePath) {
+                def trustStore = KeyStore.getInstance("JKS")
+                new FileInputStream(tlsConfig.trustStorePath).withCloseable { fis ->
+                    trustStore.load(fis, tlsConfig.trustStorePassword.toCharArray())
+                }
+                
+                tmf = TrustManagerFactory.getInstance(
+                    TrustManagerFactory.getDefaultAlgorithm()
+                )
+                tmf.init(trustStore)
+            }
+            
+            // Create SSL context
+            def sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(
+                kmf.getKeyManagers(),
+                tmf?.getTrustManagers(),
+                new java.security.SecureRandom()
+            )
+            
+            return sslContext
+            
+        } catch (Exception e) {
+            log.error("Failed to create SSL context", e)
+            throw new RuntimeException("HTTPS configuration error", e)
+        }
+    }
+    
+    /**
+     * Configures HTTPS connection with truststore for client requests.
+     */
+    private void configureHttpsConnection(HttpsURLConnection httpsConn) {
+        if (!tlsConfig.enabled) {
+            return
+        }
+        
+        try {
+            // Create SSL context for client
+            TrustManagerFactory tmf = null
+            if (tlsConfig.trustStorePath) {
+                def trustStore = KeyStore.getInstance("JKS")
+                new FileInputStream(tlsConfig.trustStorePath).withCloseable { fis ->
+                    trustStore.load(fis, tlsConfig.trustStorePassword.toCharArray())
+                }
+                
+                tmf = TrustManagerFactory.getInstance(
+                    TrustManagerFactory.getDefaultAlgorithm()
+                )
+                tmf.init(trustStore)
+            }
+            
+            def sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, tmf?.getTrustManagers(), new java.security.SecureRandom())
+            
+            // Apply to connection
+            httpsConn.setSSLSocketFactory(sslContext.getSocketFactory())
+            
+        } catch (Exception e) {
+            log.error("Failed to configure HTTPS connection", e)
+            throw new RuntimeException("HTTPS client configuration error", e)
         }
     }
     
@@ -192,9 +335,16 @@ class HttpTransport implements RemotingTransport {
     void tell(String actorUri, Object message) {
         try {
             def target = parseUri(actorUri)
-            def url = new URL("http://${target.host}:${target.port}/actor/${target.system}/${target.actor}/tell")
+            def protocol = (target.scheme == 'https' || tlsConfig.enabled) ? 'https' : 'http'
+            def url = new URL("${protocol}://${target.host}:${target.port}/actor/${target.system}/${target.actor}/tell")
             
             def connection = url.openConnection() as HttpURLConnection
+            
+            // Configure SSL for HTTPS
+            if (protocol == 'https' && connection instanceof javax.net.ssl.HttpsURLConnection) {
+                configureHttpsConnection(connection as javax.net.ssl.HttpsURLConnection)
+            }
+            
             connection.requestMethod = "POST"
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
@@ -223,9 +373,16 @@ class HttpTransport implements RemotingTransport {
         Thread.startVirtualThread {
             try {
                 def target = parseUri(actorUri)
-                def url = new URL("http://${target.host}:${target.port}/actor/${target.system}/${target.actor}/ask")
+                def protocol = (target.scheme == 'https' || tlsConfig.enabled) ? 'https' : 'http'
+                def url = new URL("${protocol}://${target.host}:${target.port}/actor/${target.system}/${target.actor}/ask")
                 
                 def connection = url.openConnection() as HttpURLConnection
+                
+                // Configure SSL for HTTPS
+                if (protocol == 'https' && connection instanceof javax.net.ssl.HttpsURLConnection) {
+                    configureHttpsConnection(connection as javax.net.ssl.HttpsURLConnection)
+                }
+                
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json")
@@ -266,7 +423,7 @@ class HttpTransport implements RemotingTransport {
     
     /**
      * Parses actor URI into components.
-     * Format: http://host:port/system/actorName
+     * Format: http://host:port/system/actorName or https://host:port/system/actorName
      */
     private static ActorUri parseUri(String uri) {
         def u = new URI(uri)
@@ -284,8 +441,9 @@ class HttpTransport implements RemotingTransport {
         }
         
         return new ActorUri(
+            u.scheme,
             u.host ?: 'localhost',
-            u.port > 0 ? u.port : 8080,
+            u.port > 0 ? u.port : (u.scheme == 'https' ? 8443 : 8080),
             system,
             actor
         )
@@ -332,12 +490,14 @@ class HttpTransport implements RemotingTransport {
      * Parsed actor URI.
      */
     private static class ActorUri {
+        final String scheme
         final String host
         final int port
         final String system
         final String actor
         
-        ActorUri(String host, int port, String system, String actor) {
+        ActorUri(String scheme, String host, int port, String system, String actor) {
+            this.scheme = scheme
             this.host = host
             this.port = port
             this.system = system

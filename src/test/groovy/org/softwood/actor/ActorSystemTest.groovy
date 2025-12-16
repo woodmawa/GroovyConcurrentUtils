@@ -108,6 +108,7 @@ class ActorSystemTest {
                 mockActor.sendAndContinue(msg, continuation, timeout) 
             }
             @Override Object sendAndWait(Object msg, Duration timeout) { mockActor.sendAndWait(msg, timeout) }
+            @Override Object leftShift(Object msg) { mockActor.leftShift(msg) }
             @Override String getName() { mockActor.getName() }
             @Override Map getState() { mockActor.getState() }
             @Override void stop() { stopCalled = true; mockActor.stop() }
@@ -178,6 +179,7 @@ class ActorSystemTest {
                 mockActor1.sendAndContinue(msg, continuation, timeout) 
             }
             @Override Object sendAndWait(Object msg, Duration timeout) { mockActor1.sendAndWait(msg, timeout) }
+            @Override Object leftShift(Object msg) { mockActor1.leftShift(msg) }
             @Override String getName() { mockActor1.getName() }
             @Override Map getState() { mockActor1.getState() }
             @Override void stop() { stopCount++; mockActor1.stop() }
@@ -204,6 +206,7 @@ class ActorSystemTest {
                 mockActor2.sendAndContinue(msg, continuation, timeout) 
             }
             @Override Object sendAndWait(Object msg, Duration timeout) { mockActor2.sendAndWait(msg, timeout) }
+            @Override Object leftShift(Object msg) { mockActor2.leftShift(msg) }
             @Override String getName() { mockActor2.getName() }
             @Override Map getState() { mockActor2.getState() }
             @Override void stop() { stopCount++; mockActor2.stop() }

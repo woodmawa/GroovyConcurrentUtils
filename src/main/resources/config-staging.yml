@@ -1,0 +1,49 @@
+# Staging Configuration
+
+# Distributed mode enabled (smaller cluster)
+distributed: true
+
+# Hazelcast clustering (TCP/IP explicit members)
+hazelcast:
+  cluster:
+    name: staging-actor-cluster
+  port: 5701
+  discovery:
+    mode: tcp
+  tcp:
+    members:
+      - staging-node-1:5701
+      - staging-node-2:5701
+      - staging-node-3:5701
+    connection-timeout: 5
+  map:
+    backup-count: 1
+    async-backup-count: 0
+  management:
+    enabled: true
+    url: http://localhost:8080/hazelcast-mancenter
+
+# Database
+database:
+  url: jdbc:postgresql://staging-db:5432/myapp
+  username: staging_user
+  # password from environment: DB_PASSWORD
+  pool:
+    min: 5
+    max: 30
+    timeout: 45
+
+# Security
+security:
+  jwt:
+    enabled: true
+  tls:
+    enabled: true
+
+# Logging
+logging:
+  level: DEBUG
+
+# Monitoring
+monitoring:
+  enabled: true

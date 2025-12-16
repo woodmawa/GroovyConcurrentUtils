@@ -1,0 +1,54 @@
+# Production Configuration
+
+# Distributed mode ENABLED
+distributed: true
+
+# Hazelcast clustering (Kubernetes discovery)
+hazelcast:
+  cluster:
+    name: prod-actor-cluster
+  port: 5701
+  port:
+    auto-increment: true
+    count: 100
+  discovery:
+    mode: kubernetes
+  kubernetes:
+    namespace: production
+    service-name: actor-system
+    service-label: app=actor-system
+  map:
+    backup-count: 1       # 1 backup for HA
+    async-backup-count: 1  # 1 async backup
+    eviction-policy: NONE
+  lite-member: false
+  management:
+    enabled: true
+    url: http://hazelcast-mc:8080/hazelcast-mancenter
+
+# Database (PostgreSQL)
+database:
+  # URL from environment: DB_URL
+  # username from environment: DB_USERNAME
+  # password from environment: DB_PASSWORD
+  pool:
+    min: 10
+    max: 50
+    timeout: 60
+
+# Security (ENABLED)
+security:
+  jwt:
+    enabled: true
+    # Secret from environment: JWT_SECRET
+  tls:
+    enabled: true
+    # Certificates from mounted volumes
+
+# Logging
+logging:
+  level: INFO
+
+# Monitoring
+monitoring:
+  enabled: true

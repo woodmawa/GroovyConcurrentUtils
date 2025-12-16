@@ -1,15 +1,46 @@
-#  dev env overrides example
+# Development Configuration (Local)
 
+# Distributed mode disabled for local dev
 distributed: false
+
+# Hazelcast clustering (multicast for local testing)
 hazelcast:
   cluster:
     name: dev-cluster
   port: 5701
+  port:
+    auto-increment: true
+    count: 100
+  discovery:
+    mode: multicast
+  multicast:
+    group: 224.2.2.3
+    port: 54327
+    timeout: 2
+  map:
+    backup-count: 0  # No backups in dev
+    async-backup-count: 0
+  lite-member: false
+  management:
+    enabled: false
 
+# Database (H2 in-memory for dev)
 database:
   url: jdbc:h2:mem:devdb
-  username: dev
-  password: dev123
+  username: sa
+  password: ""
+  pool:
+    min: 5
+    max: 20
+    timeout: 30
 
+# Security (disabled for dev)
+security:
+  jwt:
+    enabled: false
+  tls:
+    enabled: false
+
+# Logging
 logging:
   level: DEBUG

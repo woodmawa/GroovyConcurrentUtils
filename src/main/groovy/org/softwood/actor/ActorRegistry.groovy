@@ -1,7 +1,9 @@
 package org.softwood.actor
 
 import com.hazelcast.core.Hazelcast
+import com.hazelcast.core.HazelcastInstance
 import groovy.util.logging.Slf4j
+import org.softwood.actor.cluster.HazelcastConfigBuilder
 import org.softwood.config.ConfigLoader
 
 import java.util.concurrent.ConcurrentHashMap
@@ -77,13 +79,25 @@ class ActorRegistry {
     }
 
     private Map<String, Actor> createDistributedStorage(Map config) {
-        def clusterName = ConfigLoader.getString(config, 'hazelcast.cluster.name', 'default-cluster')
-        def port = ConfigLoader.getInt(config, 'hazelcast.port', 5701)
-
-        log.info "Using Hazelcast distributed map (cluster: $clusterName, port: $port)"
-
-        def hz = Hazelcast.newHazelcastInstance()
-        return hz.getMap("actors")
+        log.info "Initializing Hazelcast distributed actor registry..."
+        
+        try {
+            // Build Hazelcast config using HazelcastConfigBuilder
+            def hzConfig = HazelcastConfigBuilder.buildConfig(config)
+            
+            // Create Hazelcast instance
+            HazelcastInstance hz = Hazelcast.newHazelcastInstance(hzConfig)
+            
+            log.info "Hazelcast instance started: ${hz.getName()}"
+            log.info "Cluster size: ${hz.getCluster().getMembers().size()} members"
+            
+            // Return distributed map
+            return hz.getMap("actors")
+            
+        } catch (Exception e) {
+            log.error("Failed to initialize Hazelcast cluster", e)
+            throw new RuntimeException("Hazelcast initialization failed", e)
+        }
     }
 
     // ─────────────────────────────────────────────────────────────

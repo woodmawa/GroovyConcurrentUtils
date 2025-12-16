@@ -1,40 +1,54 @@
-# base yaml can have config-<env>.yml overrides
+# Base Configuration (Defaults for all environments)
+# This file provides sensible defaults that can be overridden by profile-specific configs
 
-distributed: false
-
-# Remote Actor Transport Configuration
+# Actor System
 actor:
-  remote:
-    # Transport: 'rsocket' (default) or 'http'
-    transport: rsocket
-    
-    # Serialization: 'messagepack' (default, recommended), 'json' (debugging), 'microstream' (experimental)
-    serialization: messagepack
-    
-    # RSocket configuration
-    rsocket:
-      enabled: true
-      port: 7000
-      host: 0.0.0.0
-    
-    # HTTP configuration (fallback)
-    http:
-      enabled: false
-      port: 8080
-      host: 0.0.0.0
+  mailbox:
+    capacity: 10000
+  dispatcher:
+    threads: 10
 
+# Hazelcast (default settings)
 hazelcast:
   cluster:
-    name: local-cluster
+    name: dev-cluster
   port: 5701
+  port:
+    auto-increment: true
+    count: 100
+  discovery:
+    mode: multicast
+  multicast:
+    group: 224.2.2.3
+    port: 54327
+    timeout: 2
+  map:
+    backup-count: 1
+    async-backup-count: 0
+    eviction-policy: NONE
+    max-size: 10000
+  lite-member: false
+  management:
+    enabled: false
 
+# Database (defaults)
 database:
-  url: jdbc:h2:mem:testdb
-  username: sa
-  password: ""
+  pool:
+    min: 5
+    max: 20
+    timeout: 30
 
+# Security (defaults)
+security:
+  jwt:
+    enabled: false
+  tls:
+    enabled: false
+
+# Logging
 logging:
   level: INFO
 
-promises:
-  defaultImplementation: DATAFLOW
+# Monitoring
+monitoring:
+  enabled: false

@@ -11,7 +11,7 @@ class ConfigLoaderClasspathTest {
     @Test
     void loads_library_defaults_and_profile_overrides() {
         // default profile is 'dev'
-        ConfigResult result = ConfigLoader.load()
+        ConfigResult result = ConfigLoader.load(profile: 'dev')
 
         assertTrue(result.isValid())
 

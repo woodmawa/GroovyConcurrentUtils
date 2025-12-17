@@ -1,6 +1,6 @@
 
 // Base config
-distributed = false
+//distributed = false
 
 // Remote Actor Transport Configuration
 import org.softwood.actor.remote.security.SecretsResolver
@@ -46,9 +46,7 @@ actor {
 }
 
 hazelcast {
-    cluster {
-        name = 'local-cluster'
-    }
+
     port = 5701
 }
 

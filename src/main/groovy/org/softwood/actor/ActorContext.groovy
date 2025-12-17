@@ -6,6 +6,7 @@ package org.softwood.actor
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.remote.security.AuthContext as SecurityAuthContext
+import org.softwood.actor.scheduling.Cancellable
 
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
@@ -233,6 +234,263 @@ class ActorContext {
      */
     void tellSelf(Object msg) {
         self()?.tell(msg)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Scheduling Methods
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Schedules a one-time message to self after a delay.
+     * 
+     * <p>Useful for timeouts, retries, and delayed actions.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg == 'start') {
+     *         ctx.scheduleOnce(Duration.ofSeconds(5), 'timeout')
+     *     } else if (msg == 'timeout') {
+     *         println "Timed out!"
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param delay how long to wait
+     * @param message the message to send to self
+     * @return Cancellable task handle
+     */
+    Cancellable scheduleOnce(Duration delay, Object message) {
+        def actor = system.getActor(actorName)
+        if (actor == null) {
+            throw new IllegalStateException("Actor $actorName not found in system")
+        }
+        return system.scheduler.scheduleOnce(actor, message, delay)
+    }
+    
+    /**
+     * Schedules a periodic message to self at fixed rate.
+     * 
+     * <p>Messages are sent at fixed intervals regardless of processing time.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg == 'start-monitoring') {
+     *         ctx.scheduleAtFixedRate(
+     *             Duration.ofSeconds(0),
+     *             Duration.ofSeconds(30),
+     *             'health-check'
+     *         )
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param initialDelay delay before first message
+     * @param period interval between messages
+     * @param message the message to send repeatedly
+     * @return Cancellable task handle
+     */
+    Cancellable scheduleAtFixedRate(Duration initialDelay, Duration period, Object message) {
+        def actor = system.getActor(actorName)
+        if (actor == null) {
+            throw new IllegalStateException("Actor $actorName not found in system")
+        }
+        return system.scheduler.scheduleAtFixedRate(actor, message, initialDelay, period)
+    }
+    
+    /**
+     * Schedules a periodic message to self with fixed delay between completions.
+     * 
+     * <p>Waits for the delay AFTER each message completes before sending next.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg == 'start-polling') {
+     *         ctx.scheduleWithFixedDelay(
+     *             Duration.ofSeconds(0),
+     *             Duration.ofSeconds(5),
+     *             'poll'
+     *         )
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param initialDelay delay before first message
+     * @param delay delay between completion and next send
+     * @param message the message to send repeatedly
+     * @return Cancellable task handle
+     */
+    Cancellable scheduleWithFixedDelay(Duration initialDelay, Duration delay, Object message) {
+        def actor = system.getActor(actorName)
+        if (actor == null) {
+            throw new IllegalStateException("Actor $actorName not found in system")
+        }
+        return system.scheduler.scheduleWithFixedDelay(actor, message, initialDelay, delay)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Death Watch (Lifecycle Monitoring)
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Start watching another actor for termination.
+     * 
+     * <p>When the watched actor stops, this actor will receive a Terminated message.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg == 'start-worker') {
+     *         def worker = ctx.system.actor('worker') { msg2, ctx2 -> ... }
+     *         ctx.watch(worker)
+     *     } else if (msg instanceof Terminated) {
+     *         println "Worker ${msg.actor.name} terminated!"
+     *         // Spawn new worker or take other action
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param actor the actor to watch
+     */
+    void watch(Actor actor) {
+        if (actor == null) {
+            throw new IllegalArgumentException("Cannot watch null actor")
+        }
+        def self = system.getActor(actorName)
+        if (self == null) {
+            throw new IllegalStateException("Actor $actorName not found in system")
+        }
+        system.deathWatch.watch(self, actor)
+        log.debug "[$actorName] now watching [${actor.name}]"
+    }
+    
+    /**
+     * Start watching an actor by name.
+     * 
+     * @param actorName the name of the actor to watch
+     */
+    void watch(String actorName) {
+        def actor = system.getActor(actorName)
+        if (actor == null) {
+            throw new IllegalArgumentException("Actor $actorName not found")
+        }
+        watch(actor)
+    }
+    
+    /**
+     * Stop watching an actor.
+     * 
+     * <p>After unwatching, no Terminated message will be sent if the actor stops.</p>
+     * 
+     * @param actor the actor to stop watching
+     */
+    void unwatch(Actor actor) {
+        if (actor == null) {
+            throw new IllegalArgumentException("Cannot unwatch null actor")
+        }
+        def self = system.getActor(actorName)
+        if (self == null) {
+            throw new IllegalStateException("Actor $actorName not found in system")
+        }
+        system.deathWatch.unwatch(self, actor)
+        log.debug "[$actorName] no longer watching [${actor.name}]"
+    }
+    
+    /**
+     * Stop watching an actor by name.
+     * 
+     * @param actorName the name of the actor to stop watching
+     */
+    void unwatch(String actorName) {
+        def actor = system.getActor(actorName)
+        if (actor != null) {
+            unwatch(actor)
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Actor Hierarchies (Spawn Children)
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Spawn a child actor.
+     * 
+     * <p>Creates a new actor as a child of this actor. The child will be automatically
+     * supervised by this parent according to the parent's supervision strategy.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg == 'create-worker') {
+         def worker = ctx.spawn('worker-1') { msg2, ctx2 ->
+     *             // Worker logic
+     *         }
+     *         // Parent supervises worker automatically
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param childName name for the child actor
+     * @param handler message handler for the child
+     * @return the created child actor
+     */
+    Actor spawn(String childName, Closure handler) {
+        return spawn(childName, [:], handler)
+    }
+    
+    /**
+     * Spawn a child actor with initial state.
+     * 
+     * @param childName name for the child actor
+     * @param initialState initial state map for the child
+     * @param handler message handler for the child
+     * @return the created child actor
+     */
+    Actor spawn(String childName, Map initialState, Closure handler) {
+        def parent = system.getActor(actorName)
+        if (parent == null) {
+            throw new IllegalStateException("Parent actor $actorName not found in system")
+        }
+        
+        // Create the child actor
+        def child = system.createActor(childName, handler, initialState)
+        
+        // Register parent-child relationship
+        system.hierarchy.registerChild(parent, child)
+        
+        // Automatically watch the child (for cleanup)
+        system.deathWatch.watch(parent, child)
+        
+        log.debug "[$actorName] spawned child [$childName]"
+        return child
+    }
+    
+    /**
+     * Get all children of this actor.
+     * 
+     * @return set of child actor names
+     */
+    Set<String> getChildren() {
+        def self = system.getActor(actorName)
+        if (self == null) {
+            return Collections.emptySet()
+        }
+        return system.hierarchy.getChildren(self)
+    }
+    
+    /**
+     * Get the parent of this actor.
+     * 
+     * @return parent actor name, or null if no parent
+     */
+    String getParent() {
+        def self = system.getActor(actorName)
+        if (self == null) {
+            return null
+        }
+        return system.hierarchy.getParent(self)
     }
 
     // ─────────────────────────────────────────────────────────────

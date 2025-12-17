@@ -4,6 +4,8 @@
 package org.softwood.actor
 
 import groovy.transform.CompileDynamic
+import org.softwood.actor.supervision.SupervisionStrategy
+import org.softwood.actor.supervision.OneForOneStrategy
 
 /**
  * Enhanced ActorBuilder with pattern-matching support.
@@ -20,6 +22,7 @@ class ActorBuilder {
     String name
     Map initialState = [:]
     Closure handler
+    SupervisionStrategy supervisionStrategy
 
     // For pattern matching
     private List<PatternHandler> patterns = []
@@ -41,6 +44,65 @@ class ActorBuilder {
         if (s) {
             this.initialState.putAll(s)
         }
+    }
+    
+    /**
+     * Set supervision strategy using a SupervisionStrategy object.
+     * 
+     * Usage:
+     *   supervisionStrategy SupervisionStrategy.restartAlways()
+     *   supervisionStrategy new OneForOneStrategy(...)
+     */
+    void supervisionStrategy(SupervisionStrategy strategy) {
+        this.supervisionStrategy = strategy
+    }
+    
+    /**
+     * Set supervision strategy using a decider closure.
+     * Creates a OneForOneStrategy with the provided decider.
+     * 
+     * Usage:
+     *   supervisionStrategy { throwable ->
+     *       if (throwable instanceof IOException) {
+     *           return SupervisorDirective.RESTART
+     *       } else {
+     *           return SupervisorDirective.STOP
+     *       }
+     *   }
+     */
+    void supervisionStrategy(Closure decider) {
+        this.supervisionStrategy = new OneForOneStrategy(decider)
+    }
+    
+    /**
+     * Set supervision strategy using a map configuration.
+     * Creates a OneForOneStrategy with the provided options and decider.
+     * 
+     * Usage:
+     *   supervisionStrategy(
+     *       maxRestarts: 5,
+     *       withinDuration: Duration.ofMinutes(1),
+     *       useExponentialBackoff: true
+     *   ) { throwable -> ... }
+     */
+    void supervisionStrategy(Map options, Closure decider) {
+        def strategy = new OneForOneStrategy(decider)
+        if (options.maxRestarts != null) {
+            strategy.maxRestarts = options.maxRestarts as int
+        }
+        if (options.withinDuration != null) {
+            strategy.withinDuration = options.withinDuration
+        }
+        if (options.useExponentialBackoff != null) {
+            strategy.useExponentialBackoff = options.useExponentialBackoff as boolean
+        }
+        if (options.initialBackoff != null) {
+            strategy.initialBackoff = options.initialBackoff
+        }
+        if (options.maxBackoff != null) {
+            strategy.maxBackoff = options.maxBackoff
+        }
+        this.supervisionStrategy = strategy
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -128,7 +190,14 @@ class ActorBuilder {
         }
 
         validate()
-        return system.createActor(name, handler, initialState)
+        def actor = system.createActor(name, handler, initialState)
+        
+        // Apply supervision strategy if set
+        if (supervisionStrategy) {
+            actor.setSupervisionStrategy(supervisionStrategy)
+        }
+        
+        return actor
     }
 
     private Closure buildPatternHandler() {

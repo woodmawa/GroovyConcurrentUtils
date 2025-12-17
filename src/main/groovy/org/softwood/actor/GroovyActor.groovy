@@ -3,6 +3,10 @@ package org.softwood.actor
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.pool.ExecutorPool
+import org.softwood.actor.supervision.SupervisionStrategy
+import org.softwood.actor.supervision.SupervisorDirective
+import org.softwood.actor.supervision.RestartStatistics
+import org.softwood.actor.lifecycle.Terminated
 
 import java.time.Duration
 import java.util.concurrent.*
@@ -78,6 +82,10 @@ class GroovyActor implements Actor {
     // Error management
     private volatile Closure<Void> errorHandler
     private final ConcurrentLinkedQueue<Map<String, Object>> recentErrors = new ConcurrentLinkedQueue<>()
+    
+    // Supervision
+    private volatile SupervisionStrategy supervisionStrategy
+    private volatile RestartStatistics restartStats
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -227,6 +235,9 @@ class GroovyActor implements Actor {
             Thread.currentThread().interrupt()
         }
 
+        // Notify watchers and cleanup death watch
+        notifyWatchersAndCleanup(null)
+
         // Shutdown owned pool
         if (ownsPool && pool != null) {
             pool.shutdown()
@@ -360,7 +371,129 @@ class GroovyActor implements Actor {
             }
         }
 
-        log.error("[$name] Message processing failed", e)
+        // Apply supervision directive if strategy is set
+        if (supervisionStrategy) {
+            applySupervisionDirective(e)
+        } else {
+            // Default: just log
+            log.error("[$name] Message processing failed", e)
+        }
+    }
+    
+    /**
+     * Apply supervision directive based on the strategy's decision.
+     */
+    private void applySupervisionDirective(Throwable e) {
+        def directive = supervisionStrategy.decide(e, this)
+        
+        switch(directive) {
+            case SupervisorDirective.RESTART:
+                handleRestart(e)
+                break
+            case SupervisorDirective.RESUME:
+                handleResume(e)
+                break
+            case SupervisorDirective.STOP:
+                handleStop(e)
+                break
+            case SupervisorDirective.ESCALATE:
+                handleEscalate(e)
+                break
+            default:
+                log.error("[$name] Unknown supervision directive: $directive", e)
+        }
+    }
+    
+    /**
+     * Handle RESTART directive - clear state and restart actor.
+     */
+    private void handleRestart(Throwable e) {
+        if (!restartStats.recordRestart()) {
+            log.error("[$name] Max restarts (${supervisionStrategy.maxRestarts}) exceeded within ${supervisionStrategy.withinDuration} - stopping actor")
+            stop()
+            return
+        }
+        
+        // Calculate backoff if enabled
+        if (supervisionStrategy.useExponentialBackoff) {
+            def backoff = restartStats.calculateBackoff(
+                supervisionStrategy.initialBackoff,
+                supervisionStrategy.maxBackoff
+            )
+            log.info("[$name] Backing off for ${backoff.toMillis()}ms before restart")
+            try {
+                Thread.sleep(backoff.toMillis())
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt()
+                log.warn("[$name] Backoff interrupted")
+            }
+        }
+        
+        // Clear state and notify strategy
+        log.info("[$name] Restarting actor (attempt ${restartStats.restartCount})")
+        state.clear()
+        supervisionStrategy.onRestart(this, e)
+    }
+    
+    /**
+     * Handle RESUME directive - ignore the error and continue.
+     */
+    private void handleResume(Throwable e) {
+        log.debug("[$name] Resuming after error (ignored)", e)
+        // Do nothing - just continue processing next message
+    }
+    
+    /**
+     * Handle STOP directive - terminate the actor.
+     */
+    private void handleStop(Throwable e) {
+        log.error("[$name] Stopping actor due to supervision directive", e)
+        supervisionStrategy.onStop(this, e)
+        stop()
+    }
+    
+    /**
+     * Handle ESCALATE directive - propagate to parent/supervisor.
+     */
+    private void handleEscalate(Throwable e) {
+        if (system == null) {
+            log.warn("[$name] Cannot escalate - no system reference")
+            stop()
+            return
+        }
+        
+        // Get parent from hierarchy
+        String parentName = system.hierarchy.getParent(this)
+        
+        if (parentName == null) {
+            log.warn("[$name] Cannot escalate - no parent actor, stopping instead", e)
+            stop()
+            return
+        }
+        
+        def parent = system.getActor(parentName)
+        if (parent == null || parent.isStopped()) {
+            log.warn("[$name] Cannot escalate - parent [$parentName] not found or stopped, stopping instead", e)
+            stop()
+            return
+        }
+        
+        log.info("[$name] Escalating error to parent [$parentName]", e)
+        
+        // Send error to parent as a special message
+        // Parent's supervision strategy will handle it
+        try {
+            def escalationMsg = [
+                type: 'child-error',
+                childName: name,
+                error: e,
+                child: this
+            ]
+            parent.tell(escalationMsg)
+        } catch (Exception escalationError) {
+            log.error("[$name] Failed to escalate to parent, stopping", escalationError)
+            stop()
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -401,6 +534,39 @@ class GroovyActor implements Actor {
     @Override
     int getMaxMailboxSize() {
         return maxMailboxSize
+    }
+    
+    // ─────────────────────────────────────────────────────────────
+    // Supervision
+    // ─────────────────────────────────────────────────────────────
+    
+    /**
+     * Set the supervision strategy for this actor.
+     * This determines how the actor handles failures during message processing.
+     */
+    Actor setSupervisionStrategy(SupervisionStrategy strategy) {
+        this.supervisionStrategy = strategy
+        if (strategy) {
+            this.restartStats = new RestartStatistics(
+                strategy.maxRestarts,
+                strategy.withinDuration
+            )
+        }
+        return this
+    }
+    
+    /**
+     * Get the current supervision strategy, if any.
+     */
+    SupervisionStrategy getSupervisionStrategy() {
+        return supervisionStrategy
+    }
+    
+    /**
+     * Get restart statistics for this actor.
+     */
+    RestartStatistics getRestartStats() {
+        return restartStats
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -569,6 +735,51 @@ class GroovyActor implements Actor {
             throw e
         } catch (Exception e) {
             throw new IllegalStateException("Error enqueuing message", e)
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────
+    // Death Watch Support
+    // ─────────────────────────────────────────────────────────────
+    
+    /**
+     * Notify all watching actors that this actor has terminated.
+     * Also cleanup death watch registry.
+     */
+    private void notifyWatchersAndCleanup(Throwable cause) {
+        if (system == null) {
+            return // No system reference, can't notify
+        }
+        
+        try {
+            // Get all watchers before cleanup
+            Set<String> watcherNames = system.deathWatch.getWatchers(this)
+            
+            // Send Terminated messages to all watchers FIRST
+            def terminatedMsg = cause != null 
+                ? new Terminated(this, cause) 
+                : new Terminated(this)
+            
+            for (String watcherName : watcherNames) {
+                try {
+                    def watcher = system.getActor(watcherName)
+                    if (watcher != null && !watcher.isStopped()) {
+                        watcher.tell(terminatedMsg)
+                        log.debug("[$name] Sent Terminated message to watcher [$watcherName]")
+                    }
+                } catch (Exception e) {
+                    log.warn("[$name] Failed to notify watcher [$watcherName]", e)
+                }
+            }
+            
+            // THEN remove this actor from death watch registry
+            system.deathWatch.removeActor(this)
+            
+            // Also cleanup hierarchy relationships
+            system.hierarchy.removeActor(this)
+            
+        } catch (Exception e) {
+            log.error("[$name] Error in notifyWatchersAndCleanup", e)
         }
     }
 }

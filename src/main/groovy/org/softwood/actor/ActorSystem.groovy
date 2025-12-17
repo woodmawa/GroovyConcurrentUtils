@@ -8,6 +8,9 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.remote.RemotingTransport
 import org.softwood.actor.remote.RemoteActorRef
+import org.softwood.actor.scheduling.ActorScheduler
+import org.softwood.actor.lifecycle.DeathWatchRegistry
+import org.softwood.actor.hierarchy.ActorHierarchyRegistry
 
 /**
  * ActorSystem: actor lifecycle coordinator.
@@ -27,6 +30,12 @@ class ActorSystem implements Closeable {
     private final ActorRegistry registry
     // Optional remoting transports keyed by scheme
     private final Map<String, RemotingTransport> transports = [:]
+    // Scheduler for delayed and periodic messages
+    final ActorScheduler scheduler
+    // Death watch registry for actor lifecycle monitoring
+    final DeathWatchRegistry deathWatch
+    // Hierarchy registry for parent-child relationships
+    final ActorHierarchyRegistry hierarchy
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -42,6 +51,9 @@ class ActorSystem implements Closeable {
     ActorSystem(String name, ActorRegistry registry) {
         this.name = name
         this.registry = registry
+        this.scheduler = new ActorScheduler()
+        this.deathWatch = new DeathWatchRegistry()
+        this.hierarchy = new ActorHierarchyRegistry()
         log.info "ActorSystem '$name' created (distributed: ${registry.isDistributed()})"
     }
 
@@ -124,6 +136,10 @@ class ActorSystem implements Closeable {
         }
 
         registry.clear()
+        
+        // Shutdown scheduler
+        scheduler.shutdown()
+        
         log.info "ActorSystem '$name' shutdown complete"
     }
 

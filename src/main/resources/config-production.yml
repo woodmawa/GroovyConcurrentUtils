@@ -6,7 +6,7 @@ distributed: true
 # Hazelcast clustering (Kubernetes discovery)
 hazelcast:
   cluster:
-    name: prod-actor-cluster
+    name: production-cluster
   port: 5701
   port-auto-increment: true
   port-count: 100

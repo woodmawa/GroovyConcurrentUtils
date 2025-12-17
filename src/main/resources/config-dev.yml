@@ -8,9 +8,8 @@ hazelcast:
   cluster:
     name: dev-cluster
   port: 5701
-  port:
-    auto-increment: true
-    count: 100
+  port-auto-increment: true
+  port-count: 100
   discovery:
     mode: multicast
   multicast:

@@ -62,11 +62,11 @@ class HazelcastConfigBuilder {
         network.setPort(port)
         
         // Port auto-increment
-        boolean portAutoIncrement = getBoolean(appConfig, 'hazelcast.port.auto-increment', true)
+        boolean portAutoIncrement = getBoolean(appConfig, 'hazelcast.port-auto-increment', true)
         network.setPortAutoIncrement(portAutoIncrement)
         
         // Port count
-        int portCount = getInt(appConfig, 'hazelcast.port.count', 100)
+        int portCount = getInt(appConfig, 'hazelcast.port-count', 100)
         network.setPortCount(portCount)
         
         log.info("Hazelcast network: port=${port}, autoIncrement=${portAutoIncrement}")

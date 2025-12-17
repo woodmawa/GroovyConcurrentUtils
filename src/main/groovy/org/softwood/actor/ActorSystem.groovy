@@ -133,20 +133,42 @@ class ActorSystem implements Closeable {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Convenience DSL Entry Point
+    // Convenience DSL Entry Points
     // ─────────────────────────────────────────────────────────────
 
     /**
-     * Inline actor creation via DSL:
-     *   system.actor {
-     *       name "MyActor"
-     *       onMessage { msg, ctx -> ... }
-     *   }
+     * Inline actor creation via DSL.
+     * 
+     * <p>Usage:</p>
+     * <pre>
+     * system.actor {
+     *     name "MyActor"
+     *     onMessage { msg, ctx -&gt; ... }
+     * }
+     * </pre>
      */
     Actor actor(
             @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
                     Closure<?> spec) {
-        ActorDSL.actor(this, spec)
+        ActorFactory.actor(this, spec)
+    }
+    
+    /**
+     * Shortest actor creation syntax.
+     * 
+     * <p>Usage:</p>
+     * <pre>
+     * system.actor("MyActor") { msg, ctx -&gt;
+     *     println "[\$ctx.actorName] \$msg"
+     * }
+     * </pre>
+     * 
+     * @param actorName actor name
+     * @param handler message handler closure
+     * @return created actor
+     */
+    Actor actor(String actorName, Closure handler) {
+        createActor(actorName, handler)
     }
 
     // ─────────────────────────────────────────────────────────────

@@ -63,6 +63,42 @@ class ActorFactory {
     }
 
     // ----------------------------------------------------------------------
+    // DSL Entry Point (merged from ActorDSL)
+    // ----------------------------------------------------------------------
+
+    /**
+     * Create an actor using builder DSL.
+     * 
+     * <p>This is the main entry point for the actor DSL. Import statically for cleanest syntax:</p>
+     * <pre>
+     * import static org.softwood.actor.ActorFactory.actor
+     * 
+     * def myActor = actor(system) {
+     *     name "Printer"
+     *     onMessage { msg, ctx -&gt;
+     *         println "[\$ctx.actorName] \$msg"
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param system the actor system
+     * @param spec DSL configuration closure
+     * @return configured actor
+     */
+    static Actor actor(
+            ActorSystem system,
+            @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
+                    Closure<?> spec) {
+
+        def builder = new ActorBuilder(system)
+        spec.delegate = builder
+        spec.resolveStrategy = Closure.DELEGATE_FIRST
+        spec.call()
+
+        return builder.build()
+    }
+
+    // ----------------------------------------------------------------------
     // Factory Methods
     // ----------------------------------------------------------------------
 

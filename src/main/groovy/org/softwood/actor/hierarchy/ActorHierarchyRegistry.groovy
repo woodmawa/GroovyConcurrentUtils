@@ -110,7 +110,7 @@ class ActorHierarchyRegistry {
      */
     Set<String> getChildren(Actor actor) {
         CopyOnWriteArraySet<String> children = parentToChildren.get(actor.name)
-        return children != null ? new HashSet<>(children) : Collections.emptySet()
+        return children != null ? new HashSet<String>(children) : new HashSet<String>()
     }
     
     /**
@@ -193,10 +193,10 @@ class ActorHierarchyRegistry {
      */
     Map<String, Object> getStats() {
         return [
-            totalParents: parentToChildren.size(),
-            totalChildren: childToParent.size(),
-            totalRelationships: childToParent.size()
-        ]
+            totalParents: (Object)parentToChildren.size(),
+            totalChildren: (Object)childToParent.size(),
+            totalRelationships: (Object)childToParent.size()
+        ] as Map<String, Object>
     }
     
     /**

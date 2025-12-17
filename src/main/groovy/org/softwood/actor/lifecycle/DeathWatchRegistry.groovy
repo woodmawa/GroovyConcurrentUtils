@@ -92,7 +92,7 @@ class DeathWatchRegistry {
      */
     Set<String> getWatchers(Actor watched) {
         CopyOnWriteArraySet<String> result = watchers.get(watched.name)
-        return result != null ? new HashSet<>(result) : Collections.emptySet()
+        return result != null ? new HashSet<String>(result) : new HashSet<String>()
     }
     
     /**
@@ -103,7 +103,7 @@ class DeathWatchRegistry {
      */
     Set<String> getWatching(Actor watcher) {
         CopyOnWriteArraySet<String> result = watching.get(watcher.name)
-        return result != null ? new HashSet<>(result) : Collections.emptySet()
+        return result != null ? new HashSet<String>(result) : new HashSet<String>()
     }
     
     /**

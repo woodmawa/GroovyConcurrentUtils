@@ -60,7 +60,8 @@ class ActorScheduler {
      * <p>Uses a thread pool sized to available processors / 2 (min 1, max 4).</p>
      */
     ActorScheduler() {
-        int poolSize = Math.max(1, Math.min(4, Runtime.runtime.availableProcessors() / 2)) as int
+        int availableProcessors = Runtime.getRuntime().availableProcessors()
+        int poolSize = Math.max(1, Math.min(4, (int)(availableProcessors / 2)))
         this.scheduler = createScheduler(poolSize)
         this.ownsScheduler = true
         log.debug("Created ActorScheduler with {} threads", poolSize)
@@ -89,14 +90,15 @@ class ActorScheduler {
     }
     
     private static ScheduledThreadPoolExecutor createScheduler(int poolSize) {
+        def threadCounter = new AtomicInteger(0)
         def executor = new ScheduledThreadPoolExecutor(
             poolSize,
-            { runnable ->
+            { Runnable runnable ->
                 def thread = new Thread(runnable)
                 thread.daemon = true
-                thread.name = "actor-scheduler-${thread.id}"
+                thread.name = "actor-scheduler-${threadCounter.incrementAndGet()}"
                 return thread
-            }
+            } as java.util.concurrent.ThreadFactory
         )
         executor.setRemoveOnCancelPolicy(true) // Clean up cancelled tasks
         return executor

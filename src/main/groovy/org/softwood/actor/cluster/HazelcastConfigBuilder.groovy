@@ -172,7 +172,8 @@ class HazelcastConfigBuilder {
         if (members instanceof String) {
             // Comma-separated list
             members.split(',').each { member ->
-                tcp.addMember(member.trim())
+                String val = member as String
+                tcp.addMember(val.trim())
             }
         } else if (members instanceof List) {
             members.each { member ->

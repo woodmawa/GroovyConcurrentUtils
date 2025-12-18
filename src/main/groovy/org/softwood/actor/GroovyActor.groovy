@@ -696,8 +696,8 @@ class GroovyActor implements Actor {
         try {
             def result = handler.call(envelope.payload, ctx)
 
-            // Auto-reply if ask and handler didn't explicitly reply
-            if (envelope.isAsk() && !envelope.replyFuture.isDone()) {
+            // Auto-reply if ask and handler didn't explicitly reply AND didn't defer
+            if (envelope.isAsk() && !envelope.replyFuture.isDone() && !ctx.isReplyDeferred()) {
                 ctx.reply(result)
             }
 

@@ -28,6 +28,7 @@ class ActorContext {
     final Object message
     final Map state
     final ActorSystem system
+    private Actor _self  // Lazily initialized cached reference to this actor
 
     // Optional: track sender for reply-to patterns
     final Actor sender
@@ -36,6 +37,7 @@ class ActorContext {
     final SecurityAuthContext authContext
 
     private final CompletableFuture<Object> replyFuture
+    private boolean replyDeferred = false  // Track if reply has been deferred
 
     ActorContext(
             String actorName,
@@ -49,6 +51,7 @@ class ActorContext {
         this.message = message
         this.state = state
         this.system = system
+        this._self = null  // Will be lazily initialized on first access
         this.replyFuture = replyFuture
         this.sender = sender
         this.authContext = authContext ?: new SecurityAuthContext() // Unauthenticated by default
@@ -74,6 +77,42 @@ class ActorContext {
      */
     boolean isAskMessage() {
         replyFuture != null
+    }
+
+    /**
+     * Defer auto-reply for async workflows.
+     * 
+     * <p>Call this method when you need to start async work and reply later.
+     * Prevents the auto-reply mechanism from sending null immediately.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg.type == 'asyncOperation') {
+     *         ctx.deferReply()  // Don't auto-reply!
+     *         // Start async work
+     *         launchAsyncWork { result ->
+     *             ctx.reply(result)  // Reply when done
+     *         }
+     *     }
+     * }
+     * </pre>
+     */
+    void deferReply() {
+        if (!isAskMessage()) {
+            log.warn "[$actorName] deferReply() called on tell message (no effect)"
+            return
+        }
+        replyDeferred = true
+        log.debug "[$actorName] Reply deferred for async processing"
+    }
+
+    /**
+     * Check if reply has been deferred.
+     * Internal use - checked by GroovyActor to skip auto-reply.
+     */
+    boolean isReplyDeferred() {
+        return replyDeferred
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -222,10 +261,22 @@ class ActorContext {
     // ─────────────────────────────────────────────────────────────
 
     /**
-     * Get reference to self (useful for passing to other actors).
+     * Get reference to self (property accessor with lazy initialization).
+     * The self reference is cached after first lookup.
+     */
+    Actor getSelf() {
+        if (_self == null) {
+            _self = system.getActor(actorName)
+        }
+        return _self
+    }
+
+    /**
+     * Get reference to self (method form for backward compatibility).
+     * Note: Prefer using ctx.self property over ctx.self() method.
      */
     Actor self() {
-        system.getActor(actorName)
+        return getSelf()
     }
 
     /**
@@ -491,6 +542,85 @@ class ActorContext {
             return null
         }
         return system.hierarchy.getParent(self)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Groovy Closure Helpers (for nested closure safety)
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Create a counter map that works reliably in nested closures.
+     * 
+     * <p>Use this instead of [:] or [:].withDefault { 0 } in deeply nested actor code.
+     * Standard Groovy map operations can fail in deeply nested closures due to
+     * meta-programming issues. This helper provides a safe alternative.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     def counts = ctx.createCounterMap()
+     *     files.each { file ->
+     *         counts.increment(file.extension)  // Safe in any closure depth!
+     *     }
+     *     println counts.toMap()  // {groovy=10, java=5}
+     * }
+     * </pre>
+     * 
+     * @return a CounterMap that works reliably in nested closures
+     */
+    CounterMap createCounterMap() {
+        return new CounterMap()
+    }
+
+    /**
+     * Spawn child actors for each item in a collection.
+     * 
+     * <p>This helper avoids Groovy closure scoping issues when creating actors
+     * inside .each {} blocks. It uses traditional for loops internally and
+     * generates unique names automatically.</p>
+     * 
+     * <h2>Example</h2>
+     * <pre>
+     * actor.onMessage { msg, ctx ->
+     *     if (msg.type == 'process-dirs') {
+     *         // Spawn a child actor for each directory
+     *         ctx.spawnForEach(directories, 'dir-scanner') { dir, index, childMsg, childCtx ->
+     *             if (childMsg.type == 'scan') {
+     *                 // Process dir safely
+     *             }
+     *         }
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param items collection to iterate over
+     * @param baseName base name for child actors (UUID will be appended)
+     * @param handler closure that receives (item, index, msg, ctx)
+     * @return list of spawned child actors
+     */
+    List<Actor> spawnForEach(Collection items, String baseName, Closure handler) {
+        List<Actor> children = []
+        
+        // Use traditional for loop to avoid .each closure issues
+        int index = 0
+        for (def item : items) {
+            final def itemCopy = item  // Capture for closure
+            final int indexCopy = index
+            
+            // Generate unique name
+            def uniqueName = "${baseName}-${UUID.randomUUID().toString().take(8)}"
+            
+            // Spawn child with handler that passes item and index
+            def child = spawn(uniqueName) { childMsg, childCtx ->
+                handler.call(itemCopy, indexCopy, childMsg, childCtx)
+            }
+            
+            children.add(child)
+            index++
+        }
+        
+        log.debug "[$actorName] spawned ${children.size()} children for collection"
+        return children
     }
 
     // ─────────────────────────────────────────────────────────────

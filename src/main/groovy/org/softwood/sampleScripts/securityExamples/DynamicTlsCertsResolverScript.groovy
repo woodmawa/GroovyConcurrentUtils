@@ -1,4 +1,4 @@
-package org.softwood.scripts.securityExamples
+package org.softwood.sampleScripts.securityExamples
 
 import org.softwood.actor.remote.rsocket.RSocketTransport
 import org.softwood.actor.remote.security.CertificateResolver

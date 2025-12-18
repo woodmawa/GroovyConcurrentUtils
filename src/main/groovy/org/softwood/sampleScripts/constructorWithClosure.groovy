@@ -1,4 +1,4 @@
-package org.softwood.scripts
+package org.softwood.sampleScripts
 
 import groovy.transform.ToString
 

@@ -1,4 +1,4 @@
-package org.softwood.scripts
+package org.softwood.sampleScripts.actors
 
 import org.softwood.actor.ActorSystem
 

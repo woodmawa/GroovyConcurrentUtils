@@ -163,6 +163,12 @@ class GroovyActorTest {
             actor.askSync("msg2", Duration.ofSeconds(1))
             actor.askSync("msg3", Duration.ofSeconds(1))
 
+            // Wait for metrics to be updated
+            await().atMost(2, SECONDS).until {
+                def metrics = actor.metrics()
+                metrics.messagesProcessed >= 3
+            }
+            
             def metrics = actor.metrics()
             
             assertEquals("metrics-test", metrics.name)

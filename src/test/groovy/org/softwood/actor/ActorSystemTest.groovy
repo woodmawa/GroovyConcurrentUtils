@@ -13,7 +13,6 @@ import org.softwood.actor.remote.RemoteActorRef
 
 // JUnit 5 imports
 import static org.junit.jupiter.api.Assertions.*
-import static org.softwood.actor.ActorDSL.actor
 
 /**
  * Tests for ActorSystem using JUnit 5 and Groovy's built-in mocking.
@@ -29,7 +28,7 @@ class ActorSystemTest {
     void testCreateAndShutdownSystem() {
         def system = new ActorSystem("SysTest")
 
-        def a = actor(system) {
+        def a = system.actor {
             name "A1"
             onMessage { msg, ctx ->
                 ctx.reply("OK:$msg")

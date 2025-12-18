@@ -41,6 +41,16 @@ REM Create output directory
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 cd /d "%OUTPUT_DIR%"
 
+REM Clean up any existing certificates
+echo 🧹 Cleaning up old certificates...
+if exist server-keystore.jks del /F /Q server-keystore.jks
+if exist client-keystore.jks del /F /Q client-keystore.jks
+if exist truststore.jks del /F /Q truststore.jks
+if exist server-cert.cer del /F /Q server-cert.cer
+if exist client-cert.cer del /F /Q client-cert.cer
+if exist tls-config.properties del /F /Q tls-config.properties
+echo.
+
 REM =============================================================================
 REM 1. Generate Server Certificate
 REM =============================================================================
@@ -175,12 +185,41 @@ echo actor.remote.tls.protocols=TLSv1.3,TLSv1.2
 echo ✅ Configuration generated: tls-config.properties
 
 REM =============================================================================
+REM 6. Copy to Test Resources (for classpath loading in tests)
+REM =============================================================================
+echo.
+echo 📋 Copying certificates to test resources...
+
+REM Go back to scripts directory
+cd ..
+
+set TEST_RESOURCES_DIR=..\src\test\resources\test-certs
+
+if not exist "%TEST_RESOURCES_DIR%" mkdir "%TEST_RESOURCES_DIR%"
+
+copy /Y certs\server-keystore.jks "%TEST_RESOURCES_DIR%\server-keystore.jks" >nul
+copy /Y certs\client-keystore.jks "%TEST_RESOURCES_DIR%\client-keystore.jks" >nul
+copy /Y certs\truststore.jks "%TEST_RESOURCES_DIR%\truststore.jks" >nul
+
+if %ERRORLEVEL% EQU 0 (
+    echo ✅ Certificates copied to test resources
+    echo    Location: src\test\resources\test-certs\
+    echo    Tests can now load certs from classpath: /test-certs/server-keystore.jks
+) else (
+    echo ⚠️  Failed to copy to test resources
+    echo    Error level: %ERRORLEVEL%
+)
+
+REM Go back to certs directory for summary
+cd certs
+
+REM =============================================================================
 REM Summary
 REM =============================================================================
 echo.
 echo ✅ Certificate generation complete!
 echo.
-echo Generated files:
+echo Generated files in scripts/certs/:
 echo   📄 server-keystore.jks    - Server private key and certificate
 echo   📄 client-keystore.jks    - Client private key and certificate (mTLS^)
 echo   📄 truststore.jks         - Trusted CA certificates
@@ -188,14 +227,16 @@ echo   📄 server-cert.cer        - Server certificate (for inspection^)
 echo   📄 client-cert.cer        - Client certificate (for inspection^)
 echo   📄 tls-config.properties  - Configuration file
 echo.
+echo Also copied to src/test/resources/test-certs/ for test classpath loading
+echo.
 echo ⚠️  WARNING: These are self-signed certificates for TESTING ONLY!
 echo     Do NOT use in production. Generate proper CA-signed certificates.
 echo.
 echo Password for all keystores: %PASSWORD%
 echo.
 echo To use in your application:
-echo   1. Copy certs to a secure location
-echo   2. Update config.groovy with paths and passwords
+echo   1. For tests: Certs are already in classpath - use '/test-certs/keystore.jks'
+echo   2. For production: Generate proper certificates and configure paths
 echo   3. Enable TLS: actor.remote.rsocket.tls.enabled = true
 echo.
 

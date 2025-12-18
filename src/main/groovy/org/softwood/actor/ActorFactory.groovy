@@ -8,27 +8,55 @@ import org.softwood.pool.ExecutorPoolFactory
 /**
  * Factory for creating Actor instances.
  *
- * <p>Provides convenient factory methods and a builder pattern for
- * configuring actors with custom pools, error handlers, and mailbox limits.</p>
+ * <p><b>⚠️ IMPORTANT:</b> For most production use cases, create actors via {@link ActorSystem}
+ * instead of using ActorFactory directly. ActorFactory is intended for:
+ * <ul>
+ *   <li><b>Testing:</b> Creating standalone mock actors</li>
+ *   <li><b>Advanced configuration:</b> Custom pool setup before system registration</li>
+ *   <li><b>Standalone actors:</b> Actors that don't need system features</li>
+ * </ul>
  *
- * <h2>Usage Examples</h2>
+ * <p><b>⚠️ Standalone actors created with ActorFactory.create() cannot use:</b>
+ * <ul>
+ *   <li>{@code ctx.spawn()} - requires ActorSystem</li>
+ *   <li>{@code ctx.watch()} - requires DeathWatch registry</li>
+ *   <li>{@code ctx.scheduleOnce()} - requires Scheduler</li>
+ *   <li>{@code ctx.spawnForEach()} - requires ActorSystem</li>
+ *   <li>Parent-child hierarchies</li>
+ *   <li>System-wide shutdown coordination</li>
+ * </ul>
+ *
+ * <h2>✅ Recommended: Use ActorSystem (Production Code)</h2>
  * <pre>
- * // Simple creation
- * def actor = ActorFactory.create("counter") { msg, ctx -&gt;
- *     ctx.state.count = (ctx.state.count ?: 0) + 1
- *     ctx.reply(ctx.state.count)
+ * def system = new ActorSystem("my-app")
+ * 
+ * // Create actors through the system
+ * def actor = system.actor {
+ *     name 'Counter'
+ *     onMessage { msg, ctx -&gt;
+ *         ctx.state.count = (ctx.state.count ?: 0) + 1
+ *         ctx.reply(ctx.state.count)
+ *     }
  * }
+ * 
+ * system.shutdown()  // Coordinated shutdown
+ * </pre>
  *
- * // With configuration
- * def actor = ActorFactory.builder("processor") { msg, ctx -&gt;
- *     // handler logic
+ * <h2>⚠️ Advanced: Standalone Actor (Limited Features)</h2>
+ * <pre>
+ * // Only for testing or advanced use cases
+ * def actor = ActorFactory.create("test-actor") { msg, ctx -&gt;
+ *     ctx.reply("mocked response")
  * }
- *     .initialState([processed: 0])
- *     .maxMailboxSize(1000)
- *     .maxErrorsRetained(50)
- *     .onError({ e -&gt; log.error("Error", e) })
+ * 
+ * // Or with custom configuration
+ * def actor = ActorFactory.builder("worker", handler)
+ *     .poolOwned(customPool)
+ *     .maxMailboxSize(10000)
  *     .build()
  * </pre>
+ *
+ * @see ActorSystem Primary entry point for production actor creation
  */
 @Slf4j
 @CompileStatic
@@ -104,13 +132,32 @@ class ActorFactory {
 
     /**
      * Creates an actor with default settings.
+     * 
+     * <p><b>⚠️ WARNING:</b> This creates a standalone actor that is NOT registered with an ActorSystem.
+     * The actor will not have access to:
+     * <ul>
+     *   <li>{@code ctx.spawn()} - for creating child actors</li>
+     *   <li>{@code ctx.watch()} - for lifecycle monitoring</li>
+     *   <li>{@code ctx.scheduleOnce()} - for delayed messages</li>
+     *   <li>{@code ctx.spawnForEach()} - for bulk child creation</li>
+     * </ul>
+     * 
+     * <p><b>✅ Recommended:</b> Use {@code ActorSystem.actor()} instead for production code.</p>
+     * 
+     * <p>This method is primarily for:
+     * <ul>
+     *   <li>Unit testing (creating mock actors)</li>
+     *   <li>Standalone actors that don't need system features</li>
+     * </ul>
      *
      * @param name actor name
      * @param handler message handler closure
      * @param initialState initial state map (optional)
-     * @return configured actor
+     * @return configured actor (standalone, not registered)
      */
     static Actor create(String name, Closure handler, Map initialState = [:]) {
+        log.debug("Creating standalone actor '{}' via ActorFactory.create(). " +
+                  "Consider using ActorSystem.actor() for full feature support.", name)
         new GroovyActor(name, initialState, handler, defaultPool(), false, 100, 0)
     }
 

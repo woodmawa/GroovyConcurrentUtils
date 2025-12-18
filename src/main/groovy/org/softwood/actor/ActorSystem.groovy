@@ -13,15 +13,94 @@ import org.softwood.actor.lifecycle.DeathWatchRegistry
 import org.softwood.actor.hierarchy.ActorHierarchyRegistry
 
 /**
- * ActorSystem: actor lifecycle coordinator.
+ * ActorSystem: Primary entry point for creating and managing actors in production.
  *
- * Responsibilities:
- *  - Actor creation and registration
- *  - System-wide lifecycle (startup/shutdown)
- *  - Registry coordination (delegates to ActorRegistry)
- *  - Provides convenient DSL entry point
+ * <p>The ActorSystem is the recommended way to create actors. It provides:
+ * <ul>
+ *   <li><b>Automatic registration:</b> Actors are tracked and managed by the system</li>
+ *   <li><b>System reference injection:</b> Enables ctx.spawn(), ctx.watch(), ctx.scheduleOnce()</li>
+ *   <li><b>Coordinated shutdown:</b> All actors stopped gracefully via system.shutdown()</li>
+ *   <li><b>Scheduler:</b> Delayed and periodic message delivery</li>
+ *   <li><b>DeathWatch:</b> Lifecycle monitoring and Terminated messages</li>
+ *   <li><b>Hierarchy:</b> Parent-child relationships and supervision</li>
+ *   <li><b>Remoting:</b> Optional distributed actor communication</li>
+ * </ul>
  *
- * The registry handles storage strategy (local vs distributed).
+ * <h2>✅ Basic Usage (Recommended)</h2>
+ * <pre>
+ * // 1. Create the system
+ * def system = new ActorSystem("my-app")
+ * 
+ * // 2. Create actors through the system
+ * def greeter = system.actor {
+ *     name 'Greeter'
+ *     onMessage { msg, ctx -&gt;
+ *         println "Hello, \${msg}!"
+ *         ctx.reply("Greeted: \${msg}")
+ *     }
+ * }
+ * 
+ * // 3. Send messages
+ * greeter.tell("World")
+ * def response = greeter.askSync("Alice", Duration.ofSeconds(2))
+ * 
+ * // 4. Coordinated shutdown
+ * system.shutdown()
+ * </pre>
+ *
+ * <h2>Advanced Features</h2>
+ * <pre>
+ * def parent = system.actor {
+ *     name 'Parent'
+ *     onMessage { msg, ctx -&gt;
+ *         if (msg.type == 'spawn-children') {
+ *             // Create child actors
+ *             ctx.spawn('child-1') { childMsg, childCtx -&gt;
+ *                 println "Child processing: \${childMsg}"
+ *             }
+ *             
+ *             // Or bulk spawn with spawnForEach
+ *             ctx.spawnForEach(items, 'worker') { item, idx, workerMsg, workerCtx -&gt;
+ *                 // Process item
+ *             }
+ *         }
+ *         
+ *         if (msg.type == 'watch-actor') {
+ *             // Monitor another actor
+ *             ctx.watch(otherActor)
+ *         }
+ *         
+ *         if (msg.type == 'schedule') {
+ *             // Schedule delayed message
+ *             ctx.scheduleOnce(Duration.ofSeconds(5), 'timeout')
+ *         }
+ *     }
+ * }
+ * </pre>
+ *
+ * <h2>Short Syntax</h2>
+ * <pre>
+ * // Concise actor creation
+ * def actor = system.actor("MyActor") { msg, ctx -&gt;
+ *     println "[\${ctx.actorName}] \${msg}"
+ * }
+ * </pre>
+ *
+ * <h2>Why Use ActorSystem Instead of ActorFactory?</h2>
+ * <p>ActorSystem-created actors have full feature support, while ActorFactory.create()
+ * produces standalone actors with limited capabilities (no spawn, watch, schedule, etc.).
+ * Use ActorFactory only for testing or advanced use cases.</p>
+ *
+ * <p><b>Responsibilities:</b>
+ * <ul>
+ *  <li>Actor creation and registration</li>
+ *  <li>System-wide lifecycle (startup/shutdown)</li>
+ *  <li>Registry coordination (delegates to ActorRegistry)</li>
+ *  <li>Scheduler, DeathWatch, Hierarchy management</li>
+ * </ul>
+ *
+ * @see ActorFactory For testing and advanced configuration only
+ * @see ActorContext For context methods available in message handlers
  */
 @Slf4j
 @CompileStatic
@@ -153,15 +232,26 @@ class ActorSystem implements Closeable {
     // ─────────────────────────────────────────────────────────────
 
     /**
-     * Inline actor creation via DSL.
+     * Create an actor using the builder DSL.
+     * 
+     * <p><b>✅ Recommended:</b> This is the primary way to create actors in production code.
+     * The actor is automatically registered with the system and has full access to all features.</p>
      * 
      * <p>Usage:</p>
      * <pre>
-     * system.actor {
-     *     name "MyActor"
-     *     onMessage { msg, ctx -&gt; ... }
+     * def actor = system.actor {
+     *     name 'MyActor'
+     *     initialState count: 0
+     *     onMessage { msg, ctx -&gt;
+     *         // Full feature support: spawn, watch, schedule, etc.
+     *         ctx.spawn('child') { ... }
+     *         ctx.scheduleOnce(Duration.ofSeconds(5), 'timeout')
+     *     }
      * }
      * </pre>
+     * 
+     * @param spec DSL configuration closure
+     * @return fully-featured actor registered with the system
      */
     Actor actor(
             @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = ActorBuilder)
@@ -170,18 +260,24 @@ class ActorSystem implements Closeable {
     }
     
     /**
-     * Shortest actor creation syntax.
+     * Create an actor with concise syntax.
+     * 
+     * <p><b>✅ Recommended:</b> Short and clean syntax for simple actors.
+     * The actor is automatically registered with the system.</p>
      * 
      * <p>Usage:</p>
      * <pre>
-     * system.actor("MyActor") { msg, ctx -&gt;
-     *     println "[\$ctx.actorName] \$msg"
+     * def greeter = system.actor("Greeter") { msg, ctx -&gt;
+     *     println "Hello, \${msg}!"
+     *     ctx.reply("Greeted: \${msg}")
      * }
+     * 
+     * greeter.tell("World")  // Prints: Hello, World!
      * </pre>
      * 
      * @param actorName actor name
      * @param handler message handler closure
-     * @return created actor
+     * @return fully-featured actor registered with the system
      */
     Actor actor(String actorName, Closure handler) {
         createActor(actorName, handler)

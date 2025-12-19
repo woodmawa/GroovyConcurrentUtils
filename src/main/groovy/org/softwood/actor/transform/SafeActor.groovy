@@ -47,7 +47,7 @@ import java.lang.annotation.Target
  * @since 1.0.0
  */
 @Retention(RetentionPolicy.SOURCE)
-@Target([ElementType.TYPE, ElementType.METHOD])
+@Target([ElementType.TYPE, ElementType.METHOD, ElementType.LOCAL_VARIABLE, ElementType.FIELD])
 @GroovyASTTransformationClass(classes = [SafeActorASTTransformation])
 @interface SafeActor {
     /**

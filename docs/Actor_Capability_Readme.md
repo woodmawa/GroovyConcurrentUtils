@@ -12,6 +12,7 @@
 8. [Serialization Options](#serialization-options)
 9. [Configuration & Defaults](#configuration--defaults)
 10. [Best Practices & Patterns](#best-practices--patterns)
+11. [@SafeActor - Compile-Time Safety](#safeactor---compile-time-safety)
 
 ---
 
@@ -1108,6 +1109,75 @@ ctx.spawnForEach(items, 'worker') { item, idx, msg, ctx ->
 
 **See:** `docs/GROOVY_CLOSURE_GOTCHAS.md` for complete guide.
 
+### ActorPatterns - Pre-Built Patterns
+
+`ActorPatterns` is a utility class providing tested, production-ready patterns for common actor scenarios. These patterns handle Groovy closure scoping issues automatically.
+
+#### Available Patterns
+
+**1. Aggregator Pattern**
+
+Collects results from multiple workers before triggering completion:
+
+```groovy
+// Pattern signature
+ActorPatterns.aggregatorPattern(int expectedCount, Closure completionHandler)
+
+// Usage
+def aggregator = system.actor {
+    name 'ResultAggregator'
+    onMessage ActorPatterns.aggregatorPattern(5) { results, ctx ->
+        // Called when all 5 results received
+        println "Complete! Results: ${results}"
+        ctx.reply([status: 'done', data: results])
+    }
+}
+
+// Workers send results
+workers.each { worker ->
+    worker.tell([type: 'process'])
+    // Worker sends: aggregator.tell([type: 'result', data: someValue])
+}
+```
+
+**How it works:**
+- Maintains internal count of received results
+- Collects results in order of arrival
+- Calls completion handler when count reached
+- Thread-safe result collection
+
+**Use cases:**
+- Scatter-gather pattern
+- Coordinating multiple workers
+- Batch processing with multiple stages
+- Parallel computation aggregation
+
+#### Helper Methods
+
+**getExtension(String filename)**
+
+Safely extracts file extensions:
+
+```groovy
+def ext = ActorPatterns.getExtension("document.pdf")  // "pdf"
+def ext = ActorPatterns.getExtension("README")        // "no-extension"
+def ext = ActorPatterns.getExtension(null)            // "no-extension"
+```
+
+**uniqueName(String baseName)**
+
+Generates unique actor names:
+
+```groovy
+def name = ActorPatterns.uniqueName("worker")  // "worker-a3f42d1e"
+def name = ActorPatterns.uniqueName("task")    // "task-b9e21c4f"
+```
+
+**Benefits:**
+- Collision-free naming
+- Useful for dynamic actor creation
+- 8-character UUID suffix for readability
+
 ### Common Patterns
 
 #### 1. Request-Response
@@ -1319,6 +1389,316 @@ class MyActorTest {
     }
 }
 ```
+
+---
+
+## @SafeActor - Compile-Time Safety
+
+### What is @SafeActor?
+
+`@SafeActor` is an **optional** AST (Abstract Syntax Tree) transformation that detects common Groovy closure pitfalls **at compile-time**. It helps you write safer actor code by catching problems before they cause runtime issues.
+
+**Key Point:** @SafeActor is a **development aid**, not a requirement. All actor features work perfectly without it.
+
+### What Problems Does It Detect?
+
+#### 1. Actor Creation Inside `.each{}` Closures
+
+**Problem:** Variable capture in nested closures causes subtle bugs:
+
+```groovy
+// ❌ PROBLEMATIC - @SafeActor warns
+def items = ['A', 'B', 'C']
+items.each { item ->
+    system.actor {
+        name "worker-${item}"
+        onMessage { msg, ctx ->
+            println "Processing ${item}"  // May print wrong value!
+        }
+    }
+}
+```
+
+**Why It Fails:**
+- The closure captures `item` by reference, not value
+- By the time the actor runs, `item` might have changed
+- All actors might see the same (last) value
+
+**@SafeActor Warning:**
+```
+WARNING: Creating actor inside .each{} closure at line 45
+Variable 'item' may not be captured correctly.
+Consider using ctx.spawnForEach() instead.
+```
+
+#### 2. Deep Nesting of `.each{}` (6+ levels)
+
+**Problem:** Deep nesting makes code hard to maintain and prone to errors:
+
+```groovy
+// ⚠️ WARNING - @SafeActor warns at 6+ levels
+groups.each { group ->           // Level 1
+    group.items.each { item ->    // Level 2
+        item.tasks.each { task ->  // Level 3
+            task.steps.each { step -> // Level 4
+                step.actions.each { action -> // Level 5
+                    action.cmds.each { cmd ->  // Level 6 ⚠️
+                        // Too deep!
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**@SafeActor Warning:**
+```
+WARNING: .each{} nesting depth exceeds 5 levels at line 52
+Consider refactoring into separate methods or using iterators.
+```
+
+#### 3. Manual Map Manipulation in Closures
+
+**Problem:** `HashMap` operations in nested closures fail silently:
+
+```groovy
+// ❌ PROBLEMATIC
+def counts = [:]
+files.each { file ->
+    def ext = getExtension(file)
+    counts[ext] = counts[ext] + 1  // NullPointerException or wrong value
+}
+```
+
+**@SafeActor Suggestion:**
+```
+INFO: Consider using CounterMap for safer counting:
+  def counts = ctx.createCounterMap()
+  files.each { file -> counts.increment(ext) }
+```
+
+### How to Use @SafeActor
+
+#### 1. Apply to Actor Creation Closures
+
+```groovy
+import org.softwood.actor.transform.SafeActor
+
+@SafeActor
+def myActor = system.actor {
+    name 'MyActor'
+    
+    onMessage { msg, ctx ->
+        // @SafeActor checks this entire closure
+        if (msg.type == 'process') {
+            // Warns if you create actors inside .each{}
+            // Warns if nesting is too deep
+            // Suggests safer alternatives
+        }
+    }
+}
+```
+
+#### 2. Apply to Entire Classes
+
+```groovy
+@SafeActor
+class MyActorCoordinator {
+    ActorSystem system
+    
+    def createWorkers() {
+        def items = getItems()
+        
+        // @SafeActor checks all methods
+        items.each { item ->
+            system.actor { ... }  // WARNING: Use ctx.spawnForEach()
+        }
+    }
+}
+```
+
+### Safe Alternatives (Recommended Patterns)
+
+#### Pattern 1: Use `ctx.spawnForEach()`
+
+```groovy
+@SafeActor
+def coordinator = system.actor {
+    name 'Coordinator'
+    
+    onMessage { msg, ctx ->
+        if (msg.type == 'spawn-workers') {
+            // ✅ SAFE: Designed for this use case
+            def workers = ctx.spawnForEach(msg.items, 'worker') { item, index, workerMsg, workerCtx ->
+                println "Worker ${index}: Processing ${item}"
+                // 'item' is correctly captured!
+            }
+            
+            ctx.reply("Created ${workers.size()} workers")
+        }
+    }
+}
+```
+
+**Why It Works:**
+- `spawnForEach()` handles variable capture correctly
+- Each actor gets its own copy of `item`
+- No closure scoping issues
+
+#### Pattern 2: Use Traditional For Loop
+
+```groovy
+@SafeActor
+def coordinator = system.actor {
+    name 'Coordinator'
+    
+    onMessage { msg, ctx ->
+        def items = msg.items
+        
+        // ✅ SAFE: Traditional for loop
+        for (int i = 0; i < items.size(); i++) {
+            def item = items[i]  // Explicit local variable
+            def index = i
+            
+            ctx.spawn("worker-${index}") { workerMsg, workerCtx ->
+                println "Processing ${item}"  // Correctly captured
+            }
+        }
+    }
+}
+```
+
+**Why It Works:**
+- Explicit variable declaration in each iteration
+- No hidden closure capture
+- Clear, predictable behavior
+
+#### Pattern 3: Use `CounterMap` for Counting
+
+```groovy
+@SafeActor
+def analyzer = system.actor {
+    name 'Analyzer'
+    
+    onMessage { msg, ctx ->
+        // ✅ SAFE: CounterMap handles closure issues
+        def counts = ctx.createCounterMap()
+        
+        msg.files.each { file ->
+            def ext = file.substring(file.lastIndexOf('.') + 1)
+            counts.increment(ext)  // Works in any nesting level!
+        }
+        
+        ctx.reply([
+            total: counts.total(),
+            breakdown: counts.toMap()
+        ])
+    }
+}
+```
+
+**Why It Works:**
+- `CounterMap` designed for nested closures
+- Thread-safe concurrent operations
+- No null pointer issues
+
+#### Pattern 4: Use `ActorPatterns` Helpers
+
+```groovy
+@SafeActor
+def aggregator = system.actor {
+    name 'Aggregator'
+    
+    // ✅ SAFE: Pre-built pattern handles complexity
+    onMessage ActorPatterns.aggregatorPattern(5) { results, ctx ->
+        println "Collected ${results.size()} results"
+        ctx.reply(results)
+    }
+}
+```
+
+### When to Use @SafeActor
+
+**✅ Use @SafeActor When:**
+- You're creating complex actor hierarchies
+- You have nested closures and loops
+- You're new to Groovy closure semantics
+- You want extra safety during development
+- You're refactoring existing code
+
+**❌ Don't Need @SafeActor When:**
+- Simple, flat actor structures
+- You're already using safe patterns (spawnForEach, CounterMap)
+- You understand Groovy closure capture deeply
+- You have comprehensive test coverage
+
+### Configuration
+
+@SafeActor is configurable via compiler configuration:
+
+```groovy
+// build.gradle
+compileGroovy {
+    groovyOptions.configurationScript = file('config/safeactor.groovy')
+}
+```
+
+```groovy
+// config/safeactor.groovy
+withConfig(configuration) {
+    ast(SafeActor) {
+        maxEachNesting = 5           // Warn at 6+ levels (default: 5)
+        warnOnActorInEach = true     // Warn about actors in .each{} (default: true)
+        suggestCounterMap = true     // Suggest CounterMap usage (default: true)
+    }
+}
+```
+
+### Example Output
+
+When @SafeActor detects issues:
+
+```
+Compilation warnings for: MyActor.groovy
+
+[Line 45] WARNING: Creating actor inside .each{} closure
+          Variable 'item' may not be captured correctly.
+          
+          Current code:
+              items.each { item ->
+                  system.actor { name "worker-${item}" ... }
+              }
+          
+          Suggested fix:
+              ctx.spawnForEach(items, 'worker') { item, idx, msg, ctx ->
+                  // item is correctly captured here
+              }
+
+[Line 67] WARNING: .each{} nesting depth is 6 (exceeds limit of 5)
+          Consider refactoring into separate methods.
+
+[Line 89] INFO: Manual HashMap counting detected
+          Consider using CounterMap:
+              def counts = ctx.createCounterMap()
+              items.each { counts.increment(key) }
+```
+
+### Summary: @SafeActor Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **Catch bugs early** | Find issues at compile-time, not runtime |
+| **Learn best practices** | Warnings teach you safer patterns |
+| **Reduce debugging time** | Avoid subtle closure capture bugs |
+| **Improve code quality** | Encourages cleaner, more maintainable code |
+| **Optional** | Use only when you need it, no runtime overhead |
+
+### See Also
+
+- **SafeActorExample.groovy** - Complete working examples
+- **GROOVY_CLOSURE_GOTCHAS.md** - Detailed closure safety guide
+- **ActorNewFeaturesTest.groovy** - Test suite demonstrating patterns
 
 ---
 

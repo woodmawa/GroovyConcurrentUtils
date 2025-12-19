@@ -47,7 +47,7 @@ class RestartStatistics {
         Instant cutoff = now.minus(withinDuration)
         
         // Remove old restart times outside the window
-        while (!restartTimes.isEmpty() && restartTimes.first < cutoff) {
+        while (!restartTimes.isEmpty() && restartTimes.getFirst() < cutoff) {
             restartTimes.removeFirst()
         }
         
@@ -69,7 +69,7 @@ class RestartStatistics {
         Instant cutoff = now.minus(withinDuration)
         
         // Remove old entries
-        while (!restartTimes.isEmpty() && restartTimes.first < cutoff) {
+        while (!restartTimes.isEmpty() && restartTimes.getFirst() < cutoff) {
             restartTimes.removeFirst()
         }
         

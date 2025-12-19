@@ -375,8 +375,12 @@ class GroovyActor implements Actor {
         if (supervisionStrategy) {
             applySupervisionDirective(e)
         } else {
-            // Default: just log
-            log.error("[$name] Message processing failed", e)
+            // Default: log without stack trace if it's a known error type
+            if (e instanceof IllegalArgumentException || e instanceof IllegalStateException) {
+                log.warn("[$name] Message processing failed: ${e.class.simpleName}: ${e.message}")
+            } else {
+                log.error("[$name] Message processing failed: ${e.message}", e)
+            }
         }
     }
     
@@ -409,7 +413,7 @@ class GroovyActor implements Actor {
      */
     private void handleRestart(Throwable e) {
         if (!restartStats.recordRestart()) {
-            log.error("[$name] Max restarts (${supervisionStrategy.maxRestarts}) exceeded within ${supervisionStrategy.withinDuration} - stopping actor")
+            log.warn("[$name] Max restarts (${supervisionStrategy.maxRestarts}) exceeded within ${supervisionStrategy.withinDuration} - stopping actor")
             stop()
             return
         }
@@ -420,7 +424,7 @@ class GroovyActor implements Actor {
                 supervisionStrategy.initialBackoff,
                 supervisionStrategy.maxBackoff
             )
-            log.info("[$name] Backing off for ${backoff.toMillis()}ms before restart")
+            log.debug("[$name] Backing off for ${backoff.toMillis()}ms before restart")
             try {
                 Thread.sleep(backoff.toMillis())
             } catch (InterruptedException ie) {
@@ -430,7 +434,7 @@ class GroovyActor implements Actor {
         }
         
         // Clear state and notify strategy
-        log.info("[$name] Restarting actor (attempt ${restartStats.restartCount})")
+        log.debug("[$name] Restarting actor due to ${e.class.simpleName}: ${e.message}")
         state.clear()
         supervisionStrategy.onRestart(this, e)
     }
@@ -447,7 +451,7 @@ class GroovyActor implements Actor {
      * Handle STOP directive - terminate the actor.
      */
     private void handleStop(Throwable e) {
-        log.error("[$name] Stopping actor due to supervision directive", e)
+        log.info("[$name] Stopping actor due to supervision directive: ${e.class.simpleName}: ${e.message}")
         supervisionStrategy.onStop(this, e)
         stop()
     }

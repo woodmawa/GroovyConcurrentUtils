@@ -12,8 +12,8 @@ import java.time.Duration
  * Shows:
  * - Automatic restart on failure
  * - Custom supervision strategies
- * - Restart limits and backoff
  * - Different directives for different exceptions
+ * - Restart state preservation vs clearing
  */
 class SupervisionExample {
     
@@ -32,8 +32,10 @@ class SupervisionExample {
                 state counter: 0
                 
                 onMessage { msg, ctx ->
-                    ctx.state.counter++
-                    println "Processing: $msg (attempt ${ctx.state.counter})"
+                    def count = ctx.state.get('counter', 0) as int
+                    count++
+                    ctx.state.put('counter', count)
+                    println "Processing: $msg (attempt ${count})"
                     
                     if (msg == 'fail') {
                         throw new RuntimeException('Simulated failure!')
@@ -43,28 +45,29 @@ class SupervisionExample {
                 }
             }
             
-            println worker.ask('task1')
-            println worker.ask('task2')
+            println worker.askSync('task1', Duration.ofSeconds(2))
+            println worker.askSync('task2', Duration.ofSeconds(2))
             
             // This will fail and restart
             worker.tell('fail')
-            Thread.sleep(200)
+            Thread.sleep(500)  // Give time for restart
             
             // Should work after restart (counter reset to 0)
-            println worker.ask('task3')
+            println worker.askSync('task3', Duration.ofSeconds(2))
             println()
             
             // Example 2: Custom strategy with different directives
             println "=" * 60
-            println "Example 2: Custom Strategy"
+            println "Example 2: Custom Strategy by Exception Type"
             println "=" * 60
             
             def processor = system.actor {
                 name 'smart-processor'
                 state retryCount: 0
                 
+                // Custom strategy that returns different directives based on exception type
                 supervisionStrategy { throwable ->
-                    switch(throwable) {
+                    switch(throwable.class) {
                         case IllegalArgumentException:
                             println "  → Strategy: RESUME (ignore bad input)"
                             return SupervisorDirective.RESUME
@@ -78,8 +81,10 @@ class SupervisionExample {
                 }
                 
                 onMessage { msg, ctx ->
-                    ctx.state.retryCount++
-                    println "Processing: $msg (retry ${ctx.state.retryCount})"
+                    def count = ctx.state.get('retryCount', 0) as int
+                    count++
+                    ctx.state.put('retryCount', count)
+                    println "Processing: $msg (count ${count})"
                     
                     switch(msg) {
                         case 'bad-input':
@@ -94,90 +99,172 @@ class SupervisionExample {
                 }
             }
             
-            println processor.ask('good-input')
+            println processor.askSync('good-input', Duration.ofSeconds(2))
             
-            // This will RESUME (ignore error)
+            // This will RESUME (ignore error, keep processing)
             processor.tell('bad-input')
-            Thread.sleep(100)
-            println processor.ask('after-bad-input')
+            Thread.sleep(200)
+            println processor.askSync('after-bad-input', Duration.ofSeconds(2))
             
             // This will RESTART (clear state)
             processor.tell('io-error')
-            Thread.sleep(200)
-            println processor.ask('after-io-error')
+            Thread.sleep(500)
+            println processor.askSync('after-io-error', Duration.ofSeconds(2))
             println()
             
-            // Example 3: Restart limits and exponential backoff
+            // Example 3: Resume strategy preserves state
             println "=" * 60
-            println "Example 3: Restart Limits + Backoff"
+            println "Example 3: Resume Preserves State"
             println "=" * 60
             
-            def flaky = system.actor {
-                name 'flaky-service'
-                state failures: 0
-                
-                supervisionStrategy(
-                    maxRestarts: 3,
-                    withinDuration: Duration.ofSeconds(5),
-                    useExponentialBackoff: true,
-                    initialBackoff: Duration.ofMillis(100),
-                    maxBackoff: Duration.ofMillis(1000)
-                ) { throwable ->
-                    SupervisorDirective.RESTART
-                }
+            def counter = system.actor {
+                name 'resilient-counter'
+                state count: 0, errors: 0
+                supervisionStrategy SupervisionStrategy.resumeAlways()
                 
                 onMessage { msg, ctx ->
-                    ctx.state.failures++
-                    println "Attempt ${ctx.state.failures}: Processing $msg"
-                    
-                    // Fail first 2 times, then succeed
-                    if (ctx.state.failures <= 2) {
-                        throw new RuntimeException("Temporary failure #${ctx.state.failures}")
+                    if (msg == 'increment') {
+                        def count = ctx.state.get('count', 0) as int
+                        ctx.state.put('count', count + 1)
+                        ctx.reply(ctx.state.get('count'))
+                    } else if (msg == 'error') {
+                        def errors = ctx.state.get('errors', 0) as int
+                        ctx.state.put('errors', errors + 1)
+                        throw new RuntimeException("Error #${ctx.state.get('errors')}")
+                    } else if (msg == 'status') {
+                        ctx.reply([
+                            count: ctx.state.get('count', 0),
+                            errors: ctx.state.get('errors', 0)
+                        ])
                     }
-                    
-                    ctx.reply("Success after ${ctx.state.failures} attempts!")
                 }
             }
             
-            // First call will fail twice, then succeed
-            println flaky.ask('resilient-task', Duration.ofSeconds(5))
+            println "Count: " + counter.askSync('increment', Duration.ofSeconds(2))
+            println "Count: " + counter.askSync('increment', Duration.ofSeconds(2))
+            
+            // Trigger error (will resume, keeping state)
+            counter.tell('error')
+            Thread.sleep(200)
+            
+            println "Count: " + counter.askSync('increment', Duration.ofSeconds(2))
+            println "Status: " + counter.askSync('status', Duration.ofSeconds(2))
             println()
             
-            // Example 4: Actor that exceeds restart limits
+            // Example 4: Stop strategy terminates actor
             println "=" * 60
-            println "Example 4: Exceeding Restart Limits"
+            println "Example 4: Stop Strategy"
             println "=" * 60
             
-            def doomed = system.actor {
-                name 'doomed-actor'
+            def fragile = system.actor {
+                name 'fragile-actor'
+                supervisionStrategy SupervisionStrategy.stopAlways()
                 
+                onMessage { msg, ctx ->
+                    if (msg == 'fail') {
+                        throw new RuntimeException('Fatal error - will stop!')
+                    }
+                    ctx.reply("OK: $msg")
+                }
+            }
+            
+            println fragile.askSync('task1', Duration.ofSeconds(2))
+            
+            // This will stop the actor
+            fragile.tell('fail')
+            Thread.sleep(100)  // Brief wait
+            
+            println "Actor stopped: ${fragile.isStopped()}"
+            // Note: Actor may still be terminating (cleaning up mailbox loop)
+            // terminated will be true once mailbox loop fully exits
+            println()
+            
+            // Example 5: Restart strategy clears state
+            println "=" * 60
+            println "Example 5: Restart Strategy Clears State"
+            println "=" * 60
+            
+            def restartingActor = system.actor {
+                name 'restarting-actor'
+                state attempts: 0
+                supervisionStrategy SupervisionStrategy.restartAlways()
+                
+                onMessage { msg, ctx ->
+                    def attempts = ctx.state.get('attempts', 0) as int
+                    attempts++
+                    ctx.state.put('attempts', attempts)
+                    println "Processing $msg (attempt ${attempts})"
+                    
+                    if (msg.type == 'fail-once') {
+                        throw new RuntimeException('Intentional failure to trigger restart')
+                    }
+                    
+                    ctx.reply("Processed $msg (attempt ${attempts})")
+                }
+            }
+            
+            // First message succeeds
+            println restartingActor.askSync([type: 'success'], Duration.ofSeconds(2))
+            
+            // This will fail and restart (state cleared back to 0)
+            restartingActor.tell([type: 'fail-once'])
+            Thread.sleep(300)
+            
+            // After restart, attempts is back to 1 (state was cleared)
+            println restartingActor.askSync([type: 'success'], Duration.ofSeconds(2))
+            println()
+            
+            // Example 6: Restart with limits
+            println "=" * 60
+            println "Example 6: Restart with Limits"
+            println "=" * 60
+            
+            def limited = system.actor {
+                name 'limited-restarts'
+                state failCount: 0
+                
+                // Max 3 restarts within 5 seconds
                 supervisionStrategy(
-                    maxRestarts: 2,
-                    withinDuration: Duration.ofSeconds(2)
+                    maxRestarts: 3,
+                    withinDuration: Duration.ofSeconds(5)
                 ) { throwable ->
                     SupervisorDirective.RESTART
                 }
                 
                 onMessage { msg, ctx ->
-                    println "Processing $msg - then failing..."
-                    throw new RuntimeException('Always fails')
+                    def failCount = ctx.state.get('failCount', 0) as int
+                    println "Processing attempt, state failCount: ${failCount}"
+                    
+                    if (msg == 'keep-failing') {
+                        ctx.state.put('failCount', failCount + 1)
+                        throw new RuntimeException("Failure #${ctx.state.get('failCount')}")
+                    }
+                    
+                    ctx.reply("OK")
                 }
             }
             
             // Trigger multiple failures
-            3.times {
-                doomed.tell("doomed-task-$it")
-                Thread.sleep(100)
+            (1..5).each { i ->
+                if (!limited.isStopped()) {
+                    limited.tell('keep-failing')
+                    Thread.sleep(200)
+                } else {
+                    println "Actor stopped after ${i-1} failures (restart limit reached)"
+                }
             }
             
             Thread.sleep(500)
-            println "Doomed actor stopped: ${doomed.isStopped()}"
+            println "Actor stopped after exceeding restart limit: ${limited.isStopped()}"
             println()
             
             println "=" * 60
             println "All examples completed!"
             println "=" * 60
             
+        } catch (Exception e) {
+            println "Error in example: ${e.message}"
+            e.printStackTrace()
         } finally {
             system.shutdown()
         }

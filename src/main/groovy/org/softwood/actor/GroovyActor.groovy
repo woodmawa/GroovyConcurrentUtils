@@ -1,6 +1,8 @@
 package org.softwood.actor
 
 import groovy.transform.CompileStatic
+import groovy.transform.TypeCheckingMode
+import groovy.transform.TypeChecked
 import groovy.util.logging.Slf4j
 import org.softwood.pool.ExecutorPool
 import org.softwood.actor.supervision.SupervisionStrategy
@@ -95,6 +97,7 @@ class GroovyActor implements Actor {
      * Package-private constructor - use ActorFactory.
      */
     GroovyActor(String name, Map initialState, Closure handler, ExecutorPool pool, boolean ownsPool, int maxErrorsRetained = 100, int maxMailboxSize = 0) {
+        validateActorName(name)
         this.name = name
         this.handler = handler
         this.pool = pool
@@ -205,8 +208,75 @@ class GroovyActor implements Actor {
 
     @Override
     Map getState() {
-        // Return defensive copy
-        return new HashMap(state)
+        // Return deep defensive copy to prevent external modification
+        // of mutable objects in state
+        return deepCopy(state)
+    }
+    
+    /**
+     * Creates a deep copy of a map to prevent external modification.
+     * Handles nested maps, lists, and cloneable objects.
+     * 
+     * @param original the map to copy
+     * @return a deep copy of the map
+     */
+    @TypeChecked(TypeCheckingMode.SKIP)
+    private Map deepCopy(Map original) {
+        if (original == null) {
+            return [:]
+        }
+        
+        def copy = [:]
+        original.each { key, value ->
+            if (value instanceof Map) {
+                copy[key] = deepCopy(value as Map)
+            } else if (value instanceof List) {
+                copy[key] = deepCopyList(value as List)
+            } else if (value instanceof Set) {
+                copy[key] = new HashSet(value as Set)
+            } else if (value instanceof Cloneable) {
+                try {
+                    copy[key] = value.clone()
+                } catch (Exception e) {
+                    // Cloning failed, use reference (primitives/immutables safe)
+                    copy[key] = value
+                }
+            } else {
+                // Primitives, strings, and immutable objects are safe
+                copy[key] = value
+            }
+        }
+        return copy
+    }
+    
+    /**
+     * Creates a deep copy of a list.
+     */
+    @TypeChecked(TypeCheckingMode.SKIP)
+    private List deepCopyList(List original) {
+        if (original == null) {
+            return []
+        }
+        
+        def copy = []
+        original.each { value ->
+            if (value instanceof Map) {
+                copy << deepCopy(value as Map)
+            } else if (value instanceof List) {
+                copy << deepCopyList(value as List)
+            } else if (value instanceof Set) {
+                copy << new HashSet(value as Set)
+            } else if (value instanceof Cloneable) {
+                try {
+                    copy << value.clone()
+                } catch (Exception e) {
+                    copy << value
+                }
+            } else {
+                copy << value
+            }
+        }
+        return copy
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -294,7 +364,8 @@ class GroovyActor implements Actor {
         int discarded = mailbox.size()
         mailbox.clear()
 
-        log.info("[$name] Force stopped, discarded $discarded messages")
+        // Use debug level to avoid information disclosure
+        log.debug("[$name] Force stopped, discarded $discarded messages")
 
         // Send stop signal
         try {
@@ -346,20 +417,34 @@ class GroovyActor implements Actor {
     /**
      * Handles a message processing error.
      */
+    @TypeChecked(TypeCheckingMode.SKIP)
     private void handleMessageError(Throwable e) {
         messagesErrored.incrementAndGet()
 
-        // Store error details
-        def errorInfo = [
-                timestamp    : System.currentTimeMillis(),
-                errorType    : e.class.name,
-                message      : e.message ?: "No message",
-                stackTrace   : Arrays.asList(e.stackTrace).take(5).collect { it.toString() }
-        ] as Map<String, Object>
+        try {
+            // Store error details (sanitized for security)
+            def errorInfo = [
+                    timestamp    : System.currentTimeMillis(),
+                    errorType    : e.class.simpleName,  // Hide package structure
+                    message      : sanitizeErrorMessage(e.message),
+                    stackTrace   : sanitizeStackTrace(e)
+            ] as Map<String, Object>
 
-        recentErrors.offer(errorInfo)
-        while (recentErrors.size() > maxErrorsRetained) {
-            recentErrors.poll()
+            // Fix race condition: ensure size limit BEFORE adding
+            while (recentErrors.size() >= maxErrorsRetained) {
+                recentErrors.poll()
+            }
+            recentErrors.offer(errorInfo)
+        } catch (Throwable sanitizationError) {
+            // If sanitization fails, store basic error info
+            log.error("[$name] Error sanitization failed", sanitizationError)
+            def basicErrorInfo = [
+                    timestamp    : System.currentTimeMillis(),
+                    errorType    : e.class.simpleName,
+                    message      : "Error occurred",
+                    stackTrace   : []
+            ] as Map<String, Object>
+            recentErrors.offer(basicErrorInfo)
         }
 
         // Call custom error handler if set
@@ -490,13 +575,89 @@ class GroovyActor implements Actor {
             def escalationMsg = [
                 type: 'child-error',
                 childName: name,
-                error: e,
-                child: this
+                errorType: e.class.simpleName,
+                errorMessage: sanitizeErrorMessage(e.message),
+                timestamp: System.currentTimeMillis()
+                // Note: Do NOT include actor reference to maintain encapsulation
             ]
             parent.tell(escalationMsg)
         } catch (Exception escalationError) {
             log.error("[$name] Failed to escalate to parent, stopping", escalationError)
             stop()
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Security & Sanitization
+    // ─────────────────────────────────────────────────────────────
+    
+    /**
+     * Sanitize error messages to prevent information disclosure.
+     * Removes file paths, credentials, and other sensitive data.
+     */
+    @TypeChecked(TypeCheckingMode.SKIP)
+    private String sanitizeErrorMessage(String msg) {
+        if (msg == null) {
+            return "Error occurred"
+        }
+        
+        // Remove absolute file paths (Windows and Unix)
+        def sanitized = msg.replaceAll(/[A-Za-z]:\\[\\\w\.\-]+/, '<path>')
+        sanitized = sanitized.replaceAll(/\/[\w\/\.\-]+/, '<path>')
+        
+        // Remove potential credentials (use (?i) inline flag for case-insensitive)
+        sanitized = sanitized.replaceAll(/(?i)password\s*[=:]\s*\w+/, 'password=***')
+        sanitized = sanitized.replaceAll(/(?i)token\s*[=:]\s*\w+/, 'token=***')
+        sanitized = sanitized.replaceAll(/(?i)key\s*[=:]\s*\w+/, 'key=***')
+        
+        // Truncate very long messages
+        if (sanitized.length() > 500) {
+            sanitized = sanitized.substring(0, 497) + "..."
+        }
+        
+        return sanitized
+    }
+    
+    /**
+     * Sanitize stack traces based on environment.
+     * In production, stack traces should be minimal or absent.
+     */
+    @TypeChecked(TypeCheckingMode.SKIP)
+    private List<String> sanitizeStackTrace(Throwable e) {
+        // Check if we're in production mode (no stack traces)
+        def productionMode = System.getProperty("actor.productionMode", "false").toBoolean()
+        
+        if (productionMode) {
+            return []  // No stack traces in production
+        }
+        
+        // Development: Include limited stack trace
+        return Arrays.asList(e.stackTrace)
+            .take(5)
+            .collect { it.toString() }
+            .collect { line ->
+                // Remove absolute paths from stack trace
+                line.replaceAll(/[A-Za-z]:\\[\\\w\.\-]+/, '<path>')
+                    .replaceAll(/\/[\w\/\.\-]+/, '<path>')
+            }
+    }
+    
+    /**
+     * Validate actor name for security.
+     */
+    private static void validateActorName(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            throw new IllegalArgumentException("Actor name cannot be null or empty")
+        }
+        if (name.length() > 256) {
+            throw new IllegalArgumentException("Actor name too long (max 256 characters)")
+        }
+        if (name.contains("..") || name.contains("/") || name.contains("\\")) {
+            throw new IllegalArgumentException("Actor name contains illegal path characters")
+        }
+        // Allow: letters, numbers, dash, underscore, dot
+        if (!name.matches(/^[a-zA-Z0-9._-]+$/)) {
+            throw new IllegalArgumentException("Actor name contains invalid characters (allowed: a-z, A-Z, 0-9, ., _, -)")
         }
     }
 
@@ -728,8 +889,10 @@ class GroovyActor implements Actor {
             if (!added) {
                 // Queue is full - reject
                 mailboxRejections.incrementAndGet()
+                // Log details internally, but don't expose in exception
+                log.debug("[$name] Mailbox full: size=${mailbox.size()}, max=$maxMailboxSize")
                 throw new RejectedExecutionException(
-                        "Actor [$name] mailbox full (size=${mailbox.size()}, max=$maxMailboxSize)")
+                        "Actor [$name] mailbox full - message rejected")
             }
             
             // Only increment if successfully added

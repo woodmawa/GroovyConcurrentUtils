@@ -242,7 +242,7 @@ class ActorSupervisionIntegrationTest {
         await().atMost(1, TimeUnit.SECONDS).untilAsserted {
             def errors = actor.getErrors()
             assertTrue(errors.size() >= 1)
-            assertEquals('java.lang.RuntimeException', errors[0].errorType)
+            assertEquals('RuntimeException', errors[0].errorType)
         }
     }
 }

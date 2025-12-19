@@ -587,7 +587,12 @@ class Promises {
                                 def aggregateError = new RuntimeException(
                                         "Task failed after ${maxAttempts} attempts. Errors: ${errors}"
                                 )
-                                errors.each { aggregateError.addSuppressed(it) }
+                                // Filter out null errors before adding as suppressed
+                                def validErrors = errors.findAll { it != null }
+                                if (validErrors.size() < errors.size()) {
+                                    log.warn("retry() detected ${errors.size() - validErrors.size()} null error(s) in retry logic - this should not happen")
+                                }
+                                validErrors.each { aggregateError.addSuppressed(it) }
                                 resultPromise.fail(aggregateError)
                             } else {
                             }

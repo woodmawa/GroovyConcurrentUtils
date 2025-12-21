@@ -21,6 +21,24 @@ enum TaskType {
      */
     SERVICE(ServiceTask, false),
 
+    /**
+     * Manual task that pauses workflow for human intervention.
+     * Requires external completion via complete() method.
+     */
+    MANUAL(ManualTask, false),
+
+    /**
+     * Signal task for event coordination and synchronization.
+     * Can wait for or send signals to coordinate parallel branches.
+     */
+    SIGNAL(SignalTask, false),
+
+    /**
+     * Sub-graph task for embedding reusable workflow templates.
+     * Enables workflow composition and modular design.
+     */
+    SUBGRAPH(SubGraphTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -41,7 +59,21 @@ enum TaskType {
      * Sharding router that distributes work across multiple parallel paths.
      * Useful for parallel processing and load distribution.
      */
-    SHARDING_ROUTER(ShardingRouterTask, true)
+    SHARDING_ROUTER(ShardingRouterTask, true),
+
+    /**
+     * Exclusive gateway (XOR) that routes to exactly ONE path.
+     * First matching condition wins (priority-ordered evaluation).
+     * BPMN Exclusive Gateway equivalent.
+     */
+    EXCLUSIVE_GATEWAY(ExclusiveGatewayTask, true),
+
+    /**
+     * Switch-case style router that routes based on discrete value matching.
+     * Extracts a value and matches it against registered cases.
+     * Exactly one path is selected based on value equality.
+     */
+    SWITCH_ROUTER(SwitchRouterTask, true)
 
     // =========================================================================
     // Enum Properties
@@ -113,6 +145,19 @@ enum TaskType {
         switch (type.toLowerCase().replace('_', '').replace('-', '')) {
             case 'service':
                 return SERVICE
+            case 'manual':
+            case 'manualtask':
+            case 'human':
+                return MANUAL
+            case 'signal':
+            case 'signaltask':
+            case 'event':
+                return SIGNAL
+            case 'subgraph':
+            case 'subgraphtask':
+            case 'subprocess':
+            case 'template':
+                return SUBGRAPH
             case 'conditional':
             case 'conditionalfork':
             case 'fork':
@@ -124,6 +169,15 @@ enum TaskType {
             case 'shardingrouter':
             case 'shard':
                 return SHARDING_ROUTER
+            case 'exclusive':
+            case 'exclusivegateway':
+            case 'xor':
+            case 'xorgateway':
+                return EXCLUSIVE_GATEWAY
+            case 'switch':
+            case 'switchrouter':
+            case 'case':
+                return SWITCH_ROUTER
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

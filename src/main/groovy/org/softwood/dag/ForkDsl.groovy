@@ -1,27 +1,10 @@
 package org.softwood.dag
 
 import groovy.util.logging.Slf4j
-import org.softwood.dag.task.DefaultTaskEventDispatcher
-import org.softwood.dag.task.TaskFactory
-import org.softwood.dag.task.TaskType
-import org.softwood.dag.task.TaskContext
-import org.softwood.dag.task.ConditionalForkTask
-import org.softwood.dag.task.DynamicRouterTask
-import org.softwood.dag.task.RouterTask
-import org.softwood.dag.task.ShardingRouterTask
-import org.softwood.dag.task.ITask
+import org.softwood.dag.task.*
 
 /**
- * DSL builder for configuring fork patterns that enable parallel task execution with routing logic.
- *
- * Compatible with TaskGraph that has:
- *   - Map<String, Task> tasks
- *   - List<RouterTask> routers
- *   - void addTask(Task)
- *   - void registerRouter(RouterTask)
- *   - finalizeWiring() that infers predecessors from successors.
- *
- * ENHANCED: Now uses TaskFactory for type-safe router creation.
+ * Enhanced DSL for defining fork points in task graphs.
  */
 @Slf4j
 class ForkDsl {
@@ -29,228 +12,206 @@ class ForkDsl {
     private final TaskGraph graph
     private final String id
 
-    private String routeFromId
-    private final Set<String> staticTargets = [] as Set
-    private final Map<String, Closure<Boolean>> conditionalRules = [:]
-    private Closure dynamicRouteLogic = null
-    private Closure shardSource = null
-    private String shardTemplateId = null
-    private Integer shardCount = null
+    private List<String> sourceIds = []
+    private List<String> targetIds = []
+    private Closure mergeStrategy = null
+    private ITask routerTask = null
+    private Closure routerConfig = null
 
     ForkDsl(TaskGraph graph, String id) {
         this.graph = graph
         this.id = id
     }
 
-    // -------------------------
-    // DSL Methods
-    // -------------------------
-
-    /** Select the upstream source whose output drives the fork. */
-    def from(String sourceId) {
-        routeFromId = sourceId
-    }
-
-    /** Statically route to one or more downstream tasks. */
-    def to(String... targetIds) {
-        staticTargets.addAll(targetIds)
-    }
-
-    /** Conditional routing: conditionalOn(["taskId"]) { prevValue -> boolean } */
-    def conditionalOn(List<String> targets, Closure<Boolean> cond) {
-        // Create a delegate that exposes ctx as a property
-        def delegateObj = new Object() {
-            def getCtx() { return graph.ctx }
+    void from(String... sources) {
+        if (!sources) {
+            throw new IllegalArgumentException("fork($id): from() requires at least one source")
         }
-        cond.delegate = delegateObj
-        cond.resolveStrategy = Closure.DELEGATE_FIRST
-        targets.each { tid -> conditionalRules[tid] = cond }
+        sourceIds.addAll(sources)
+        log.debug("fork($id): sources set to ${sourceIds}")
     }
 
-    /** Dynamic routing: route { prevValue -> List<String> targetIds } */
-    def route(Closure customLogic) {
-        // Create a delegate that exposes ctx as a property
-        def delegateObj = new Object() {
-            def getCtx() { return graph.ctx }
+    void mergeWith(Closure strategy) {
+        this.mergeStrategy = strategy
+        log.debug("fork($id): custom merge strategy set")
+    }
+
+    void to(String... targets) {
+        if (!targets) {
+            throw new IllegalArgumentException("fork($id): to() requires at least one target")
         }
-        customLogic.delegate = delegateObj
-        customLogic.resolveStrategy = Closure.DELEGATE_FIRST
-        dynamicRouteLogic = customLogic
+        targetIds.addAll(targets)
+        log.debug("fork($id): targets set to ${targetIds}")
     }
 
-    /**
-     * For dynamic routes, explicitly declare all possible target task IDs.
-     * This is needed so the router knows which tasks might be activated.
-     * Usage: targets("fast", "standard")
-     */
-    def targets(String... targetIds) {
-        staticTargets.addAll(targetIds)
-    }
-
-    /**
-     * Sharding fan-out:
-     *  shard("templateId", count) { prevValue -> Collection items }
-     */
-    def shard(String templateId, int count, Closure shardSrc) {
-        // Create a delegate that exposes ctx as a property
-        def delegateObj = new Object() {
-            def getCtx() { return graph.ctx }
+    void exclusiveGateway(@DelegatesTo(ExclusiveGatewayTask) Closure config) {
+        if (sourceIds.size() != 1) {
+            throw new IllegalStateException("fork($id): exclusiveGateway requires exactly one source")
         }
-        shardSrc.delegate = delegateObj
-        shardSrc.resolveStrategy = Closure.DELEGATE_FIRST
-        shardTemplateId = templateId
-        shardCount = count
-        shardSource = shardSrc
+
+        def gatewayId = "${id}-xor"
+        routerTask = new ExclusiveGatewayTask(gatewayId, gatewayId, graph.ctx)
+        routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+
+        // Configure the gateway task directly using its DSL
+        config.delegate = routerTask
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+
+        // Extract targets from the configured task
+        targetIds.addAll(routerTask.targetIds)
+
+        graph.addTask(routerTask)
+        log.debug("fork($id): created exclusive gateway with ${routerTask.orderedRules.size()} rules")
     }
 
-    // -------------------------
-    // BUILD: create real tasks + wire into TaskGraph
-    // -------------------------
+    void switchRouter(@DelegatesTo(SwitchRouterTask) Closure config) {
+        if (sourceIds.size() != 1) {
+            throw new IllegalStateException("fork($id): switchRouter requires exactly one source")
+        }
+
+        def routerId = "${id}-switch"
+        routerTask = new SwitchRouterTask(routerId, routerId, graph.ctx)
+        routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+
+        // Configure the router task directly using its DSL
+        config.delegate = routerTask
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+
+        // Extract targets from the configured task
+        targetIds.addAll(routerTask.targetIds)
+
+        graph.addTask(routerTask)
+        log.debug("fork($id): created switch router")
+    }
+
+    void dynamicRouter(Closure routingLogic) {
+        if (sourceIds.size() != 1) {
+            throw new IllegalStateException("fork($id): dynamicRouter requires exactly one source")
+        }
+
+        def routerId = "${id}-router"
+        routerTask = new DynamicRouterTask(routerId, routerId, graph.ctx)
+        routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+        routerTask.setRoutingLogic(routingLogic)
+
+        graph.addTask(routerTask)
+        log.debug("fork($id): created dynamic router")
+    }
 
     void build() {
-
-        if (!routeFromId) {
-            throw new IllegalStateException("fork($id) requires from \"taskId\"")
+        if (sourceIds.isEmpty()) {
+            throw new IllegalStateException("fork($id): no source tasks specified")
         }
 
-        ITask source = graph.tasks[routeFromId]
-        if (!source) {
-            throw new IllegalStateException("Unknown source task: $routeFromId")
-        }
+        log.debug("fork($id): building with ${sourceIds.size()} source(s)")
 
-        // We assume all tasks in the graph share a TaskContext; reuse the source's ctx
-        TaskContext ctx = source.ctx as TaskContext
-
-        boolean hasConditional = !conditionalRules.isEmpty()
-        boolean hasDynamic = dynamicRouteLogic != null
-        boolean hasSharding = shardSource != null
-
-        RouterTask router = null
-
-        // --------------------------------------------------------------------
-        // SHARDING FORK
-        // --------------------------------------------------------------------
-        if (hasSharding) {
-            String rid = "__shardRouter_${id}_${UUID.randomUUID()}"
-            // ENHANCED: Use TaskFactory instead of direct instantiation
-            router = TaskFactory.createShardingRouter(rid, rid, ctx)
-            router.templateTargetId = shardTemplateId
-            router.shardSource = shardSource
-            router.shardCount = shardCount
-
-            router.eventDispatcher = new DefaultTaskEventDispatcher(graph)
-            graph.addTask(router)
-            graph.registerRouter(router)
-
-            log.debug "ForkDsl: created sharding router ${rid} via TaskFactory"
-
-            if (shardCount == null || shardCount <= 0) {
-                throw new IllegalStateException(
-                        "fork($id) sharding requires positive shardCount; got $shardCount"
-                )
-            }
-
-            // Compute shard task IDs based on the template
-            List<String> shardTargetIds = (0..<shardCount).collect { int i -> "${shardTemplateId}_shard_${i}" as String }
-            router.targetIds.addAll(shardTargetIds)
-
-            log.debug "ForkDsl: sharding router targets: $shardTargetIds"
-
-            // Wire: source -> router
-            source.addSuccessor(router.id)
-
-            // Wire: router -> each shard task
-            shardTargetIds.each { String tid ->
-                ITask shardTask = graph.tasks[tid]
-                if (!shardTask) {
-                    throw new IllegalStateException(
-                            "fork($id) sharding refers to unknown shard task '$tid'. " +
-                                    "Define shard tasks before declaring the fork."
-                    )
-                }
-                router.addSuccessor(tid)
-                shardTask.dependsOn(router.id)
-            }
-
-            return
-        }
-
-        // --------------------------------------------------------------------
-        // NON-SHARDING FORKS: static / conditional / dynamic
-        // --------------------------------------------------------------------
-        boolean needsRouter = hasConditional || hasDynamic
-
-        if (needsRouter) {
-            // ----------- router creation -----------
-            if (hasDynamic) {
-                String rid = "__dynamicRouter_${id}_${UUID.randomUUID()}"
-                // ENHANCED: Use TaskFactory
-                router = TaskFactory.createDynamicRouter(rid, rid, ctx)
-                router.routingLogic = dynamicRouteLogic
-
-                List<String> allTargets = (staticTargets + conditionalRules.keySet()).unique().toList()
-                router.allowedTargets = allTargets
-                router.targetIds.addAll(allTargets)
-
-                log.debug "ForkDsl: created dynamic router ${rid} via TaskFactory with targets: $allTargets"
-
-            } else { // conditional only
-                String rid = "__conditionalRouter_${id}_${UUID.randomUUID()}"
-                // ENHANCED: Use TaskFactory
-                router = TaskFactory.createConditionalFork(rid, rid, ctx)
-                router.staticTargets.addAll(staticTargets)
-                router.conditionalRules.putAll(conditionalRules)
-
-                List<String> allTargets = (staticTargets + conditionalRules.keySet()).unique().toList()
-                router.targetIds.addAll(allTargets)
-
-                log.debug "ForkDsl: created conditional router ${rid} via TaskFactory with targets: $allTargets"
-            }
-
-            router.eventDispatcher = new DefaultTaskEventDispatcher(graph)
-            graph.addTask(router)
-            graph.registerRouter(router)
-
-            // Wire source → router
-            source.addSuccessor(router.id)
-
-            // Wire router → each possible target
-            List<String> allTargets = router.targetIds.toList()
-            if (allTargets.isEmpty()) {
-                log.warn "ForkDsl: fork $id created router ${router.id} but has no targets"
-            }
-
-            allTargets.each { String tid ->
-                ITask targetTask = graph.tasks[tid]
-                if (!targetTask) {
-                    throw new IllegalStateException(
-                            "fork($id) router ${router.id} refers to unknown target task '$tid'."
-                    )
-                }
-                router.addSuccessor(tid)
-                targetTask.dependsOn(router.id)
-            }
-
+        if (sourceIds.size() > 1) {
+            buildWithAutoJoin()
         } else {
-            // ----------------------------------------------------------------
-            // PURE STATIC FAN-OUT (no router)
-            // ----------------------------------------------------------------
-            List<String> allTargets = staticTargets.unique().toList()
-            if (allTargets.isEmpty()) {
-                log.warn "ForkDsl: fork ${id} has no targets to wire"
-                return
-            }
+            buildStandard()
+        }
+    }
 
-            allTargets.each { String tid ->
-                ITask targetTask = graph.tasks[tid]
-                if (!targetTask) {
+    private void buildWithAutoJoin() {
+        log.info("fork($id): auto-creating join for ${sourceIds.size()} sources")
+
+        def joinId = "${id}-autojoin"
+        def joinTask = graph.tasks[joinId]
+
+        if (!joinTask) {
+            try {
+                joinTask = new ServiceTask(joinId, joinId, graph.ctx)
+                joinTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+
+                if (mergeStrategy) {
+                    joinTask.action(mergeStrategy)
+                } else {
+                    joinTask.action({ ctx, prevValue ->
+                        ctx.promiseFactory.executeAsync { prevValue }
+                    })
+                }
+
+                graph.addTask(joinTask)
+            } catch (MissingPropertyException e) {
+                if (e.property == 'action') {
                     throw new IllegalStateException(
-                            "fork($id) static fork refers to unknown target task '$tid'."
+                        "fork($id): Cannot set 'action' as a property. Use the action() method instead:\n" +
+                        "  Correct: joinTask.action { ctx, prev -> ... }\n" +
+                        "  Wrong:   joinTask.action = { ctx, prev -> ... }",
+                        e
                     )
                 }
-                source.addSuccessor(tid)
-                targetTask.dependsOn(source.id)
+                throw e
             }
+        }
+
+        sourceIds.each { sourceId ->
+            def source = graph.tasks[sourceId]
+            if (!source) {
+                throw new IllegalStateException("fork($id): unknown source: $sourceId")
+            }
+            source.addSuccessor(joinTask)
+            joinTask.addPredecessor(source)
+            log.debug("fork($id): ${sourceId} -> ${joinId}")
+        }
+
+        if (targetIds) {
+            targetIds.each { targetId ->
+                def target = graph.tasks[targetId]
+                if (!target) {
+                    throw new IllegalStateException("fork($id): unknown target: $targetId")
+                }
+                joinTask.addSuccessor(target)
+                target.addPredecessor(joinTask)
+                log.debug("fork($id): ${joinId} -> ${targetId}")
+            }
+        }
+    }
+
+    private void buildStandard() {
+        def sourceId = sourceIds[0]
+        def source = graph.tasks[sourceId]
+
+        if (!source) {
+            throw new IllegalStateException("fork($id): unknown source: $sourceId")
+        }
+
+        if (routerTask) {
+            buildRouterFork(source)
+        } else if (targetIds) {
+            buildFanOutFork(source)
+        } else {
+            throw new IllegalStateException("fork($id): no targets specified")
+        }
+    }
+
+    private void buildRouterFork(ITask source) {
+        source.addSuccessor(routerTask)
+        routerTask.addPredecessor(source)
+        log.debug("fork($id): ${source.id} -> ${routerTask.id}")
+
+        targetIds.each { targetId ->
+            def target = graph.tasks[targetId]
+            if (!target) {
+                throw new IllegalStateException("fork($id): unknown target: $targetId")
+            }
+            routerTask.addSuccessor(target)
+            target.addPredecessor(routerTask)
+            log.debug("fork($id): ${routerTask.id} -> ${targetId}")
+        }
+    }
+
+    private void buildFanOutFork(ITask source) {
+        targetIds.each { targetId ->
+            def target = graph.tasks[targetId]
+            if (!target) {
+                throw new IllegalStateException("fork($id): unknown target: $targetId")
+            }
+            source.addSuccessor(target)
+            target.addPredecessor(source)
+            log.debug("fork($id): ${source.id} -> ${targetId}")
         }
     }
 }

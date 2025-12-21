@@ -254,8 +254,14 @@ class TaskGraph {
         }
 
         // Non-sharding router: schedule only chosen targets
+        // CRITICAL: Inject the router's INPUT data (not the routing result) into selected tasks
         chosen.each { tid ->
-            scheduleIfReady(tasks[tid])
+            ITask selectedTask = tasks[tid]
+            if (selectedTask && router.routerInputData != null) {
+                log.debug "Injecting router input data into task ${tid}: ${router.routerInputData}"
+                selectedTask.setInjectedInput(router.routerInputData)
+            }
+            scheduleIfReady(selectedTask)
         }
     }
 

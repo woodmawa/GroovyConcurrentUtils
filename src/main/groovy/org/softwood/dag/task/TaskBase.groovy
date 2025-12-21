@@ -62,9 +62,25 @@ abstract class TaskBase<T> implements ITask<T> {
     void dependsOn(String taskId) {
         predecessors << taskId
     }
+    
+    void dependsOn(ITask task) {
+        predecessors << task.id
+    }
 
     void addSuccessor(String taskId) {
         successors << taskId
+    }
+    
+    void addSuccessor(ITask task) {
+        successors << task.id
+    }
+    
+    void addPredecessor(String taskId) {
+        predecessors << taskId
+    }
+    
+    void addPredecessor(ITask task) {
+        predecessors << task.id
     }
 
     // ----------------------------------------------------
@@ -177,6 +193,23 @@ abstract class TaskBase<T> implements ITask<T> {
     }
 
     // ----------------------------------------------------
+    // Determine if an exception should trigger retries
+    // Configuration/validation errors should fail fast
+    // ----------------------------------------------------
+    protected boolean isRetriable(Throwable err) {
+        // Don't retry configuration/validation errors - these indicate bugs or misconfiguration
+        if (err instanceof IllegalStateException) return false
+        if (err instanceof IllegalArgumentException) return false
+        if (err instanceof NullPointerException) return false
+        
+        // Don't retry timeout errors (already handled separately)
+        if (err instanceof TimeoutException) return false
+        
+        // Retry everything else (network errors, transient failures, etc.)
+        return true
+    }
+
+    // ----------------------------------------------------
     // Retry + timeout wrapper
     // Unwraps Optional<Promise<?>> to Optional<?> for runTask
     // ----------------------------------------------------
@@ -236,19 +269,23 @@ abstract class TaskBase<T> implements ITask<T> {
                     lastError = err
                     log.error "Task ${id}: attempt $attempt failed: ${err.message}"
 
-                    if (err instanceof TimeoutException) {
+                    // Check if this error should be retried
+                    if (!isRetriable(err)) {
+                        log.debug "Task ${id}: non-retriable error (${err.class.simpleName}), failing immediately"
                         state = TaskState.FAILED
                         emitErrorEvent(err)
-                        throw err
+                        throw err  // Throw original exception directly - no wrapping
                     }
 
+                    // Check if we've exhausted retries for retriable errors
                     if (attempt >= retryPolicy.maxAttempts) {
                         state = TaskState.FAILED
                         def exceeded = new RuntimeException("Task ${id}: exceeded retry attempts", err)
                         emitErrorEvent(exceeded)
-                        throw exceeded
+                        throw exceeded  // Wrap in RuntimeException to indicate retry exhaustion
                     }
 
+                    // Retry with backoff
                     log.debug "Task ${id}: retrying after ${delay}ms (attempt $attempt)"
                     Thread.sleep(delay)
                     delay = (long) (delay * retryPolicy.backoffMultiplier)

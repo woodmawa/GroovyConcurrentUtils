@@ -47,22 +47,28 @@ class TasksTest {
     @Test
     void testAllWithSharedContext() {
         def results = Tasks.all { ctx ->
+            // Initialize counter BEFORE tasks run to avoid race condition
+            ctx.globals.counter = 0
+            
             task("t1") {
-                ctx.globals.counter = 1
+                // Use safe navigation to handle race conditions
+                ctx.globals.counter = (ctx.globals.counter ?: 0) + 1
+                ctx.globals.data = "shared"
                 "A"
             }
             task("t2") {
-                ctx.globals.counter = ctx.globals.counter + 1
+                ctx.globals.counter = (ctx.globals.counter ?: 0) + 1
                 "B"
             }
             task("t3") {
-                ctx.globals.counter = ctx.globals.counter + 1
+                ctx.globals.counter = (ctx.globals.counter ?: 0) + 1
                 "C"
             }
         }
 
         assertEquals(3, results.size())
-        // Note: due to parallel execution, counter value is non-deterministic
+        assertTrue(results.containsAll(["A", "B", "C"]))
+        // Note: due to parallel execution, final counter value is non-deterministic
     }
 
     @Test

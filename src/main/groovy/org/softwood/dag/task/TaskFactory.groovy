@@ -42,6 +42,45 @@ class TaskFactory {
         return new ServiceTask(id, name, ctx)
     }
 
+    /**
+     * Create a ManualTask - human interaction task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new ManualTask instance
+     */
+    static ManualTask createManualTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating ManualTask: id=$id, name=$name")
+        return new ManualTask(id, name, ctx)
+    }
+
+    /**
+     * Create a SignalTask - event coordination task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SignalTask instance
+     */
+    static SignalTask createSignalTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating SignalTask: id=$id, name=$name")
+        return new SignalTask(id, name, ctx)
+    }
+
+    /**
+     * Create a SubGraphTask - reusable workflow template task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SubGraphTask instance
+     */
+    static SubGraphTask createSubGraphTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating SubGraphTask: id=$id, name=$name")
+        return new SubGraphTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Decision Task Creation
     // =========================================================================
@@ -85,6 +124,32 @@ class TaskFactory {
         return new ShardingRouterTask(id, name, ctx)
     }
 
+    /**
+     * Create an ExclusiveGatewayTask - XOR routing (first match wins).
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new ExclusiveGatewayTask instance
+     */
+    static ExclusiveGatewayTask createExclusiveGateway(String id, String name, TaskContext ctx) {
+        log.debug("Creating ExclusiveGatewayTask: id=$id, name=$name")
+        return new ExclusiveGatewayTask(id, name, ctx)
+    }
+
+    /**
+     * Create a SwitchRouterTask - switch/case style routing.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SwitchRouterTask instance
+     */
+    static SwitchRouterTask createSwitchRouter(String id, String name, TaskContext ctx) {
+        log.debug("Creating SwitchRouterTask: id=$id, name=$name")
+        return new SwitchRouterTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
@@ -106,6 +171,15 @@ class TaskFactory {
             case TaskType.SERVICE:
                 return createServiceTask(id, name, ctx)
 
+            case TaskType.MANUAL:
+                return createManualTask(id, name, ctx)
+
+            case TaskType.SIGNAL:
+                return createSignalTask(id, name, ctx)
+
+            case TaskType.SUBGRAPH:
+                return createSubGraphTask(id, name, ctx)
+
             case TaskType.CONDITIONAL_FORK:
                 return createConditionalFork(id, name, ctx)
 
@@ -114,6 +188,12 @@ class TaskFactory {
 
             case TaskType.SHARDING_ROUTER:
                 return createShardingRouter(id, name, ctx)
+
+            case TaskType.EXCLUSIVE_GATEWAY:
+                return createExclusiveGateway(id, name, ctx)
+
+            case TaskType.SWITCH_ROUTER:
+                return createSwitchRouter(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

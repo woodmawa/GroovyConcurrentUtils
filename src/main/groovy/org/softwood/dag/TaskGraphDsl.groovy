@@ -132,14 +132,14 @@ class TaskGraphDsl {
     // Called by TaskGraph.build() after DSL completes
     // ----------------------------------------------------
     void wireDeferred() {
-        // Wire all forks
-        deferredForks.each { forkDsl ->
-            forkDsl.build()
-        }
-        
-        // Wire all joins
+        // Wire joins FIRST - they create tasks that forks may reference
         deferredJoins.each { joinDsl ->
             joinDsl.build()
+        }
+        
+        // Then wire forks - they reference existing tasks (including joins)
+        deferredForks.each { forkDsl ->
+            forkDsl.build()
         }
     }
 }

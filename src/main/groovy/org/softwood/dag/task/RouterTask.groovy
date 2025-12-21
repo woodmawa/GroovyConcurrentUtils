@@ -35,6 +35,9 @@ abstract class RouterTask extends TaskBase<List<String>> implements IDecisionTas
     /** For sharding routers: ensures shared successors (joins) scheduled only once */
     boolean scheduledShardSuccessors = false
 
+    /** Store the input data to pass through to selected tasks */
+    Object routerInputData = null
+
     // --------------------------------------------------------------------
 
     RouterTask(String id, String name, TaskContext ctx) {
@@ -59,6 +62,9 @@ abstract class RouterTask extends TaskBase<List<String>> implements IDecisionTas
         return ctx.promiseFactory.executeAsync {
 
             log.debug "RouterTask(${id}): runTask() called"
+
+            // Store the input data to pass through to selected tasks
+            routerInputData = prevValue
 
             // -------------------------------------------------
             // ONE-SHOT ROUTING: reuse cached decision

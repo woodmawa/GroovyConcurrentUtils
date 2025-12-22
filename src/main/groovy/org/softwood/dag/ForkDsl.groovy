@@ -94,10 +94,87 @@ class ForkDsl {
         def routerId = "${id}-router"
         routerTask = new DynamicRouterTask(routerId, routerId, graph.ctx)
         routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
-        routerTask.setRoutingLogic(routingLogic)
+        routerTask.routingLogic = routingLogic
+        
+        // If targets were specified via to(), use them as allowed targets
+        if (targetIds) {
+            routerTask.allowedTargets = new ArrayList<>(targetIds)
+            log.debug("fork($id): set ${targetIds.size()} allowed targets from to()")
+        }
 
         graph.addTask(routerTask)
         log.debug("fork($id): created dynamic router")
+    }
+
+    // Alias for dynamicRouter for convenience
+    void route(Closure routingLogic) {
+        dynamicRouter(routingLogic)
+    }
+
+    void conditionalFork(List<String> targets, Closure condition) {
+        if (sourceIds.size() != 1) {
+            throw new IllegalStateException("fork($id): conditionalFork requires exactly one source")
+        }
+
+        // If no router exists yet, create one
+        if (!routerTask) {
+            def forkId = "${id}-conditional"
+            routerTask = new ConditionalForkTask(forkId, forkId, graph.ctx)
+            routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+            graph.addTask(routerTask)
+            
+            // Add any existing targetIds (from previous to() calls) as static targets
+            if (targetIds) {
+                routerTask.staticTargets.addAll(targetIds)
+                log.debug("fork($id): added ${targetIds.size()} static targets from to()")
+            }
+        }
+        
+        // Now add the conditional rules for the specified targets
+        targets.each { targetId ->
+            routerTask.conditionalRules[targetId] = condition
+        }
+        
+        // Add these targets to our list if not already there
+        targets.each { targetId ->
+            if (!targetIds.contains(targetId)) {
+                targetIds.add(targetId)
+            }
+        }
+
+        log.debug("fork($id): created/updated conditional fork with ${routerTask.conditionalRules.size()} rules and ${routerTask.staticTargets.size()} static targets")
+    }
+
+    // Alias for conditionalFork
+    void conditionalOn(List<String> targets, Closure condition) {
+        conditionalFork(targets, condition)
+    }
+
+    void shardingRouter(String baseTaskName, int shardCount, Closure shardLogic) {
+        if (sourceIds.size() != 1) {
+            throw new IllegalStateException("fork($id): shardingRouter requires exactly one source")
+        }
+
+        def routerId = "${id}-sharding"
+        routerTask = new ShardingRouterTask(routerId, routerId, graph.ctx)
+        routerTask.eventDispatcher = new org.softwood.dag.task.DefaultTaskEventDispatcher(graph)
+        routerTask.shardSource = shardLogic
+        routerTask.shardCount = shardCount
+        routerTask.templateTargetId = baseTaskName
+        
+        // The shard targets will be determined dynamically
+        // but we need to add them to targetIds for the build process
+        (0..<shardCount).each { i ->
+            targetIds.add("${baseTaskName}_shard_${i}")
+        }
+
+        graph.addTask(routerTask)
+        log.debug("fork($id): created sharding router with ${shardCount} shards")
+    }
+
+    // Alias for shardingRouter
+    void shard(String baseTaskName, int shardCount, Closure shardLogic) {
+        shardingRouter(baseTaskName, shardCount, shardLogic)
     }
 
     void build() {
@@ -191,6 +268,12 @@ class ForkDsl {
         source.addSuccessor(routerTask)
         routerTask.addPredecessor(source)
         log.debug("fork($id): ${source.id} -> ${routerTask.id}")
+
+        // CRITICAL: Populate the router's targetIds set so TaskGraph knows which tasks to mark as SKIPPED
+        if (routerTask instanceof RouterTask) {
+            routerTask.targetIds.addAll(targetIds)
+            log.debug("fork($id): set router targetIds to ${targetIds}")
+        }
 
         targetIds.each { targetId ->
             def target = graph.tasks[targetId]

@@ -81,6 +81,45 @@ class TaskFactory {
         return new SubGraphTask(id, name, ctx)
     }
 
+    /**
+     * Create a ScriptTask - multi-language script execution task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new ScriptTask instance
+     */
+    static ScriptTask createScriptTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating ScriptTask: id=$id, name=$name")
+        return new ScriptTask(id, name, ctx)
+    }
+
+    /**
+     * Create a SendTask - external message/event sending task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SendTask instance
+     */
+    static SendTask createSendTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating SendTask: id=$id, name=$name")
+        return new SendTask(id, name, ctx)
+    }
+
+    /**
+     * Create a ReceiveTask - external message/event reception task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new ReceiveTask instance
+     */
+    static ReceiveTask createReceiveTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating ReceiveTask: id=$id, name=$name")
+        return new ReceiveTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Decision Task Creation
     // =========================================================================
@@ -179,6 +218,15 @@ class TaskFactory {
 
             case TaskType.SUBGRAPH:
                 return createSubGraphTask(id, name, ctx)
+
+            case TaskType.SCRIPT:
+                return createScriptTask(id, name, ctx)
+
+            case TaskType.SEND:
+                return createSendTask(id, name, ctx)
+
+            case TaskType.RECEIVE:
+                return createReceiveTask(id, name, ctx)
 
             case TaskType.CONDITIONAL_FORK:
                 return createConditionalFork(id, name, ctx)

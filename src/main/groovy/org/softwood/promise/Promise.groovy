@@ -77,6 +77,14 @@ interface Promise<T> {
     /** Fail this promise with an error. */
     Promise<T> fail(Throwable error)
 
+    /**
+     * Reject this promise with an error (alias for fail).
+     * This provides more intuitive semantics for async error handling.
+     */
+    default Promise<T> reject(Throwable error) {
+        return fail(error)
+    }
+
     // =========================================================================
     // Retrieval Methods
     // =========================================================================

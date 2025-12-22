@@ -184,6 +184,10 @@ abstract class TaskBase<T> implements ITask<T> {
             emitEvent(TaskState.COMPLETED)
             result
         }.recover { Throwable err ->
+            // Ensure error is not null before processing
+            if (err == null) {
+                err = new IllegalStateException("Task ${id}: received null error in recovery handler")
+            }
             log.error "Task ${id}: failed with error: ${err.message}"
             lastError = err
             state = TaskState.FAILED
@@ -204,6 +208,11 @@ abstract class TaskBase<T> implements ITask<T> {
         
         // Don't retry timeout errors (already handled separately)
         if (err instanceof TimeoutException) return false
+        
+        // Don't retry receive timeout errors - check by class name to avoid circular dependency
+        def className = err.class.name
+        if (className.endsWith('ReceiveTimeoutException')) return false
+        if (className.endsWith('ManualTaskFailedException')) return false
         
         // Retry everything else (network errors, transient failures, etc.)
         return true

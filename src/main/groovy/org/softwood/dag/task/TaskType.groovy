@@ -39,6 +39,24 @@ enum TaskType {
      */
     SUBGRAPH(SubGraphTask, false),
 
+    /**
+     * Script task for executing scripts in multiple languages.
+     * Supports JavaScript, Groovy, Python, and other JSR 223 engines.
+     */
+    SCRIPT(ScriptTask, false),
+
+    /**
+     * Send task for sending messages/events to external systems.
+     * Supports HTTP, webhooks, message queues, and other protocols.
+     */
+    SEND(SendTask, false),
+
+    /**
+     * Receive task for waiting for external messages/events.
+     * Supports webhooks, message queues, and async responses.
+     */
+    RECEIVE(ReceiveTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -158,6 +176,21 @@ enum TaskType {
             case 'subprocess':
             case 'template':
                 return SUBGRAPH
+            case 'script':
+            case 'scripttask':
+            case 'code':
+            case 'eval':
+                return SCRIPT
+            case 'send':
+            case 'sendtask':
+            case 'publish':
+            case 'emit':
+                return SEND
+            case 'receive':
+            case 'receivetask':
+            case 'wait':
+            case 'listen':
+                return RECEIVE
             case 'conditional':
             case 'conditionalfork':
             case 'fork':

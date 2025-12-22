@@ -34,21 +34,23 @@ class ConditionalForkTask extends RouterTask {
     @Override
     protected Promise<List<String>> runTask(TaskContext ctx, Object prevValue) {
 
-        return ctx.promiseFactory.executeAsync {
+    return ctx.promiseFactory.executeAsync {
 
+            // CRITICAL: Store input data for TaskGraph to pass to selected tasks
+    routerInputData = prevValue
 
-            log.debug("ConditionalForkTask($id): prevValue = $prevValue")
+    log.debug("ConditionalForkTask($id): prevValue = $prevValue")
 
+    // --------------------------------------
+    // Evaluate routing rules
             // --------------------------------------
-            // Evaluate routing rules
-            // --------------------------------------
-            List<String> routedTargets = route(prevValue)
+    List<String> routedTargets = route(prevValue)
 
-            if (!(routedTargets instanceof List)) {
-                throw new IllegalStateException(
-                        "ConditionalForkTask($id): route() must return List<String>, got: $routedTargets"
-                )
-            }
+    if (!(routedTargets instanceof List)) {
+    throw new IllegalStateException(
+                "ConditionalForkTask($id): route() must return List<String>, got: $routedTargets"
+        )
+    }
 
             return routedTargets
         }

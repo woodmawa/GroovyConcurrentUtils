@@ -219,23 +219,26 @@ class SignalTask extends TaskBase<Map> {
         
         log.info("SignalTask($id): waiting for signal '$signalName'")
         
-        // Check if signal already exists
-        def existingSignals = SIGNAL_REGISTRY.get(signalName)
-        if (existingSignals && !existingSignals.isEmpty()) {
-            // Signal already sent - consume it immediately
-            def signalData = existingSignals.remove(0)
-            if (existingSignals.isEmpty()) {
-                SIGNAL_REGISTRY.remove(signalName)
-            }
-            receiveSignalData(signalData)
-        } else {
-            // Register to wait for signal
-            WAITING_TASKS.computeIfAbsent(signalName, { k -> Collections.synchronizedList([]) })
-                         .add(this)
-            
-            // Set up timeout if configured
-            if (timeout) {
-                scheduleTimeout()
+        // Synchronize to prevent race condition between checking registry and registering as waiter
+        synchronized (SIGNAL_REGISTRY) {
+            // Check if signal already exists
+            def existingSignals = SIGNAL_REGISTRY.get(signalName)
+            if (existingSignals && !existingSignals.isEmpty()) {
+                // Signal already sent - consume it immediately
+                def signalData = existingSignals.remove(0)
+                if (existingSignals.isEmpty()) {
+                    SIGNAL_REGISTRY.remove(signalName)
+                }
+                receiveSignalData(signalData)
+            } else {
+                // Register to wait for signal
+                WAITING_TASKS.computeIfAbsent(signalName, { k -> Collections.synchronizedList([]) })
+                             .add(this)
+                
+                // Set up timeout if configured
+                if (timeout) {
+                    scheduleTimeout()
+                }
             }
         }
     }
@@ -486,23 +489,26 @@ class SignalTask extends TaskBase<Map> {
     static void sendSignalGlobal(String signalName, Map payload = [:]) {
         log.debug("Global signal sent: $signalName")
         
-        // Check if any tasks are waiting for this signal
-        def waiters = WAITING_TASKS.get(signalName)
-        if (waiters && !waiters.isEmpty()) {
-            // Wake up waiting tasks
-            def signalData = payload + [signalName: signalName, sentAt: LocalDateTime.now()]
-            
-            // Make a copy to avoid concurrent modification
-            def waitersCopy = new ArrayList(waiters)
-            waitersCopy.each { task ->
-                task.receiveSignal(signalData)
+        // Synchronize to prevent race condition with handleWaitMode()
+        synchronized (SIGNAL_REGISTRY) {
+            // Check if any tasks are waiting for this signal
+            def waiters = WAITING_TASKS.get(signalName)
+            if (waiters && !waiters.isEmpty()) {
+                // Wake up waiting tasks
+                def signalData = payload + [signalName: signalName, sentAt: LocalDateTime.now()]
+                
+                // Make a copy to avoid concurrent modification
+                def waitersCopy = new ArrayList(waiters)
+                waitersCopy.each { task ->
+                    task.receiveSignal(signalData)
+                }
+            } else {
+                // No one waiting - store for later
+                SIGNAL_REGISTRY.computeIfAbsent(signalName, { k -> Collections.synchronizedList([]) })
+                              .add(payload + [signalName: signalName, sentAt: LocalDateTime.now()])
+                
+                log.debug("Signal '$signalName' stored for later consumption")
             }
-        } else {
-            // No one waiting - store for later
-            SIGNAL_REGISTRY.computeIfAbsent(signalName, { k -> Collections.synchronizedList([]) })
-                          .add(payload + [signalName: signalName, sentAt: LocalDateTime.now()])
-            
-            log.debug("Signal '$signalName' stored for later consumption")
         }
     }
     

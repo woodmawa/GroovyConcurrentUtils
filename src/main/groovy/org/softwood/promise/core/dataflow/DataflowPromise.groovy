@@ -359,6 +359,7 @@ class DataflowPromise<T> implements Promise<T> {
     @Override boolean isDone()       { isDoneInternal() }
     @Override boolean isCompleted()  { deriveStateFromVariable() == PromiseState.COMPLETED }
     @Override boolean isCancelled()  { deriveStateFromVariable() == PromiseState.CANCELLED }
+    @Override boolean isFailed()     { deriveStateFromVariable() == PromiseState.FAILED }
 
     // -------------------------------------------------------------------------
     // Callbacks
@@ -458,7 +459,14 @@ class DataflowPromise<T> implements Promise<T> {
         } else if (this.isCancelled()) {
             next.cancel(false)
         } else if (this.isDone()) {
-            next.fail(variable.getError())
+            Throwable err = variable.getError()
+            if (err != null) {
+                next.fail(err)
+            } else {
+                // State corruption: promise is done but has no error and isn't completed/cancelled
+                log.error("CRITICAL: Promise ${this} is done but has no error. State: ${state.get()}, variable.isBound(): ${variable.isBound()}, variable.hasError(): ${variable.hasError()}")
+                next.fail(new IllegalStateException("Promise state corruption: done but no error and not completed/cancelled"))
+            }
         }
 
         return next
@@ -477,6 +485,11 @@ class DataflowPromise<T> implements Promise<T> {
         this.onError { Throwable e ->
             try {
                 next.accept(fn.apply(e))
+            } catch (java.lang.reflect.UndeclaredThrowableException ute) {
+                // Unwrap UndeclaredThrowableException that occurs when Groovy closures
+                // converted to Java functional interfaces throw checked exceptions
+                Throwable cause = ute.cause ?: ute
+                next.fail(cause)
             } catch (Throwable t) {
                 next.fail(t)
             }
@@ -495,6 +508,10 @@ class DataflowPromise<T> implements Promise<T> {
             // Already failed - apply recovery function synchronously
             try {
                 next.accept(fn.apply(variable.getError()))
+            } catch (java.lang.reflect.UndeclaredThrowableException ute) {
+                // Unwrap UndeclaredThrowableException
+                Throwable cause = ute.cause ?: ute
+                next.fail(cause)
             } catch (Throwable t) {
                 next.fail(t)
             }

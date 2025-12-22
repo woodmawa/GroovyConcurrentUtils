@@ -51,7 +51,7 @@ class Tasks {
      * FIX: Explicitly collect promises in a loop instead of using .collect {}
      * to avoid Groovy closure issues.
      */
-    static <T> List<T> all(@DelegatesTo(TasksDsl) Closure dsl) {
+    static <R> List<R> all(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
         TasksDsl tasksDsl = new TasksDsl(ctx)
 
@@ -71,10 +71,10 @@ class Tasks {
 
         // ✅ FIX: Wait individually and collect manually instead of Promises.all()
         log.debug "Tasks.all(): waiting for ${promises.size()} tasks to complete"
-        List<T> results = []
+        List<R> results = []
         for (Promise<?> promise : promises) {
-            def result = promise.get()  // Wait for this promise
-            results.add(result as T)     // Collect the result
+            Object result = promise.get()  // Wait for this promise
+            results.add(result as R)        // Collect the result
         }
         log.debug "Tasks.all(): all tasks completed, returning ${results.size()} results"
 
@@ -96,7 +96,7 @@ class Tasks {
      * @param dsl closure defining tasks
      * @return result of first completed task
      */
-    static <T> T any(@DelegatesTo(TasksDsl) Closure dsl) {
+    static <S> S any(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
         TasksDsl tasksDsl = new TasksDsl(ctx)
 
@@ -116,8 +116,8 @@ class Tasks {
 
         // Wait for first to complete
         log.debug "Tasks.any(): racing ${promises.size()} tasks"
-        Promise<T> anyPromise = Promises.any(promises)
-        return anyPromise.get()
+        Promise<?> anyPromise = Promises.any(promises)
+        return anyPromise.get() as S
     }
 
     /**
@@ -136,7 +136,7 @@ class Tasks {
      * @param dsl closure defining tasks
      * @return result of final task
      */
-    static <T> T sequence(@DelegatesTo(TasksDsl) Closure dsl) {
+    static <U> U sequence(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
         TasksDsl tasksDsl = new TasksDsl(ctx)
 
@@ -154,7 +154,7 @@ class Tasks {
         }
 
         log.debug "Tasks.sequence(): waiting for final result"
-        return prevPromise.get()
+        return prevPromise.get() as U
     }
 
     // =========================================================================
@@ -179,7 +179,7 @@ class Tasks {
      * @param configurator function to configure the task
      * @return task execution result
      */
-    static <T> T execute(Function<ServiceTask, ServiceTask> configurator) {
+    static <V> V execute(Function<ServiceTask, ServiceTask> configurator) {
         TaskContext ctx = new TaskContext()
 
         // Create a service task
@@ -196,9 +196,9 @@ class Tasks {
         log.debug "Tasks.execute(): executing configured task"
         Promise<?> nullPromise = ctx.promiseFactory.createPromise()
         nullPromise.accept(null)
-        Promise<T> result = task.execute(nullPromise)
+        Promise<?> result = task.execute(nullPromise)
 
-        return result.get()
+        return result.get() as V
     }
 
     /**
@@ -215,7 +215,7 @@ class Tasks {
      * @param configurator closure to configure the task
      * @return task execution result
      */
-    static <T> T execute(@DelegatesTo(ServiceTask) Closure configurator) {
+    static <W> W execute(@DelegatesTo(ServiceTask) Closure configurator) {
         TaskContext ctx = new TaskContext()
 
         // Create a service task
@@ -229,8 +229,8 @@ class Tasks {
         def wrapper = [
                 action: { Closure userAction ->
                     // Wrap the user's action to handle non-promise returns
-                    task.action { taskCtx, prevValue ->
-                        def result = userAction.call(taskCtx, prevValue)
+                    task.action { TaskContext taskCtx, Object prevValue ->
+                        Object result = userAction.call(taskCtx, prevValue)
 
                         // If result is already a promise, return it; otherwise wrap it
                         if (result instanceof Promise) {
@@ -254,9 +254,9 @@ class Tasks {
         log.debug "Tasks.execute(): executing configured task"
         Promise<?> nullPromise = ctx.promiseFactory.createPromise()
         nullPromise.accept(null)
-        Promise<T> result = task.execute(nullPromise)
+        Promise<?> result = task.execute(nullPromise)
 
-        return result.get()
+        return result.get() as W
     }
 
     // =========================================================================
@@ -381,12 +381,12 @@ class TasksDsl {
         ServiceTask task = TaskFactory.createServiceTask(id, id, ctx)
 
         // Configure the task's action
-        task.action { taskCtx, prevValue ->
+        task.action { TaskContext taskCtx, Object prevValue ->
             // Execute the user's closure
             action.delegate = task
             action.resolveStrategy = Closure.DELEGATE_FIRST
 
-            def result
+            Object result
             if (action.maximumNumberOfParameters == 0) {
                 result = action.call()
             } else if (action.maximumNumberOfParameters == 1) {

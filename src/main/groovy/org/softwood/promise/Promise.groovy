@@ -108,6 +108,14 @@ interface Promise<T> {
      */
     boolean isCancelled()
 
+    /**
+     * Returns true if this promise completed with an error (failed).
+     * <p>This is useful for checking promise state without blocking.</p>
+     *
+     * @return true if the promise completed exceptionally
+     */
+    boolean isFailed()
+
     // =========================================================================
     // Callback Methods
     // =========================================================================

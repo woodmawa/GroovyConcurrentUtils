@@ -74,6 +74,9 @@ class SynchronousPromiseMock<T> implements Promise<T> {
     @Override
     boolean isCompleted() { isDone() }
 
+    @Override
+    boolean isFailed() { failed }
+
     // ----------------------
     // Callbacks
     // ----------------------

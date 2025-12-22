@@ -7,6 +7,8 @@ import java.time.Duration
 import java.time.LocalDateTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeoutException
+import java.util.Timer
+import java.util.TimerTask as JTimerTask
 
 /**
  * SignalTask - Event Coordination Task
@@ -437,7 +439,7 @@ class SignalTask extends TaskBase<Map> {
         log.debug("SignalTask($id): scheduling timeout for ${timeout.toMillis()}ms")
         
         timeoutTimer = new Timer("SignalTask-${id}-Timeout", true)
-        timeoutTimer.schedule(new TimerTask() {
+        timeoutTimer.schedule(new JTimerTask() {
             @Override
             void run() {
                 handleTimeout()

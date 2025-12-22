@@ -459,6 +459,15 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
     }
 
     /**
+     * @see SoftPromise#isFailed()
+     */
+    @Override
+    boolean isFailed() {
+        // A promise is failed if the state is specifically FAILED.
+        return state.get() == org.softwood.promise.core.PromiseState.FAILED
+    }
+
+    /**
      * Register a success callback.
      *
      * @param callback consumer receiving the successful value

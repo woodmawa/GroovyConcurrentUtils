@@ -120,6 +120,45 @@ class TaskFactory {
         return new ReceiveTask(id, name, ctx)
     }
 
+    /**
+     * Create a TimerTask - periodic/scheduled execution task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new TimerTask instance
+     */
+    static TimerTask createTimerTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating TimerTask: id=$id, name=$name")
+        return new TimerTask(id, name, ctx)
+    }
+
+    /**
+     * Create a BusinessRuleTask - condition-based reactive task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new BusinessRuleTask instance
+     */
+    static BusinessRuleTask createBusinessRuleTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating BusinessRuleTask: id=$id, name=$name")
+        return new BusinessRuleTask(id, name, ctx)
+    }
+
+    /**
+     * Create a CallActivityTask - subprocess invocation task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new CallActivityTask instance
+     */
+    static CallActivityTask createCallActivityTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating CallActivityTask: id=$id, name=$name")
+        return new CallActivityTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Decision Task Creation
     // =========================================================================
@@ -227,6 +266,15 @@ class TaskFactory {
 
             case TaskType.RECEIVE:
                 return createReceiveTask(id, name, ctx)
+
+            case TaskType.TIMER:
+                return createTimerTask(id, name, ctx)
+
+            case TaskType.BUSINESS_RULE:
+                return createBusinessRuleTask(id, name, ctx)
+
+            case TaskType.CALL_ACTIVITY:
+                return createCallActivityTask(id, name, ctx)
 
             case TaskType.CONDITIONAL_FORK:
                 return createConditionalFork(id, name, ctx)

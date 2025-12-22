@@ -92,6 +92,52 @@ class TaskGraphDsl {
         return serviceTask(id, config)
     }
 
+    // ============================================================================
+    // Convenience Methods for New Task Types
+    // ============================================================================
+
+    /**
+     * Create a timer task for periodic/scheduled execution.
+     * 
+     * Usage:
+     *   timer("heartbeat") {
+     *       interval Duration.ofSeconds(30)
+     *       maxExecutions 10
+     *       action { ctx -> ... }
+     *   }
+     */
+    ITask timer(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.TIMER, config)
+    }
+
+    /**
+     * Create a business rule task for condition-based execution.
+     * 
+     * Usage:
+     *   businessRule("approval") {
+     *       when { signal "request" }
+     *       evaluate { ctx, data -> data.amount < 1000 }
+     *       action { ctx, data -> approve(data) }
+     *   }
+     */
+    ITask businessRule(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.BUSINESS_RULE, config)
+    }
+
+    /**
+     * Create a call activity task for subprocess invocation.
+     * 
+     * Usage:
+     *   callActivity("subprocess") {
+     *       input { ctx -> ctx.globals.data }
+     *       subProcess { ctx, input -> graph.run() }
+     *       output { result -> result.status }
+     *   }
+     */
+    ITask callActivity(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.CALL_ACTIVITY, config)
+    }
+
     // ----------------------------------------------------
     // Fork block → DEFERRED wiring
     // ----------------------------------------------------

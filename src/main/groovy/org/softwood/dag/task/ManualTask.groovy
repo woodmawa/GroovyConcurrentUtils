@@ -7,6 +7,8 @@ import org.softwood.promise.Promises
 import java.time.Duration
 import java.time.LocalDateTime
 import java.util.concurrent.TimeoutException
+import java.util.Timer
+import java.util.TimerTask as JTimerTask
 
 /**
  * ManualTask - Human Interaction Task
@@ -404,7 +406,7 @@ class ManualTask extends TaskBase<Map> {
         log.debug("ManualTask($id): scheduling timeout for ${timeout.toMillis()}ms")
         
         timeoutTimer = new Timer("ManualTask-${id}-Timeout", true)
-        timeoutTimer.schedule(new TimerTask() {
+        timeoutTimer.schedule(new JTimerTask() {
             @Override
             void run() {
                 handleTimeout()

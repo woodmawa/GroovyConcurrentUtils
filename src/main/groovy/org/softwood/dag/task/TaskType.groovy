@@ -57,6 +57,24 @@ enum TaskType {
      */
     RECEIVE(ReceiveTask, false),
 
+    /**
+     * Timer task for periodic or scheduled execution.
+     * Supports fixed interval, fixed rate, and multiple stop conditions.
+     */
+    TIMER(TimerTask, false),
+
+    /**
+     * Business rule task for condition-based reactive execution.
+     * Executes when business rules are satisfied via signals or polling.
+     */
+    BUSINESS_RULE(BusinessRuleTask, false),
+
+    /**
+     * Call activity task for invoking subprocesses/subgraphs.
+     * Supports input/output mapping and subprocess composition.
+     */
+    CALL_ACTIVITY(CallActivityTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -191,6 +209,20 @@ enum TaskType {
             case 'wait':
             case 'listen':
                 return RECEIVE
+            case 'timer':
+            case 'timertask':
+            case 'scheduled':
+            case 'periodic':
+                return TIMER
+            case 'businessrule':
+            case 'businessruletask':
+            case 'rule':
+                return BUSINESS_RULE
+            case 'callactivity':
+            case 'callactivitytask':
+            case 'subprocess':
+            case 'call':
+                return CALL_ACTIVITY
             case 'conditional':
             case 'conditionalfork':
             case 'fork':

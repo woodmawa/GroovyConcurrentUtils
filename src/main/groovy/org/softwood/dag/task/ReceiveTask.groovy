@@ -5,6 +5,8 @@ import org.softwood.promise.Promise
 
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Timer
+import java.util.TimerTask as JTimerTask
 
 /**
  * ReceiveTask - Wait for External Messages/Events
@@ -257,7 +259,7 @@ class ReceiveTask extends TaskBase<Map> {
         log.debug("ReceiveTask($id): scheduling timeout for ${receiveTimeout.toMillis()}ms")
         
         def timer = new Timer("ReceiveTask-${id}-Timeout", true)
-        timer.schedule(new TimerTask() {
+        timer.schedule(new JTimerTask() {
             @Override
             void run() {
                 handleTimeout(correlationId)

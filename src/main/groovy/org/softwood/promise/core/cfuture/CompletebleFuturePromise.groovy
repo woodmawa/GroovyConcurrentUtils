@@ -168,6 +168,11 @@ class CompletableFuturePromise<T> implements Promise<T> {
         return state.get() == PromiseState.COMPLETED
     }
 
+    @Override
+    boolean isFailed() {
+        return state.get() == PromiseState.FAILED
+    }
+
     // ... all other methods (then, map, flatMap, get, etc.) remain the same,
     // relying on the underlying `future` or the new state checks (`isDone`, `isCancelled`)
     // -------------------------------------------------------------------------

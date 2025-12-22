@@ -504,6 +504,7 @@ class FakePromise<T> implements Promise<T> {
 
     @Override boolean isDone() { done }
     @Override boolean isCompleted() { done && !error }
+    @Override boolean isFailed() { done && error != null }
 
     @Override
     Promise<T> onComplete(Consumer<T> callback) {

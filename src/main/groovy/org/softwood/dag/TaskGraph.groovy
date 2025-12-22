@@ -129,17 +129,29 @@ class TaskGraph {
             }
 
             if (terminal == totalTaskCount && graphCompletionPromise != null) {
-                // All tasks have reached terminal state - collect results
-                List terminalResults = tasks.values()
-                    .findAll { it.successors.isEmpty() && it.isCompleted() }
-                    .collect { it.completionPromise?.get() }
-                    .findAll { it != null }
-
-                // Resolve the graph completion promise
-                def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
-                graphCompletionPromise.accept(result)
+                // All tasks have reached terminal state
                 
-                log.debug "Graph execution completed with result: $result"
+                // Check if any task failed
+                def failedTasks = tasks.values().findAll { it.isFailed() }
+                
+                if (failedTasks) {
+                    // If any task failed, fail the graph promise with the first error
+                    def firstFailure = failedTasks[0]
+                    log.error "Graph execution failed due to task ${firstFailure.id}: ${firstFailure.error}"
+                    graphCompletionPromise.fail(firstFailure.error)
+                } else {
+                    // All tasks completed successfully - collect results
+                    List terminalResults = tasks.values()
+                        .findAll { it.successors.isEmpty() && it.isCompleted() }
+                        .collect { it.completionPromise?.get() }
+                        .findAll { it != null }
+
+                    // Resolve the graph completion promise
+                    def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
+                    graphCompletionPromise.accept(result)
+                    
+                    log.debug "Graph execution completed with result: $result"
+                }
             }
         }
     }
@@ -183,6 +195,10 @@ class TaskGraph {
         execPromise.onError { error ->
             log.error "Task ${t.id} failed: $error"
             t.markFailed(error)
+            
+            // CRITICAL: When a task fails, mark all downstream tasks as skipped
+            // so the graph can complete
+            markDownstreamAsSkipped(t)
             
             // Check if graph execution is complete (even with failures)
             checkGraphCompletion()
@@ -268,6 +284,34 @@ class TaskGraph {
     // --------------------------------------------------------------------
     // READY CHECK
     // --------------------------------------------------------------------
+
+    /**
+     * When a task fails, recursively mark all downstream (successor) tasks as skipped
+     * This ensures the graph can reach completion even when a task fails
+     */
+    private void markDownstreamAsSkipped(ITask failedTask) {
+        def visited = new HashSet<String>()
+        def queue = new LinkedList<String>()
+        
+        // Start with immediate successors
+        queue.addAll(failedTask.successors)
+        
+        while (!queue.isEmpty()) {
+            String taskId = queue.poll()
+            
+            if (visited.contains(taskId)) continue
+            visited.add(taskId)
+            
+            ITask task = tasks[taskId]
+            if (task && !task.hasStarted) {
+                task.markSkipped()
+                log.debug "Marked task ${taskId} as SKIPPED due to upstream failure"
+                
+                // Add its successors to the queue
+                queue.addAll(task.successors)
+            }
+        }
+    }
 
     private void scheduleIfReady(ITask t) {
         if (t == null) return

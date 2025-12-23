@@ -138,6 +138,89 @@ class TaskGraphDsl {
         return task(id, TaskType.CALL_ACTIVITY, config)
     }
 
+    // ============================================================================
+    // Dependency Declaration - Simple Linear Dependencies
+    // ============================================================================
+
+    /**
+     * Declare that a task depends on one or more other tasks.
+     * The task will run after ALL dependencies complete.
+     * 
+     * Usage:
+     *   dependsOn("B", "A")              // B depends on A
+     *   dependsOn("D", "A", "B", "C")    // D depends on A, B, and C
+     * 
+     * For multiple dependencies, an implicit join task is created.
+     */
+    void dependsOn(String taskId, String... dependencyIds) {
+        if (dependencyIds.length == 0) {
+            throw new IllegalArgumentException("dependsOn requires at least one dependency")
+        }
+        
+        def task = graph.tasks[taskId]
+        if (!task) {
+            throw new IllegalArgumentException("dependsOn: unknown task '${taskId}'")
+        }
+        
+        if (dependencyIds.length == 1) {
+            // Simple 1-to-1 dependency - direct edge
+            def depTask = graph.tasks[dependencyIds[0]]
+            if (!depTask) {
+                throw new IllegalArgumentException("dependsOn: unknown dependency '${dependencyIds[0]}'")
+            }
+            
+            depTask.addSuccessor(task)
+            task.addPredecessor(depTask)
+        } else {
+            // Multiple dependencies → create implicit join task
+            def joinId = "${taskId}-join-" + UUID.randomUUID().toString().substring(0, 8)
+            def joinTask = TaskFactory.createTask(TaskType.SERVICE, joinId, joinId, graph.ctx)
+            joinTask.action = { ctx, prevResults -> 
+                // Pass through all results as a list
+                prevResults
+            }
+            joinTask.eventDispatcher = new DefaultTaskEventDispatcher(graph)
+            graph.addTask(joinTask)
+            
+            // Wire: dependencies → join → task
+            dependencyIds.each { depId ->
+                def depTask = graph.tasks[depId]
+                if (!depTask) {
+                    throw new IllegalArgumentException("dependsOn: unknown dependency '${depId}'")
+                }
+                depTask.addSuccessor(joinTask)
+                joinTask.addPredecessor(depTask)
+            }
+            
+            joinTask.addSuccessor(task)
+            task.addPredecessor(joinTask)
+        }
+    }
+
+    /**
+     * Create a linear chain of tasks where each depends on the previous.
+     * 
+     * Usage:
+     *   chainVia("A", "B", "C")  // Creates: A → B → C
+     * 
+     * This is syntactic sugar for:
+     *   dependsOn("B", "A")
+     *   dependsOn("C", "B")
+     */
+    void chainVia(String... taskIds) {
+        if (taskIds.length < 2) {
+            throw new IllegalArgumentException("chainVia requires at least 2 tasks")
+        }
+        
+        for (int i = 0; i < taskIds.length - 1; i++) {
+            dependsOn(taskIds[i + 1], taskIds[i])
+        }
+    }
+
+    // ============================================================================
+    // Fork and Join - Parallel Execution Patterns
+    // ============================================================================
+
     // ----------------------------------------------------
     // Fork block → DEFERRED wiring
     // ----------------------------------------------------

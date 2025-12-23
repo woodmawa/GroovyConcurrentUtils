@@ -147,6 +147,19 @@ class TaskFactory {
     }
 
     /**
+     * Create a DataTransformTask - functional data transformation pipeline task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new DataTransformTask instance
+     */
+    static DataTransformTask createDataTransformTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating DataTransformTask: id=$id, name=$name")
+        return new DataTransformTask(id, name, ctx)
+    }
+
+    /**
      * Create a CallActivityTask - subprocess invocation task.
      *
      * @param id unique task identifier
@@ -272,6 +285,9 @@ class TaskFactory {
 
             case TaskType.BUSINESS_RULE:
                 return createBusinessRuleTask(id, name, ctx)
+
+            case TaskType.DATA_TRANSFORM:
+                return createDataTransformTask(id, name, ctx)
 
             case TaskType.CALL_ACTIVITY:
                 return createCallActivityTask(id, name, ctx)

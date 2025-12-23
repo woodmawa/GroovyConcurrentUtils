@@ -2,6 +2,7 @@ package org.softwood.dag
 
 import groovy.util.logging.Slf4j
 import org.softwood.dag.task.*
+import org.softwood.promise.Promise
 
 import java.util.concurrent.ConcurrentHashMap
 
@@ -18,51 +19,91 @@ import java.util.concurrent.ConcurrentHashMap
  *   <li>Named registry for task discovery</li>
  *   <li>Lifecycle management (start/stop)</li>
  *   <li>Signal-based coordination</li>
+ *   <li>Promise chaining with fluent API</li>
  *   <li>Metrics and monitoring</li>
  * </ul>
  *
+ * <h3>Usage Example - Static Builder:</h3>
+ * <pre>
+ * def tasks = TasksCollection.tasks {
+ *     serviceTask("fetch") {
+ *         action { ctx, prev ->
+ *             ctx.promiseFactory.executeAsync { fetchData() }
+ *         }
+ *     }
+ *     
+ *     task("transform", TaskType.DATA_TRANSFORM) {
+ *         map { item -> transform(item) }
+ *     }
+ *     
+ *     serviceTask("save") {
+ *         action { ctx, prev ->
+ *             ctx.promiseFactory.executeAsync { save(prev) }
+ *         }
+ *     }
+ * }
+ * 
+ * // Chain them
+ * tasks.chain("fetch", "transform", "save")
+ *     .onComplete { println "Done: $it" }
+ *     .run()
+ * </pre>
+ *
  * <h3>Usage Example - Event-Driven System:</h3>
  * <pre>
- * def tasks = new TasksCollection()
+ * def tasks = TasksCollection.tasks {
+ *     timer("heartbeat") {
+ *         interval Duration.ofSeconds(10)
+ *         action { ctx ->
+ *             SignalTask.sendSignalGlobal("heartbeat", [timestamp: System.currentTimeMillis()])
+ *         }
+ *     }
  *
- * // Timer that sends periodic signals
- * tasks.timer("heartbeat") {
- *     interval Duration.ofSeconds(10)
- *     action { ctx ->
- *         SignalTask.sendSignalGlobal("heartbeat", [timestamp: System.currentTimeMillis()])
+ *     businessRule("monitor") {
+ *         when { signal "heartbeat" }
+ *         evaluate { ctx, data ->
+ *             System.currentTimeMillis() - data.timestamp < 15000
+ *         }
+ *         onFalse { ctx, data ->
+ *             find("alert").execute(ctx.promiseFactory.createPromise(data))
+ *         }
  *     }
  * }
- *
- * // Business rule that reacts to signals
- * tasks.businessRule("monitor") {
- *     when { signal "heartbeat" }
- *     evaluate { ctx, data ->
- *         System.currentTimeMillis() - data.timestamp < 15000
- *     }
- *     onFalse { ctx, data ->
- *         tasks.find("alert").execute(tasks.ctx.promiseFactory.createPromise(data))
- *     }
- * }
- *
- * // Subprocess for handling alerts
- * tasks.callActivity("alert") {
- *     subProcess { ctx, input ->
- *         // Handle alert
- *     }
- * }
- *
- * // Start all managed tasks
- * tasks.start()
+ * 
+ * tasks.start()  // Auto-start timers and rules
  * </pre>
  *
  * <h3>Comparison with TaskGraph:</h3>
  * <ul>
  *   <li><b>TaskGraph</b>: Structured dependencies, orchestrated execution, graph completion</li>
- *   <li><b>TasksCollection</b>: Loose coupling, event-driven, long-running tasks</li>
+ *   <li><b>TasksCollection</b>: Loose coupling, event-driven, promise chaining</li>
  * </ul>
  */
 @Slf4j
 class TasksCollection {
+
+    // =========================================================================
+    // Static Builder Method
+    // =========================================================================
+    
+    /**
+     * Static factory method to build a TasksCollection using DSL.
+     * 
+     * Usage:
+     *   def tasks = TasksCollection.tasks {
+     *       serviceTask("fetch") { ... }
+     *       serviceTask("transform") { ... }
+     *   }
+     */
+    static TasksCollection tasks(Closure dslClosure) {
+        TasksCollection collection = new TasksCollection()
+        
+        dslClosure.delegate = collection
+        dslClosure.resolveStrategy = Closure.DELEGATE_FIRST
+        dslClosure.call()
+        
+        return collection
+    }
 
     // =========================================================================
     // Core Components
@@ -383,6 +424,130 @@ class TasksCollection {
             scheduled: getTaskCountByState(TaskState.SCHEDULED),
             skipped: getTaskCountByState(TaskState.SKIPPED)
         ]
+    }
+
+    // =========================================================================
+    // Promise Chaining API
+    // =========================================================================
+    
+    /**
+     * Create a sequential chain of tasks where each task's output
+     * becomes the input to the next task.
+     * 
+     * Usage:
+     *   tasks.chain("fetch", "transform", "save")
+     *       .onComplete { result -> println "Done: $result" }
+     *       .onError { error -> println "Failed: $error" }
+     *       .run()
+     * 
+     * @param taskIds ordered list of task IDs to chain
+     * @return ChainBuilder for configuration
+     */
+    ChainBuilder chain(String... taskIds) {
+        return new ChainBuilder(this, taskIds)
+    }
+    
+    /**
+     * Builder for creating and executing promise chains.
+     */
+    static class ChainBuilder {
+        private final TasksCollection collection
+        private final List<String> taskIds
+        private Closure onCompleteHandler
+        private Closure onErrorHandler
+        
+        ChainBuilder(TasksCollection collection, String[] taskIds) {
+            this.collection = collection
+            this.taskIds = taskIds as List
+        }
+        
+        /**
+         * Register a completion handler.
+         */
+        ChainBuilder onComplete(Closure handler) {
+            this.onCompleteHandler = handler
+            return this
+        }
+        
+        /**
+         * Register an error handler.
+         */
+        ChainBuilder onError(Closure handler) {
+            this.onErrorHandler = handler
+            return this
+        }
+        
+        /**
+         * Execute the chain with null initial value.
+         */
+        Promise<?> run() {
+            return run(null)
+        }
+        
+        /**
+         * Execute the chain with the given initial value.
+         * 
+         * @param initialValue value to pass to first task
+         * @return Promise that resolves when chain completes
+         */
+        Promise<?> run(Object initialValue) {
+            if (taskIds.isEmpty()) {
+                throw new IllegalStateException("Chain has no tasks")
+            }
+            
+            def resultPromise = collection.ctx.promiseFactory.createPromise()
+            
+            // Attach handlers BEFORE starting chain (avoid timing issues)
+            if (onCompleteHandler) {
+                resultPromise.onComplete(onCompleteHandler)
+            }
+            if (onErrorHandler) {
+                resultPromise.onError(onErrorHandler)
+            }
+            
+            // Start the chain
+            chainNext(0, initialValue, resultPromise)
+            
+            return resultPromise
+        }
+        
+        /**
+         * Recursively chain tasks together.
+         */
+        private void chainNext(int index, Object value, Promise resultPromise) {
+            if (index >= taskIds.size()) {
+                // Chain complete - resolve with final value
+                resultPromise.accept(value)
+                return
+            }
+            
+            def taskId = taskIds[index]
+            def task = collection.find(taskId)
+            
+            if (!task) {
+                resultPromise.fail(new IllegalArgumentException("Unknown task: $taskId"))
+                return
+            }
+            
+            try {
+                // Execute this task with current value
+                def inputPromise = collection.ctx.promiseFactory.createPromise(value)
+                def taskPromise = task.execute(inputPromise)
+                
+                // Chain to next task on success
+                taskPromise.onComplete { result ->
+                    chainNext(index + 1, result, resultPromise)
+                }
+                
+                // Propagate errors
+                taskPromise.onError { error ->
+                    resultPromise.fail(error)
+                }
+            } catch (Exception e) {
+                // Handle synchronous errors
+                resultPromise.fail(e)
+            }
+        }
     }
 
     @Override

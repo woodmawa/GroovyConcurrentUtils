@@ -70,6 +70,12 @@ enum TaskType {
     BUSINESS_RULE(BusinessRuleTask, false),
 
     /**
+     * Data transform task for functional data transformation pipelines.
+     * Supports map, filter, reduce, flatMap, and tap inspection points.
+     */
+    DATA_TRANSFORM(DataTransformTask, false),
+
+    /**
      * Call activity task for invoking subprocesses/subgraphs.
      * Supports input/output mapping and subprocess composition.
      */
@@ -218,6 +224,11 @@ enum TaskType {
             case 'businessruletask':
             case 'rule':
                 return BUSINESS_RULE
+            case 'datatransform':
+            case 'datatransformtask':
+            case 'transform':
+            case 'pipeline':
+                return DATA_TRANSFORM
             case 'callactivity':
             case 'callactivitytask':
             case 'subprocess':

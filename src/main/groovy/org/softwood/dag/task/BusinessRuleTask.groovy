@@ -229,20 +229,23 @@ class BusinessRuleTask extends TaskBase<Map> {
         if (triggerSignal) {
             log.debug("BusinessRuleTask($id): registering for signal '$triggerSignal'")
             
-            // Check if signal already exists
-            def existingSignals = SignalTask.SIGNAL_REGISTRY.get(triggerSignal)
-            if (existingSignals && !existingSignals.isEmpty()) {
-                // Signal already sent - process immediately
-                def signalData = existingSignals.remove(0)
-                if (existingSignals.isEmpty()) {
-                    SignalTask.SIGNAL_REGISTRY.remove(triggerSignal)
+            // Synchronize with sendSignalGlobal to prevent race condition
+            synchronized (SignalTask.SIGNAL_REGISTRY) {
+                // Check if signal already exists
+                def existingSignals = SignalTask.SIGNAL_REGISTRY.get(triggerSignal)
+                if (existingSignals && !existingSignals.isEmpty()) {
+                    // Signal already sent - process immediately
+                    def signalData = existingSignals.remove(0)
+                    if (existingSignals.isEmpty()) {
+                        SignalTask.SIGNAL_REGISTRY.remove(triggerSignal)
+                    }
+                    onTrigger(ctx, signalData)
+                } else {
+                    // Register to wait for signal
+                    SignalTask.WAITING_TASKS.computeIfAbsent(triggerSignal, { k -> 
+                        Collections.synchronizedList([])
+                    }).add(new SignalListener(ctx))
                 }
-                onTrigger(ctx, signalData)
-            } else {
-                // Register to wait for signal
-                SignalTask.WAITING_TASKS.computeIfAbsent(triggerSignal, { k -> 
-                    Collections.synchronizedList([])
-                }).add(new SignalListener(ctx))
             }
         }
         
@@ -340,7 +343,7 @@ class BusinessRuleTask extends TaskBase<Map> {
                 actionResult = trueAction.call(ctx, data)
             } else if (!ruleResult && falseAction) {
                 log.debug("BusinessRuleTask($id): executing false action")
-                falseAction.call(ctx, data)
+                actionResult = falseAction.call(ctx, data)
             }
             
             // Complete successfully
@@ -351,7 +354,33 @@ class BusinessRuleTask extends TaskBase<Map> {
             
             if (retryOnFailure) {
                 log.info("BusinessRuleTask($id): will retry on next trigger")
-                triggered = false  // Allow retrigger
+                
+                // Reset state to allow retry
+                triggered = false
+                
+                // Re-register for signal if signal-based trigger
+                if (triggerSignal) {
+                    synchronized (SignalTask.SIGNAL_REGISTRY) {
+                        // Check if signal already exists (might have arrived while processing)
+                        def existingSignals = SignalTask.SIGNAL_REGISTRY.get(triggerSignal)
+                        if (existingSignals && !existingSignals.isEmpty()) {
+                            // Signal already waiting - process it
+                            def signalData = existingSignals.remove(0)
+                            if (existingSignals.isEmpty()) {
+                                SignalTask.SIGNAL_REGISTRY.remove(triggerSignal)
+                            }
+                            onTrigger(ctx, signalData)
+                        } else {
+                            // Re-register listener for next signal
+                            SignalTask.WAITING_TASKS.computeIfAbsent(triggerSignal, { k -> 
+                                Collections.synchronizedList([])
+                            }).add(new SignalListener(ctx))
+                            log.debug("BusinessRuleTask($id): re-registered listener for retry")
+                        }
+                    }
+                }
+                
+                // Note: Polling-based triggers will automatically retry on next poll
             } else {
                 failRule(e)
             }
@@ -453,13 +482,14 @@ class BusinessRuleTask extends TaskBase<Map> {
     // Signal Listener
     // =========================================================================
     
-    private class SignalListener {
+    private class SignalListener implements ISignalReceiver {
         final TaskContext ctx
         
         SignalListener(TaskContext ctx) {
             this.ctx = ctx
         }
         
+        @Override
         void receiveSignal(Map signalData) {
             log.info("BusinessRuleTask($id): received signal '$triggerSignal'")
             onTrigger(ctx, signalData)

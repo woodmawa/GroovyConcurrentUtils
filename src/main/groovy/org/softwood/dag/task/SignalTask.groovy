@@ -71,7 +71,7 @@ import java.util.TimerTask as JTimerTask
  * </pre>
  */
 @Slf4j
-class SignalTask extends TaskBase<Map> {
+class SignalTask extends TaskBase<Map> implements ISignalReceiver {
 
     // =========================================================================
     // Global Signal Registry (Shared Across All Tasks)
@@ -80,14 +80,17 @@ class SignalTask extends TaskBase<Map> {
     /**
      * Global registry of pending signals.
      * Key: signal name, Value: list of signal data payloads
+     * Package-visible for BusinessRuleTask integration
      */
-    private static final ConcurrentHashMap<String, List<Map>> SIGNAL_REGISTRY = new ConcurrentHashMap<>()
+    static final ConcurrentHashMap<String, List<Map>> SIGNAL_REGISTRY = new ConcurrentHashMap<>()
     
     /**
-     * Global registry of waiting tasks.
-     * Key: signal name, Value: list of tasks waiting for this signal
+     * Global registry of waiting tasks/listeners.
+     * Key: signal name, Value: list of signal receivers waiting for this signal
+     * All items must implement {@link ISignalReceiver}
+     * Package-visible for BusinessRuleTask integration
      */
-    private static final ConcurrentHashMap<String, List<SignalTask>> WAITING_TASKS = new ConcurrentHashMap<>()
+    static final ConcurrentHashMap<String, List<ISignalReceiver>> WAITING_TASKS = new ConcurrentHashMap<>()
 
     // =========================================================================
     // Task Configuration

@@ -101,12 +101,11 @@ class BusinessRuleTaskTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("TODO: Promise not completing when falseAction runs - needs investigation")
     void testRuleEvaluationFalse() {
         def falseActionCalled = false
         
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
-        rule.triggerSignal = "eval-test"
+        rule.triggerSignal = "eval-test-false"  // Use unique signal name
         rule.evaluationRule = { c, data ->
             data.amount < 1000
         }
@@ -120,7 +119,7 @@ class BusinessRuleTaskTest {
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         
-        SignalTask.sendSignalGlobal("eval-test", [amount: 2000])
+        SignalTask.sendSignalGlobal("eval-test-false", [amount: 2000])
         
         def result = awaitPromise(promise)
         
@@ -193,7 +192,6 @@ class BusinessRuleTaskTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("TODO: Race condition - signal sent before BusinessRuleTask starts listening")
     void testInGraph() {
         def graph = TaskGraph.build {
             serviceTask("trigger") {
@@ -237,7 +235,6 @@ class BusinessRuleTaskTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("TODO: Promise not completing after retry - needs investigation")
     void testRetryOnFailure() {
         def attempts = []
         
@@ -271,7 +268,6 @@ class BusinessRuleTaskTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("TODO: Promise not completing - signal handling race condition")
     void testNoEvaluateJustAction() {
         // Rule without evaluation - just execute action
         def rule = new BusinessRuleTask("rule", "Rule", ctx)

@@ -1,8 +1,10 @@
-package org.softwood.promise.core.vertx
+package org.softwood.promise.core
 
 import io.vertx.core.Vertx
 import org.junit.jupiter.api.*
 import org.softwood.promise.Promise
+import org.softwood.promise.core.vertx.VertxPromiseAdapter
+
 
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit

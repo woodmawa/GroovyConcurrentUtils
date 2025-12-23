@@ -64,6 +64,7 @@ import java.util.function.Supplier
 @Slf4j
 @CompileStatic
 @ToString(includeNames = true, excludes = ["vertx", "context"])
+@SuppressWarnings(['DuplicatedCode', 'GroovyAssignabilityCheck'])
 class VertxPromiseAdapter<T> implements SoftPromise<T> {
 
     /** Vert.x runtime instance (shared). */
@@ -111,7 +112,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
             else { state.set(PromiseState.FAILED) }
         } else {
             future.onComplete(
-                    ({ AsyncResult<T> ar ->
+                    { AsyncResult<T> ar ->
                         if (ar.succeeded()) {
                             state.set(PromiseState.COMPLETED)
                         } else if (ar.cause() instanceof CancellationException) {
@@ -119,7 +120,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
                         } else {
                             state.set(PromiseState.FAILED)
                         }
-                    } as Handler<AsyncResult<T>>)
+                    } as Handler<AsyncResult<T>>
             )
         }
     }
@@ -532,7 +533,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
         VertxPromiseAdapter<R> out = VertxPromiseAdapter.<R>create(vertx)
 
         this.onComplete { T v ->
-            out.accept((R) v)
+            out.accept(v as R)
         }
 
         this.onError { Throwable e ->
@@ -564,7 +565,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
 
         this.onComplete { T v ->
             try {
-                R mapped = (R) mapper.apply(v)
+                R mapped = mapper.apply(v) as R
                 out.accept(mapped)
             } catch (Throwable t) {
                 out.fail(t)

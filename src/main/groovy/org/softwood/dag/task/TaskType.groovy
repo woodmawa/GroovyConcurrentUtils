@@ -128,7 +128,13 @@ enum TaskType {
      * Waits for all parallel branches to complete before continuing.
      * BPMN Parallel Gateway equivalent.
      */
-    PARALLEL_GATEWAY(ParallelGatewayTask, true)
+    PARALLEL_GATEWAY(ParallelGatewayTask, true),
+
+    /**
+     * HTTP task for making REST API calls and HTTP requests.
+     * Supports all HTTP methods, headers, authentication, and request bodies.
+     */
+    HTTP(HttpTask, false)
 
     // =========================================================================
     // Enum Properties
@@ -279,6 +285,11 @@ enum TaskType {
             case 'andgateway':
             case 'fanout':
                 return PARALLEL_GATEWAY
+            case 'http':
+            case 'httptask':
+            case 'rest':
+            case 'api':
+                return HTTP
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

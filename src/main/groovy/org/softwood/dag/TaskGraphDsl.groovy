@@ -173,6 +173,22 @@ class TaskGraphDsl {
         return parallel(id, config)
     }
 
+    /**
+     * Create an HTTP task for making REST API calls.
+     * 
+     * Usage:
+     *   httpTask("fetch-user") {
+     *       url "https://api.example.com/users/123"
+     *       method GET
+     *       headers {
+     *           "Accept" "application/json"
+     *       }
+     *   }
+     */
+    ITask httpTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.HTTP, config)
+    }
+
     // ============================================================================
     // Dependency Declaration - Simple Linear Dependencies
     // ============================================================================

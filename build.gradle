@@ -41,6 +41,7 @@ dependencies {
     testImplementation("io.projectreactor:reactor-test:3.8.0")
     testImplementation 'org.awaitility:awaitility:4.3.0'
     testImplementation 'org.spockframework:spock-core:2.4-groovy-5.0'
+    testImplementation 'org.wiremock:wiremock:3.3.1'
 }
 
 //hack to use spock with version 5 groovy till put up on maven

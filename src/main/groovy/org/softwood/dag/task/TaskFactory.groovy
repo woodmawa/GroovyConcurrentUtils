@@ -267,6 +267,19 @@ class TaskFactory {
         return new ParallelGatewayTask(id, name, ctx)
     }
 
+    /**
+     * Create an HttpTask - HTTP/REST API request execution.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new HttpTask instance
+     */
+    static HttpTask createHttpTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating HttpTask: id=$id, name=$name")
+        return new HttpTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
@@ -338,6 +351,9 @@ class TaskFactory {
 
             case TaskType.PARALLEL_GATEWAY:
                 return createParallelGateway(id, name, ctx)
+
+            case TaskType.HTTP:
+                return createHttpTask(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

@@ -172,6 +172,19 @@ class TaskFactory {
         return new CallActivityTask(id, name, ctx)
     }
 
+    /**
+     * Create a LoopTask - iteration over collections task.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new LoopTask instance
+     */
+    static LoopTask createLoopTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating LoopTask: id=$id, name=$name")
+        return new LoopTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Decision Task Creation
     // =========================================================================
@@ -241,6 +254,19 @@ class TaskFactory {
         return new SwitchRouterTask(id, name, ctx)
     }
 
+    /**
+     * Create a ParallelGatewayTask - AND-split/AND-join parallel execution.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new ParallelGatewayTask instance
+     */
+    static ParallelGatewayTask createParallelGateway(String id, String name, TaskContext ctx) {
+        log.debug("Creating ParallelGatewayTask: id=$id, name=$name")
+        return new ParallelGatewayTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
@@ -292,6 +318,9 @@ class TaskFactory {
             case TaskType.CALL_ACTIVITY:
                 return createCallActivityTask(id, name, ctx)
 
+            case TaskType.LOOP:
+                return createLoopTask(id, name, ctx)
+
             case TaskType.CONDITIONAL_FORK:
                 return createConditionalFork(id, name, ctx)
 
@@ -306,6 +335,9 @@ class TaskFactory {
 
             case TaskType.SWITCH_ROUTER:
                 return createSwitchRouter(id, name, ctx)
+
+            case TaskType.PARALLEL_GATEWAY:
+                return createParallelGateway(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

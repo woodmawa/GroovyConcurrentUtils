@@ -138,6 +138,41 @@ class TaskGraphDsl {
         return task(id, TaskType.CALL_ACTIVITY, config)
     }
 
+    /**
+     * Create a loop task for iteration over collections.
+     * 
+     * Usage:
+     *   loop("process-items") {
+     *       over { ctx -> ctx.globals.items }
+     *       action { ctx, item, index -> processItem(item) }
+     *       parallel 10  // Optional
+     *   }
+     */
+    ITask loop(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.LOOP, config)
+    }
+
+    /**
+     * Create a parallel gateway for AND-split/AND-join execution.
+     * 
+     * Usage:
+     *   parallel("fan-out") {
+     *       branches "task1", "task2", "task3"
+     *       waitForAll true
+     *       failFast false
+     *   }
+     */
+    ITask parallel(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.PARALLEL_GATEWAY, config)
+    }
+
+    /**
+     * Alternative name for parallel gateway - more explicit.
+     */
+    ITask parallelGateway(String id, @DelegatesTo(ITask) Closure config) {
+        return parallel(id, config)
+    }
+
     // ============================================================================
     // Dependency Declaration - Simple Linear Dependencies
     // ============================================================================
@@ -175,10 +210,10 @@ class TaskGraphDsl {
             // Multiple dependencies → create implicit join task
             def joinId = "${taskId}-join-" + UUID.randomUUID().toString().substring(0, 8)
             def joinTask = TaskFactory.createTask(TaskType.SERVICE, joinId, joinId, graph.ctx)
-            joinTask.action = { ctx, prevResults -> 
-                // Pass through all results as a list
-                prevResults
-            }
+            joinTask.action({ ctx, prevResults -> 
+                // Pass through all results as a list wrapped in a Promise
+                ctx.promiseFactory.createPromise(prevResults)
+            })
             joinTask.eventDispatcher = new DefaultTaskEventDispatcher(graph)
             graph.addTask(joinTask)
             

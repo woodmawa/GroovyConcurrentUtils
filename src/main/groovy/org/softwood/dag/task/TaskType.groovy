@@ -81,6 +81,12 @@ enum TaskType {
      */
     CALL_ACTIVITY(CallActivityTask, false),
 
+    /**
+     * Loop task for iteration over collections.
+     * Supports sequential/parallel execution, break conditions, and accumulators.
+     */
+    LOOP(LoopTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -115,7 +121,14 @@ enum TaskType {
      * Extracts a value and matches it against registered cases.
      * Exactly one path is selected based on value equality.
      */
-    SWITCH_ROUTER(SwitchRouterTask, true)
+    SWITCH_ROUTER(SwitchRouterTask, true),
+
+    /**
+     * Parallel gateway (AND-split/AND-join) that routes to ALL configured targets.
+     * Waits for all parallel branches to complete before continuing.
+     * BPMN Parallel Gateway equivalent.
+     */
+    PARALLEL_GATEWAY(ParallelGatewayTask, true)
 
     // =========================================================================
     // Enum Properties
@@ -234,6 +247,12 @@ enum TaskType {
             case 'subprocess':
             case 'call':
                 return CALL_ACTIVITY
+            case 'loop':
+            case 'looptask':
+            case 'iterate':
+            case 'foreach':
+            case 'each':
+                return LOOP
             case 'conditional':
             case 'conditionalfork':
             case 'fork':
@@ -254,6 +273,12 @@ enum TaskType {
             case 'switchrouter':
             case 'case':
                 return SWITCH_ROUTER
+            case 'parallel':
+            case 'parallelgateway':
+            case 'and':
+            case 'andgateway':
+            case 'fanout':
+                return PARALLEL_GATEWAY
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

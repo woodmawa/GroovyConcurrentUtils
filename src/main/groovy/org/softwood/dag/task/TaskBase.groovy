@@ -125,6 +125,59 @@ abstract class TaskBase<T> implements ITask<T> {
         this.injectedInput = Optional.ofNullable(data)
     }
 
+    // ----------------------------------------------------
+    // Retry DSL Configuration
+    // ----------------------------------------------------
+    
+    /**
+     * Configure retry behavior using a DSL block.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     retry {
+     *         maxAttempts 5
+     *         initialDelay Duration.ofMillis(100)
+     *         backoffMultiplier 2.0
+     *         circuitBreaker Duration.ofMinutes(5)
+     *     }
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param config DSL configuration closure
+     */
+    void retry(@DelegatesTo(RetryDsl) Closure config) {
+        def dsl = new RetryDsl(this.retryPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Apply a retry preset by name.
+     * 
+     * Available presets:
+     * - "aggressive": 5 attempts, 100ms delay, 2.0x backoff
+     * - "moderate": 3 attempts, 500ms delay, 1.5x backoff
+     * - "conservative": 2 attempts, 1s delay, no backoff
+     * - "none": disable retries
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     retry "aggressive"
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param preset name of the preset (case-insensitive)
+     */
+    void retry(String preset) {
+        def dsl = new RetryDsl(this.retryPolicy)
+        dsl.preset(preset)
+    }
+
 
     // ------------
     // helper method

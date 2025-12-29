@@ -351,7 +351,12 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         // Already complete?
         if (isBound()) {
             if (hasError()) {
-                cf.completeExceptionally(getError())
+                Throwable error = getError()
+                if (error == null) {
+                    // Defensive: if hasError() is true but getError() is null, create a generic error
+                    error = new IllegalStateException("DataflowVariable marked as error but error is null")
+                }
+                cf.completeExceptionally(error)
             } else {
                 try { cf.complete(get()) }
                 catch (Throwable t) { cf.completeExceptionally(t) }
@@ -365,7 +370,10 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         }
 
         whenError { Throwable e ->
-            if (!cf.isDone()) cf.completeExceptionally(e)
+            if (!cf.isDone()) {
+                Throwable error = e ?: new IllegalStateException("Error callback received null error")
+                cf.completeExceptionally(error)
+            }
         }
 
         return cf

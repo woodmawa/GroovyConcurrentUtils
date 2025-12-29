@@ -31,13 +31,13 @@ class HttpRequest {
     
     // Multipart data
     List<MultipartPart> multipartParts = []
+    String multipartBoundary  // Boundary for multipart requests
     
     // Form data
     Map<String, String> formData = [:]
     
     // Cookies
-    boolean useCookies = false
-    Map<String, String> cookies = [:]
+    boolean useCookieJar = false
     
     // Response validation
     Closure<Boolean> statusValidator

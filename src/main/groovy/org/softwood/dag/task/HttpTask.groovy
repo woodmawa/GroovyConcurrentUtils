@@ -3,6 +3,7 @@ package org.softwood.dag.task
 import groovy.json.JsonOutput
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.cookies.CookieJar
 
 import java.net.URI
 import java.net.http.HttpClient
@@ -60,6 +61,7 @@ class HttpTask extends TaskBase<HttpResponse> {
     
     private final HttpRequest request = new HttpRequest()
     private final HttpClient httpClient
+    private CookieJar cookieJar
     
     HttpTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
@@ -192,6 +194,50 @@ class HttpTask extends TaskBase<HttpResponse> {
     }
     
     /**
+     * Configure multipart form data for file uploads.
+     * 
+     * Usage:
+     *   multipart {
+     *       field "userId", "123"
+     *       field "description", "My file"
+     *       file "avatar", "profile.jpg", imageBytes, "image/jpeg"
+     *   }
+     */
+    void multipart(@DelegatesTo(MultipartDsl) Closure config) {
+        def dsl = new MultipartDsl(request.multipartParts)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Enable cookie jar for this request.
+     * Cookies will be persisted across requests in the same graph.
+     * 
+     * Usage:
+     *   cookieJar true
+     */
+    void cookieJar(boolean enable) {
+        request.useCookieJar = enable
+        
+        if (enable) {
+            // Get or create shared cookie jar from context globals
+            if (!ctx.globals.containsKey('_httpCookieJar')) {
+                ctx.globals['_httpCookieJar'] = new CookieJar()
+            }
+            this.cookieJar = ctx.globals['_httpCookieJar'] as CookieJar
+        }
+    }
+    
+    /**
+     * Use a specific cookie jar instance.
+     */
+    void cookieJar(CookieJar jar) {
+        request.useCookieJar = true
+        this.cookieJar = jar
+    }
+    
+    /**
      * Configure authentication.
      * 
      * Usage:
@@ -296,8 +342,29 @@ class HttpTask extends TaskBase<HttpResponse> {
                 builder.header(request.apiKeyHeader, request.apiKey)
             }
             
+            // Add cookies from cookie jar
+            if (cookieJar && request.useCookieJar) {
+                def uri = new URI(request.buildUrl())
+                def cookieHeader = cookieJar.getCookieHeader(
+                    uri.host,
+                    uri.path ?: "/",
+                    uri.scheme == "https"
+                )
+                if (cookieHeader) {
+                    builder.header("Cookie", cookieHeader)
+                    log.debug("HttpTask($id): added cookies: ${cookieHeader}")
+                }
+            }
+            
+            // Handle multipart Content-Type with boundary BEFORE building the body
+            if (request.isMultipart()) {
+                def boundary = "----WebKitFormBoundary${UUID.randomUUID().toString().replace('-', '')}"
+                request.multipartBoundary = boundary
+                builder.header("Content-Type", "multipart/form-data; boundary=${boundary}")
+            }
+            
             // Set Content-Type if not already set
-            if (request.hasBody() && !request.headers.containsKey("Content-Type")) {
+            else if (request.hasBody() && !request.headers.containsKey("Content-Type")) {
                 builder.header("Content-Type", request.getEffectiveContentType())
             }
             
@@ -342,6 +409,16 @@ class HttpTask extends TaskBase<HttpResponse> {
             )
             
             log.debug("HttpTask($id): received response status ${response.statusCode}")
+            
+            // Store cookies from response
+            if (cookieJar && request.useCookieJar) {
+                def setCookieHeaders = javaResponse.headers().allValues("Set-Cookie")
+                if (setCookieHeaders) {
+                    def uri = new URI(request.buildUrl())
+                    cookieJar.addFromSetCookieHeaders(setCookieHeaders, uri.host)
+                    log.debug("HttpTask($id): stored ${setCookieHeaders.size()} cookies")
+                }
+            }
             
             // Validate status if validator provided
             if (request.statusValidator) {
@@ -393,15 +470,62 @@ class HttpTask extends TaskBase<HttpResponse> {
     }
     
     /**
-     * Build multipart body (basic implementation).
-     * Note: Full multipart support would require additional library.
+     * Build multipart body with proper boundary and formatting.
+     * 
+     * Implements RFC 7578 multipart/form-data format:
+     * --boundary\r\n
+     * Content-Disposition: form-data; name="field"\r\n
+     * \r\n
+     * value\r\n
+     * --boundary\r\n
+     * Content-Disposition: form-data; name="file"; filename="image.jpg"\r\n
+     * Content-Type: image/jpeg\r\n
+     * \r\n
+     * <binary data>\r\n
+     * --boundary--\r\n
      */
     private java.net.http.HttpRequest.BodyPublisher buildMultipartBody() {
-        // For now, throw exception - full multipart requires more work
-        throw new UnsupportedOperationException(
-            "Multipart uploads not yet implemented. " +
-            "Use body() with pre-built multipart data or consider using Apache HttpClient."
-        )
+        if (request.multipartParts.isEmpty()) {
+            return BodyPublishers.noBody()
+        }
+        
+        // Use the boundary that was already set in executeHttpRequest
+        def boundary = request.multipartBoundary
+        if (!boundary) {
+            throw new IllegalStateException("Multipart boundary not set")
+        }
+        
+        // Build multipart body
+        def output = new ByteArrayOutputStream()
+        
+        request.multipartParts.each { part ->
+            // Write boundary
+            output.write("--${boundary}\r\n".getBytes('UTF-8'))
+            
+            // Write Content-Disposition header
+            if (part.filename) {
+                output.write("Content-Disposition: form-data; name=\"${part.name}\"; filename=\"${part.filename}\"\r\n".getBytes('UTF-8'))
+            } else {
+                output.write("Content-Disposition: form-data; name=\"${part.name}\"\r\n".getBytes('UTF-8'))
+            }
+            
+            // Write Content-Type header
+            output.write("Content-Type: ${part.contentType}\r\n".getBytes('UTF-8'))
+            
+            // Empty line before content
+            output.write("\r\n".getBytes('UTF-8'))
+            
+            // Write content
+            output.write(part.content)
+            
+            // End of part
+            output.write("\r\n".getBytes('UTF-8'))
+        }
+        
+        // Write final boundary
+        output.write("--${boundary}--\r\n".getBytes('UTF-8'))
+        
+        return BodyPublishers.ofByteArray(output.toByteArray())
     }
     
     // =========================================================================
@@ -495,6 +619,34 @@ class HttpTask extends TaskBase<HttpResponse> {
         void apiKey(String key, String headerName = "X-API-Key") {
             request.apiKey = key
             request.apiKeyHeader = headerName
+        }
+    }
+    
+    class MultipartDsl {
+        private final List<MultipartPart> parts
+        
+        MultipartDsl(List<MultipartPart> parts) {
+            this.parts = parts
+        }
+        
+        /**
+         * Add a text field to the multipart request.
+         * 
+         * Usage:
+         *   field "userId", "123"
+         */
+        void field(String name, String value) {
+            parts.add(MultipartPart.field(name, value))
+        }
+        
+        /**
+         * Add a file to the multipart request.
+         * 
+         * Usage:
+         *   file "avatar", "profile.jpg", imageBytes, "image/jpeg"
+         */
+        void file(String name, String filename, byte[] content, String contentType = "application/octet-stream") {
+            parts.add(MultipartPart.file(name, filename, content, contentType))
         }
     }
 }

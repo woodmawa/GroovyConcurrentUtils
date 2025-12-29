@@ -142,6 +142,59 @@ class Promises {
     }
 
     // -------------------------------------------------------------------------
+    // Convenient aliases for completed promises
+    // -------------------------------------------------------------------------
+
+    /**
+     * Alias for {@link #newPromise(Object)} - creates a completed promise.
+     * This follows the common Java convention (CompletableFuture.completedFuture,
+     * Optional.of, etc.) and is more semantically clear for already-completed values.
+     *
+     * @param value the completed value
+     * @param <T> value type
+     * @return completed Promise
+     */
+    static <T> Promise<T> ofValue(T value) {
+        return newPromise(value)
+    }
+
+    /**
+     * Alias for {@link #newPromise(Object)} - creates a completed promise.
+     * Shorter, more fluent alternative.
+     *
+     * @param value the completed value
+     * @param <T> value type
+     * @return completed Promise
+     */
+    static <T> Promise<T> value(T value) {
+        return newPromise(value)
+    }
+
+    /**
+     * Alias for {@link #newPromise(PromiseImplementation, Object)}.
+     *
+     * @param impl implementation to use
+     * @param value the completed value
+     * @param <T> value type
+     * @return completed Promise
+     */
+    static <T> Promise<T> ofValue(PromiseImplementation impl, T value) {
+        return newPromise(impl, value)
+    }
+
+    /**
+     * Alias for {@link #newPromise(PromiseImplementation, Object)}.
+     *
+     * @param impl implementation to use
+     * @param value the completed value
+     * @param <T> value type
+     * @return completed Promise
+     */
+    static <T> Promise<T> value(PromiseImplementation impl, T value) {
+        return newPromise(impl, value)
+    }
+
+    // -------------------------------------------------------------------------
     // Failed promises
     // -------------------------------------------------------------------------
 

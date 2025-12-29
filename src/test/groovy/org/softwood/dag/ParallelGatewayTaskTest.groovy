@@ -146,7 +146,8 @@ class ParallelGatewayTaskTest {
 
     @Test
     void testMultipleBranches() {
-        def results = []
+        // Use ConcurrentHashMap keySet for thread-safe collection
+        def results = java.util.concurrent.ConcurrentHashMap.newKeySet()
         
         def graph = TaskGraph.build {
             serviceTask("start") {
@@ -164,7 +165,7 @@ class ParallelGatewayTaskTest {
                 serviceTask(taskId) {
                     action { ctx, prev ->
                         ctx.promiseFactory.executeAsync {
-                            results << taskId
+                            results.add(taskId)
                             "result-${taskId}".toString()
                         }
                     }

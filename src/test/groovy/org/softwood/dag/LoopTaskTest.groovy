@@ -484,7 +484,8 @@ class LoopTaskTest {
 
     @Test
     void testRealWorldBatchProcessing() {
-        def processed = []
+        // Use thread-safe collection for concurrent access
+        def processed = java.util.concurrent.ConcurrentHashMap.newKeySet()
         
         def loop = TaskFactory.createLoopTask("batch-process", "Batch Processor", ctx)
         loop.over { ctx ->
@@ -494,7 +495,7 @@ class LoopTaskTest {
         loop.parallel(10)
         loop.action { ctx, item, index ->
             // Simulate processing
-            processed << item.id
+            processed.add(item.id)
             ctx.promiseFactory.executeAsync {
                 [id: item.id, processed: true]
             }

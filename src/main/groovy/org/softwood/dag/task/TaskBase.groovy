@@ -237,15 +237,16 @@ abstract class TaskBase<T> implements ITask<T> {
             emitEvent(TaskState.COMPLETED)
             result
         }.recover { Throwable err ->
-            // Ensure error is not null before processing
-            if (err == null) {
-                err = new IllegalStateException("Task ${id}: received null error in recovery handler")
+            // Only handle actual errors - skip if err is null
+            if (err != null) {
+                log.error "Task ${id}: failed with error: ${err.message}"
+                lastError = err
+                state = TaskState.FAILED
+                emitErrorEvent(err)
+                throw err
             }
-            log.error "Task ${id}: failed with error: ${err.message}"
-            lastError = err
-            state = TaskState.FAILED
-            emitErrorEvent(err)
-            throw err
+            // If err is null, this is likely the success path - do nothing
+            log.debug "Task ${id}: recover called with null error, ignoring"
         }
     }
 

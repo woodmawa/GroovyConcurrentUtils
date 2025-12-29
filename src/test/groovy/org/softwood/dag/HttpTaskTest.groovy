@@ -374,4 +374,278 @@ class HttpTaskTest {
             assertEquals(TaskType.HTTP, type)
         }
     }
+
+    // =========================================================================
+    // Cookie Jar Tests
+    // =========================================================================
+
+    @Test
+    void testCookieJarPersistence() {
+        // Mock login endpoint that returns Set-Cookie header
+        stubFor(post(urlEqualTo("/auth/login"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Set-Cookie", "sessionId=abc123; Path=/; HttpOnly")
+                .withHeader("Set-Cookie", "userId=456; Path=/")
+                .withBody('{"status": "logged in"}')))
+        
+        // Mock protected endpoint that requires cookies
+        stubFor(get(urlEqualTo("/api/profile"))
+            .withHeader("Cookie", containing("sessionId=abc123"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withBody('{"name": "Alice", "email": "alice@example.com"}')))
+        
+        def graph = TaskGraph.build {
+            httpTask("login") {
+                url "http://localhost:8089/auth/login"
+                method HttpMethod.POST
+                cookieJar true
+                formData {
+                    username "alice"
+                    password "secret"
+                }
+            }
+            
+            httpTask("get-profile") {
+                url "http://localhost:8089/api/profile"
+                cookieJar true
+            }
+            
+            chainVia("login", "get-profile")
+        }
+        
+        def result = graph.run().get()
+        
+        assertEquals(200, result.statusCode)
+        assertEquals("Alice", result.json().name)
+    }
+
+    @Test
+    void testCookieJarSharedAcrossRequests() {
+        stubFor(get(urlEqualTo("/set-cookie"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Set-Cookie", "token=xyz789; Path=/")
+                .withBody('{"cookie": "set"}')))
+        
+        stubFor(get(urlEqualTo("/check-cookie"))
+            .withHeader("Cookie", containing("token=xyz789"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withBody('{"cookie": "valid"}')))
+        
+        def graph = TaskGraph.build {
+            httpTask("set") {
+                url "http://localhost:8089/set-cookie"
+                cookieJar true
+            }
+            
+            httpTask("check") {
+                url "http://localhost:8089/check-cookie"
+                cookieJar true
+            }
+            
+            chainVia("set", "check")
+        }
+        
+        def result = graph.run().get()
+        assertEquals("valid", result.json().cookie)
+    }
+
+    @Test
+    void testCookieJarExpiredCookies() {
+        // Cookie with Max-Age=0 should be removed immediately
+        stubFor(get(urlEqualTo("/expire-cookie"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Set-Cookie", "oldToken=expired; Max-Age=0")
+                .withBody('{"status": "expired"}')))
+        
+        stubFor(get(urlEqualTo("/check-cookie"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withBody('{"cookie": "none"}')))
+        
+        def graph = TaskGraph.build {
+            httpTask("expire") {
+                url "http://localhost:8089/expire-cookie"
+                cookieJar true
+            }
+            
+            httpTask("check") {
+                url "http://localhost:8089/check-cookie"
+                cookieJar true
+            }
+            
+            chainVia("expire", "check")
+        }
+        
+        def result = graph.run().get()
+        assertEquals("none", result.json().cookie)
+    }
+
+    // =========================================================================
+    // Multipart File Upload Tests
+    // =========================================================================
+
+    @Test
+    void testMultipartFileUpload() {
+        // Mock file upload endpoint
+        stubFor(post(urlEqualTo("/upload/avatar"))
+            .withHeader("Content-Type", containing("multipart/form-data"))
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withBody('{"fileId": "file-123", "status": "uploaded"}')))
+        
+        def imageBytes = "fake-image-data".getBytes('UTF-8')
+        
+        def graph = TaskGraph.build {
+            httpTask("upload") {
+                url "http://localhost:8089/upload/avatar"
+                method HttpMethod.POST
+                multipart {
+                    field "userId", "123"
+                    field "description", "My profile picture"
+                    file "avatar", "profile.jpg", imageBytes, "image/jpeg"
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        
+        assertEquals(201, result.statusCode)
+        assertEquals("file-123", result.json().fileId)
+        assertEquals("uploaded", result.json().status)
+    }
+
+    @Test
+    void testMultipartWithMultipleFiles() {
+        stubFor(post(urlEqualTo("/upload/documents"))
+            .withHeader("Content-Type", containing("multipart/form-data"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withBody('{"filesUploaded": 2}')))
+        
+        def file1 = "document1-content".getBytes('UTF-8')
+        def file2 = "document2-content".getBytes('UTF-8')
+        
+        def graph = TaskGraph.build {
+            httpTask("upload-docs") {
+                url "http://localhost:8089/upload/documents"
+                method HttpMethod.POST
+                multipart {
+                    field "category", "reports"
+                    file "doc1", "report1.pdf", file1, "application/pdf"
+                    file "doc2", "report2.pdf", file2, "application/pdf"
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        assertEquals(2, result.json().filesUploaded)
+    }
+
+    @Test
+    void testMultipartTextFieldsOnly() {
+        stubFor(post(urlEqualTo("/form/submit"))
+            .withHeader("Content-Type", containing("multipart/form-data"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withBody('{"status": "received"}')))
+        
+        def graph = TaskGraph.build {
+            httpTask("submit") {
+                url "http://localhost:8089/form/submit"
+                method HttpMethod.POST
+                multipart {
+                    field "name", "Alice"
+                    field "email", "alice@example.com"
+                    field "message", "Hello from multipart!"
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        assertEquals("received", result.json().status)
+    }
+
+    @Test
+    void testMultipartWithAuth() {
+        stubFor(post(urlEqualTo("/secure/upload"))
+            .withHeader("Authorization", equalTo("Bearer token-123"))
+            .withHeader("Content-Type", containing("multipart/form-data"))
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withBody('{"uploaded": true}')))
+        
+        def fileData = "secure-file-content".getBytes('UTF-8')
+        
+        def graph = TaskGraph.build {
+            httpTask("secure-upload") {
+                url "http://localhost:8089/secure/upload"
+                method HttpMethod.POST
+                auth {
+                    bearer "token-123"
+                }
+                multipart {
+                    file "document", "secure.txt", fileData, "text/plain"
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        assertTrue(result.json().uploaded)
+    }
+
+    // =========================================================================
+    // Combined Cookie + Multipart Tests
+    // =========================================================================
+
+    @Test
+    void testCookieAndMultipartTogether() {
+        // Login to get session cookie
+        stubFor(post(urlEqualTo("/auth/login"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Set-Cookie", "session=secure123; Path=/; HttpOnly")
+                .withBody('{"authenticated": true}')))
+        
+        // Upload with session cookie
+        stubFor(post(urlEqualTo("/secure/upload"))
+            .withHeader("Cookie", containing("session=secure123"))
+            .withHeader("Content-Type", containing("multipart/form-data"))
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withBody('{"fileId": "uploaded-456"}')))
+        
+        def fileBytes = "my-file-data".getBytes('UTF-8')
+        
+        def graph = TaskGraph.build {
+            httpTask("login") {
+                url "http://localhost:8089/auth/login"
+                method HttpMethod.POST
+                cookieJar true
+                formData {
+                    username "alice"
+                    password "secret"
+                }
+            }
+            
+            httpTask("upload") {
+                url "http://localhost:8089/secure/upload"
+                method HttpMethod.POST
+                cookieJar true
+                multipart {
+                    field "userId", "123"
+                    file "data", "myfile.txt", fileBytes, "text/plain"
+                }
+            }
+            
+            chainVia("login", "upload")
+        }
+        
+        def result = graph.run().get()
+        assertEquals("uploaded-456", result.json().fileId)
+    }
 }

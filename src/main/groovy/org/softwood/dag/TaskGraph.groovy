@@ -23,6 +23,9 @@ class TaskGraph {
     private Promise graphCompletionPromise = null
     private int completedTaskCount = 0
     private int totalTaskCount = 0
+    
+    /** Reuse guard - ensures graph can only be started once */
+    private volatile boolean hasStarted = false
 
     // --------------------------------------------------------------------
     // STATIC BUILDER METHOD
@@ -45,6 +48,36 @@ class TaskGraph {
         dsl.wireDeferred()
 
         return graph
+    }
+    
+    /**
+     * Static factory method to define a reusable TaskGraph structure.
+     * Creates a TaskGraphFactory that can generate multiple isolated graph instances.
+     * 
+     * <p>Use this when you need to execute the same graph structure multiple times
+     * with complete isolation (e.g., batch processing, retries, concurrent execution).</p>
+     * 
+     * <h3>Usage:</h3>
+     * <pre>
+     * def factory = TaskGraph.factory {
+     *     httpTask("fetch") { url "https://api.example.com/data" }
+     *     httpTask("process") { 
+     *         dependsOn "fetch"
+     *         action { ctx, data -> processData(data) }
+     *     }
+     * }
+     * 
+     * // Create isolated instances
+     * def result1 = factory.create().start().get()
+     * def result2 = factory.create().start().get()
+     * </pre>
+     * 
+     * @param dslClosure DSL closure defining the graph structure
+     * @return TaskGraphFactory that creates isolated instances
+     * @see TaskGraphFactory
+     */
+    static TaskGraphFactory factory(@DelegatesTo(TaskGraphDsl) Closure dslClosure) {
+        return TaskGraphFactory.define(dslClosure)
     }
 
     /**
@@ -99,10 +132,26 @@ class TaskGraph {
     // --------------------------------------------------------------------
 
     /**
-     * Start graph execution by scheduling all root tasks
-     * Returns a promise that resolves with terminal task results when ALL tasks complete
+     * Start graph execution by scheduling all root tasks.
+     * Returns a promise that resolves with terminal task results when ALL tasks complete.
+     * 
+     * <p><b>Important:</b> Each TaskGraph instance can only be started once.
+     * For reusable graph definitions, use {@link TaskGraphFactory}.</p>
+     * 
+     * @return Promise that completes when all tasks finish
+     * @throws IllegalStateException if this graph has already been started
      */
     Promise<?> start() {
+        // Guard against reuse
+        if (hasStarted) {
+            throw new IllegalStateException(
+                "TaskGraph has already been started and cannot be reused. " +
+                "Each graph instance is single-use. For reusable graph definitions, " +
+                "use TaskGraphFactory.define { ... }.create() to create fresh instances."
+            )
+        }
+        hasStarted = true
+        
         finalizeWiring()
 
         // Initialize completion tracking

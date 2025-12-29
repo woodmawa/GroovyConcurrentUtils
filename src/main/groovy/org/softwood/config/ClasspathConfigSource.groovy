@@ -1,6 +1,7 @@
 package org.softwood.config
 
 import groovy.transform.CompileStatic
+import org.softwood.config.cache.ConfigCache
 
 @CompileStatic
 class ClasspathConfigSource {
@@ -72,8 +73,13 @@ class ClasspathConfigSource {
 
             if (is == null) continue
 
-            Map<String, Object> parsed =
-                    ParserSupport.parse(is, path, profile)
+            // Use ConfigCache to avoid re-parsing unchanged resources
+            Map<String, Object> parsed = ConfigCache.getOrParse(path) {
+                // Parse only if not cached
+                InputStream fresh = ClasspathConfigSource.class.getResourceAsStream(path)
+                if (fresh == null) return [:]
+                return ParserSupport.parse(fresh, path, profile)
+            }
 
             if (!parsed.isEmpty()) {
                 out.add(new NamedMap("classpath:" + path, parsed))

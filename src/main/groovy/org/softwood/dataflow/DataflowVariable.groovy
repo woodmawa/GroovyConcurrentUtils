@@ -5,12 +5,13 @@ import groovy.transform.CompileDynamic
 import groovy.transform.ToString
 import groovy.util.logging.Slf4j
 import org.codehaus.groovy.runtime.InvokerHelper
-import org.softwood.pool.ConcurrentPool
 import org.softwood.pool.ExecutorPool
 import org.softwood.gstream.Gstream
+import org.softwood.promise.core.PromisePoolContext
 
 import java.time.Duration
 import java.util.Optional
+import java.util.concurrent.Callable
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -19,7 +20,6 @@ import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 import java.util.function.Function
 import java.util.function.Supplier
-import org.softwood.promise.core.PromisePoolContext
 
 /**
  * A {@code DataflowVariable} is a specialised {@link DataflowExpression} that behaves similarly to a
@@ -67,7 +67,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     // Constructors
     // =====================================================================================================
 
-    /** Construct using a default {@link ConcurrentPool}. */
+    /** Construct using a default {@link org.softwood.pool.ConcurrentPool}. */
     DataflowVariable() {
         super(PromisePoolContext.getCurrentPool())
     }
@@ -232,7 +232,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @param callable the task to execute
      * @return this DataflowVariable for fluent chaining
      */
-    DataflowVariable<T> task(java.util.concurrent.Callable<T> callable) {
+    DataflowVariable<T> task(Callable<T> callable) {
         pool.executor.submit {
             try {
                 T result = callable.call()
@@ -260,7 +260,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @param supplier the task to execute
      * @return this DataflowVariable for fluent chaining
      */
-    DataflowVariable<T> task(java.util.function.Supplier<T> supplier) {
+    DataflowVariable<T> task(Supplier<T> supplier) {
         pool.executor.submit {
             try {
                 T result = supplier.get()
@@ -296,7 +296,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return map containing state, listener count, and completion details
      */
     Map<String, Object> getMetrics() {
-        return [
+        return ([
             type: type?.simpleName ?: 'Unknown',
             bound: isBound(),
             success: isSuccess(),
@@ -305,7 +305,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
             errorMessage: getError()?.message,
             errorType: getError()?.class?.simpleName,
             poolName: pool.name
-        ]
+        ] as Map<String, Object>)
     }
 
 
@@ -408,15 +408,15 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     Gstream<T> toGstream() {
         if (hasError()) {
             log.debug("toGstream: DFV has error, returning empty stream (error: {})", error?.message)
-            return Gstream.empty()
+            return (Gstream<T>) Gstream.empty()
         }
 
         try {
             T value = get()
-            return value != null ? Gstream.of(value) : Gstream.empty()
+            return value != null ? (Gstream<T>) Gstream.of(value) : (Gstream<T>) Gstream.empty()
         } catch (Exception e) {
             log.warn("toGstream: Failed to get value, returning empty stream", e)
-            return Gstream.empty()
+            return (Gstream<T>) Gstream.empty()
         }
     }
 

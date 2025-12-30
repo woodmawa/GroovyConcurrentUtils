@@ -10,6 +10,9 @@ import java.nio.file.Paths
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -40,6 +43,9 @@ class EclipseStoreManager implements AutoCloseable {
     private GraphStateSnapshot snapshot
     private Path snapshotFile
     private boolean closed = false
+    
+    // Track pending async persistence operations
+    private final AtomicInteger pendingAsyncOps = new AtomicInteger(0)
     
     // Thread-local registry to prevent interference between concurrent runs
     private static final ThreadLocal<EclipseStoreManager> THREAD_LOCAL = new ThreadLocal<>()
@@ -179,6 +185,7 @@ class EclipseStoreManager implements AutoCloseable {
      * Asynchronously persist the snapshot to avoid blocking task execution
      */
     private void persistAsync() {
+        pendingAsyncOps.incrementAndGet()
         // Use a virtual thread to avoid blocking
         Thread.startVirtualThread {
             try {
@@ -188,7 +195,29 @@ class EclipseStoreManager implements AutoCloseable {
                 log.trace "Async persistence completed"
             } catch (Exception e) {
                 log.warn "Async persistence failed", e
+            } finally {
+                pendingAsyncOps.decrementAndGet()
             }
+        }
+    }
+    
+    /**
+     * Wait for all pending async persistence operations to complete
+     */
+    private void waitForPendingPersistence(long timeoutMillis = 5000) {
+        long deadline = System.currentTimeMillis() + timeoutMillis
+        while (pendingAsyncOps.get() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10)
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        
+        int remaining = pendingAsyncOps.get()
+        if (remaining > 0) {
+            log.warn "Timed out waiting for ${remaining} pending persistence operations"
         }
     }
     
@@ -220,6 +249,9 @@ class EclipseStoreManager implements AutoCloseable {
         if (closed) return
         
         try {
+            // Wait for all pending async persistence to complete
+            waitForPendingPersistence()
+            
             snapshot.endTime = Instant.now()
             snapshot.finalStatus = GraphExecutionStatus.COMPLETED
             
@@ -242,6 +274,9 @@ class EclipseStoreManager implements AutoCloseable {
         if (closed) return
         
         try {
+            // Wait for all pending async persistence to complete
+            waitForPendingPersistence()
+            
             snapshot.endTime = Instant.now()
             snapshot.finalStatus = GraphExecutionStatus.FAILED
             snapshot.failureTaskId = failedTaskId

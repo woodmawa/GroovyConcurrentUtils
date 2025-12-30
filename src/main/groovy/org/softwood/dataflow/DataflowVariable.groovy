@@ -352,9 +352,11 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         if (isBound()) {
             if (hasError()) {
                 Throwable error = getError()
+                // getError() now returns a defensive error if null, so this should never be null
+                // but keep the check for extra safety
                 if (error == null) {
-                    // Defensive: if hasError() is true but getError() is null, create a generic error
-                    error = new IllegalStateException("DataflowVariable marked as error but error is null")
+                    log.error("CRITICAL: hasError()=true but getError()=null even after defensive check!")
+                    error = new IllegalStateException("DataflowVariable marked as error but error is null (defensive check failed)")
                 }
                 cf.completeExceptionally(error)
             } else {

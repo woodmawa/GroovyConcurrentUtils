@@ -207,10 +207,10 @@ class DataflowExpression<T> {
      * @throws IllegalStateException if the expression has already been completed
      */
     void setError(Throwable t) {
-        // Defensive: if error is null, create a generic error
+        // Defensive: if error is null, create a generic error and log the call stack
         if (t == null) {
             t = new IllegalStateException("Error value is null")
-            log.warn("setError called with null - creating generic error")
+            log.warn("setError called with null - creating generic error. Call stack:", new Exception("Stack trace"))
         }
         
         completionLock.lock()
@@ -285,7 +285,13 @@ class DataflowExpression<T> {
      * if it completed successfully
      */
     Throwable getError() {
-        error
+        // DEFENSIVE: If state indicates error but error field is null,
+        // create a generic error to prevent null propagation
+        if (hasError() && error == null) {
+            log.warn("getError() called with hasError()=true but error=null - creating defensive error")
+            return new IllegalStateException("Error state detected but error value is null (possible race condition)")
+        }
+        return error
     }
 
     /**

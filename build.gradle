@@ -17,9 +17,11 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
     implementation "org.yaml:snakeyaml:2.5"
-    //two serialisers
-    implementation "one.microstream:microstream-configuration:08.01.02-MS-GA"
-    implementation 'org.msgpack:msgpack-core:0.9.10'  //will be our default
+    //two serialisers - EclipseStore (successor to MicroStream, Java 25 compatible)
+    implementation "org.eclipse.store:storage-embedded:3.1.0"
+    implementation "org.eclipse.store:storage-embedded-configuration:3.1.0"
+    implementation "org.eclipse.serializer:serializer:2.0.0"  // EclipseStore binary serializer
+    implementation 'org.msgpack:msgpack-core:0.9.10'  //msgpack serializer
 
     implementation 'io.vertx:vertx-core:5.0.5'
     implementation 'io.projectreactor:reactor-core:3.8.0'

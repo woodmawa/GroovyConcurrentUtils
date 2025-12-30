@@ -1,5 +1,7 @@
 package org.softwood.dag
 
+import org.softwood.dag.persistence.PersistenceConfig
+import org.softwood.dag.persistence.PersistenceConfigDsl
 import org.softwood.dag.task.DefaultTaskEventDispatcher
 import org.softwood.dag.task.TaskFactory
 import org.softwood.dag.task.TaskType
@@ -305,6 +307,17 @@ class TaskGraphDsl {
         body.delegate = graph.ctx.globals
         body.resolveStrategy = Closure.DELEGATE_FIRST
         body.call()
+    }
+    
+    // ----------------------------------------------------
+    // Persistence block → configure persistence settings
+    // ----------------------------------------------------
+    def persistence(@DelegatesTo(PersistenceConfigDsl) Closure body) {
+        def dsl = new PersistenceConfigDsl()
+        body.delegate = dsl
+        body.resolveStrategy = Closure.DELEGATE_FIRST
+        body.call()
+        graph.persistenceConfig = dsl.build()
     }
     
     // ----------------------------------------------------

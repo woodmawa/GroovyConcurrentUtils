@@ -79,3 +79,10 @@ secrets/
 *.sqlite
 *.h2.db
 
+# TaskGraph State Snapshots
+*.gsm
+*.gsm.gz
+graphState/
+**/graphState/
+build/test-snapshots/
+

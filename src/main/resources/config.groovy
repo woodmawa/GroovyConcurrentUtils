@@ -59,6 +59,20 @@ database {
 //one of "DATAFLOW" | "VERTX" | "COMPLETABLE_FUTURE"
 promises.defaultImplementation = "DATAFLOW"
 
+// TaskGraph Persistence Configuration
+taskgraph {
+    persistence {
+        enabled = false
+        baseDir = 'graphState'
+        snapshotOn = 'failure'  // Options: 'always', 'failure', 'never'
+        compression = false
+        retentionPolicy {
+            maxSnapshots = 2
+            maxRetries = 2
+        }
+    }
+}
+
 // Profile-specific overrides
 environments {
     dev {
@@ -70,6 +84,13 @@ environments {
         }
         logging {
             level = 'DEBUG'
+        }
+        taskgraph {
+            persistence {
+                enabled = false
+                baseDir = 'src/test/resources'
+                snapshotOn = 'always'
+            }
         }
     }
 
@@ -85,6 +106,13 @@ environments {
             url = 'jdbc:h2:mem:testdb'
             username = 'test'
             password = 'test123'
+        }
+        taskgraph {
+            persistence {
+                enabled = false
+                baseDir = 'build/test-snapshots'
+                snapshotOn = 'always'
+            }
         }
     }
 

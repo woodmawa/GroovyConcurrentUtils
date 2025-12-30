@@ -203,11 +203,16 @@ class DataflowExpression<T> {
      * <p>Listeners are still invoked on error; they receive {@code null} and may inspect
      * {@link #hasError()} / {@link #getError()}.</p>
      *
-     * @param t error to record (must not be {@code null})
+     * @param t error to record (if null, a generic IllegalStateException is created)
      * @throws IllegalStateException if the expression has already been completed
      */
     void setError(Throwable t) {
-        if (t == null) throw new IllegalArgumentException("Error must not be null")
+        // Defensive: if error is null, create a generic error
+        if (t == null) {
+            t = new IllegalStateException("Error value is null")
+            log.warn("setError called with null - creating generic error")
+        }
+        
         completionLock.lock()
         try {
             if (state.get() != State.PENDING) {

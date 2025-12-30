@@ -51,3 +51,14 @@ logging:
 # Monitoring
 monitoring:
   enabled: false
+
+# TaskGraph Persistence
+taskgraph:
+  persistence:
+    enabled: false
+    baseDir: "graphState"
+    snapshotOn: "failure"  # Options: always, failure, never
+    compression: false
+    retentionPolicy:
+      maxSnapshots: 2
+      maxRetries: 2

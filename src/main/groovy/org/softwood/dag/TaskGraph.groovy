@@ -1,6 +1,9 @@
 package org.softwood.dag
 
 import groovy.util.logging.Slf4j
+import org.softwood.dag.persistence.EclipseStoreManager
+import org.softwood.dag.persistence.PersistenceConfig
+import org.softwood.dag.persistence.TaskState as PersistenceTaskState
 import org.softwood.dag.task.*
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
@@ -19,6 +22,12 @@ class TaskGraph {
     /** Task execution context */
     TaskContext ctx
 
+    /** Persistence configuration (optional) */
+    PersistenceConfig persistenceConfig
+    
+    /** Persistence manager (created per run) */
+    private EclipseStoreManager persistenceManager
+
     /** Graph completion tracking */
     private Promise graphCompletionPromise = null
     private int completedTaskCount = 0
@@ -26,6 +35,9 @@ class TaskGraph {
     
     /** Reuse guard - ensures graph can only be started once */
     private volatile boolean hasStarted = false
+    
+    /** Unique run ID (generated per execution) */
+    private String runId
 
     // --------------------------------------------------------------------
     // STATIC BUILDER METHOD
@@ -115,9 +127,24 @@ class TaskGraph {
 
         log.debug "finalizeWiring: processing ${routers.size()} forks"
 
+        // Wire successors based on predecessors
+        // If task2 has task1 as predecessor, then task1 should have task2 as successor
+        tasks.values().each { t ->
+            t.predecessors.each { predId ->
+                ITask pred = tasks[predId]
+                if (pred && !pred.successors.contains(t.id)) {
+                    pred.successors << t.id
+                }
+            }
+        }
+        
+        // Also wire predecessors based on successors (for router tasks)
         tasks.values().each { t ->
             t.successors.each { succId ->
-                tasks[succId]?.predecessors << t.id
+                ITask succ = tasks[succId]
+                if (succ && !succ.predecessors.contains(t.id)) {
+                    succ.predecessors << t.id
+                }
             }
         }
 
@@ -154,6 +181,12 @@ class TaskGraph {
         
         finalizeWiring()
 
+        // Generate unique run ID
+        runId = UUID.randomUUID().toString()
+        
+        // Initialize persistence if enabled
+        initializePersistence()
+
         // Initialize completion tracking
         totalTaskCount = tasks.size()
         completedTaskCount = 0
@@ -165,6 +198,87 @@ class TaskGraph {
         roots.each { schedule(it) }
 
         return graphCompletionPromise
+    }
+
+    // --------------------------------------------------------------------
+    // PERSISTENCE INTEGRATION
+    // --------------------------------------------------------------------
+    
+    /**
+     * Initialize persistence manager if enabled (using EclipseStore)
+     */
+    private void initializePersistence() {
+        if (persistenceConfig == null || !persistenceConfig.enabled) {
+            log.debug "Persistence is disabled"
+            return
+        }
+        
+        try {
+            // Determine graph ID from context or generate one
+            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+            
+            persistenceManager = new EclipseStoreManager(
+                graphId,
+                runId,
+                persistenceConfig.baseDir,
+                persistenceConfig.compression,
+                persistenceConfig.maxSnapshots
+            )
+            
+            log.info "Persistence enabled (EclipseStore): graphId=$graphId, runId=$runId"
+            
+        } catch (Exception e) {
+            log.error "Failed to initialize persistence, continuing without it", e
+            persistenceManager = null
+        }
+    }
+    
+    /**
+     * Update task state in persistence
+     */
+    private void persistTaskStateChange(String taskId, PersistenceTaskState state, Map data = [:]) {
+        if (persistenceManager == null) return
+        
+        try {
+            persistenceManager.updateTaskState(taskId, state, data)
+        } catch (Exception e) {
+            log.warn "Failed to persist task state for $taskId", e
+        }
+    }
+    
+    /**
+     * Finalize persistence on graph completion
+     */
+    private void finalizePersistence(boolean graphFailed, String failedTaskId = null, Throwable error = null) {
+        if (persistenceManager == null) return
+        
+        // Check if we should snapshot based on mode
+        if (!persistenceConfig.shouldSnapshot(graphFailed)) {
+            log.debug "Skipping snapshot (mode=${persistenceConfig.snapshotOn}, failed=$graphFailed)"
+            persistenceManager.closeWithoutStoring()  // Close without persisting
+            persistenceManager = null
+            return
+        }
+        
+        try {
+            // Update context globals
+            persistenceManager.updateContextGlobals(ctx.globals)
+            
+            // Mark graph completion status
+            if (graphFailed) {
+                persistenceManager.markGraphFailed(failedTaskId, error)
+            } else {
+                persistenceManager.markGraphCompleted()
+            }
+            
+            // Close and cleanup
+            persistenceManager.close()
+            
+        } catch (Exception e) {
+            log.error "Error finalizing persistence", e
+        } finally {
+            persistenceManager = null
+        }
     }
 
     /**
@@ -187,6 +301,10 @@ class TaskGraph {
                     // If any task failed, fail the graph promise with the first error
                     def firstFailure = failedTasks[0]
                     log.error "Graph execution failed due to task ${firstFailure.id}: ${firstFailure.error}"
+                    
+                    // Finalize persistence with failure info
+                    finalizePersistence(true, firstFailure.id, firstFailure.error)
+                    
                     graphCompletionPromise.fail(firstFailure.error)
                 } else {
                     // All tasks completed successfully - collect results
@@ -195,6 +313,9 @@ class TaskGraph {
                         .collect { it.completionPromise?.get() }
                         .findAll { it != null }
 
+                    // Finalize persistence with success
+                    finalizePersistence(false)
+                    
                     // Resolve the graph completion promise
                     def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
                     graphCompletionPromise.accept(result)
@@ -217,10 +338,17 @@ class TaskGraph {
         }
 
         t.markScheduled()
+        
+        // Persist SCHEDULED state
+        persistTaskStateChange(t.id, PersistenceTaskState.SCHEDULED, [name: t.name ?: t.id])
 
         log.debug "schedule(): execute ${t.id}"
 
         Promise<?> prevPromise = t.buildPrevPromise(tasks)
+        
+        // Persist RUNNING state
+        persistTaskStateChange(t.id, PersistenceTaskState.RUNNING, [:])
+        
         Promise<?> execPromise = t.execute(prevPromise)
 
         // -------------------------
@@ -229,6 +357,9 @@ class TaskGraph {
         execPromise.onComplete { result ->
             log.debug "Task ${t.id} completed with result: $result"
             t.markCompleted()
+            
+            // Persist COMPLETED state
+            persistTaskStateChange(t.id, PersistenceTaskState.COMPLETED, [result: result])
 
             if (!(t instanceof RouterTask)) {
                 scheduleNormalSuccessors(t)
@@ -244,6 +375,12 @@ class TaskGraph {
         execPromise.onError { error ->
             log.error "Task ${t.id} failed: $error"
             t.markFailed(error)
+            
+            // Persist FAILED state
+            persistTaskStateChange(t.id, PersistenceTaskState.FAILED, [
+                errorMessage: error.message,
+                errorStackTrace: stackTraceToString(error)
+            ])
             
             // CRITICAL: When a task fails, mark all downstream tasks as skipped
             // so the graph can complete
@@ -286,6 +423,10 @@ class TaskGraph {
             allTargets.each { tid ->
                 if (!chosen.contains(tid)) {
                     tasks[tid]?.markSkipped()
+                    
+                    // Persist SKIPPED state
+                    persistTaskStateChange(tid, PersistenceTaskState.SKIPPED, [:])
+                    
                     // Check completion after marking tasks as skipped
                     checkGraphCompletion()
                 }
@@ -335,6 +476,17 @@ class TaskGraph {
     // --------------------------------------------------------------------
 
     /**
+     * Convert throwable to string for persistence
+     */
+    private static String stackTraceToString(Throwable error) {
+        if (error == null) return null
+        
+        StringWriter sw = new StringWriter()
+        error.printStackTrace(new PrintWriter(sw))
+        return sw.toString()
+    }
+    
+    /**
      * When a task fails, recursively mark all downstream (successor) tasks as skipped
      * This ensures the graph can reach completion even when a task fails
      */
@@ -354,6 +506,10 @@ class TaskGraph {
             ITask task = tasks[taskId]
             if (task && !task.hasStarted) {
                 task.markSkipped()
+                
+                // Persist SKIPPED state
+                persistTaskStateChange(taskId, PersistenceTaskState.SKIPPED, [:])
+                
                 log.debug "Marked task ${taskId} as SKIPPED due to upstream failure"
                 
                 // Add its successors to the queue

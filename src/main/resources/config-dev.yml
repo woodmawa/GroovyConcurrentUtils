@@ -43,3 +43,14 @@ security:
 # Logging
 logging:
   level: DEBUG
+
+# TaskGraph Persistence (for testing)
+taskgraph:
+  persistence:
+    enabled: false  # Enable explicitly in tests
+    baseDir: "src/test/resources"
+    snapshotOn: "always"  # Snapshot every run in dev
+    compression: false
+    retentionPolicy:
+      maxSnapshots: 2
+      maxRetries: 2

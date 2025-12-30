@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test
 import static org.junit.jupiter.api.Assertions.*
 
 /**
- * Tests for MicroStream serializer.
+ * Tests for binary message serializer.
  */
 @CompileDynamic
 class MicroStreamSerializerTest {
@@ -15,12 +15,12 @@ class MicroStreamSerializerTest {
     
     @Test
     void test_serialize_deserialize_string() {
-        def original = "Hello, MicroStream!"
+        def original = "Hello, Serialization!"
         def bytes = serializer.serialize(original)
         def result = serializer.deserialize(bytes)
         
         assertEquals(original, result)
-        assertTrue(bytes.length > 0, "MicroStream should produce bytes")
+        assertTrue(bytes.length > 0, "Should produce bytes")
     }
     
     @Test
@@ -112,7 +112,7 @@ class MicroStreamSerializerTest {
     }
     
     @Test
-    void test_microstream_size_comparison() {
+    void test_size_comparison() {
         def data = [
             message: "This is a test message",
             numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -123,8 +123,8 @@ class MicroStreamSerializerTest {
             ]
         ]
         
-        // MicroStream
-        def microstreamBytes = serializer.serialize(data)
+        // Binary serialization
+        def binaryBytes = serializer.serialize(data)
         
         // JSON (for comparison)
         def jsonSerializer = new JsonSerializer()
@@ -134,18 +134,17 @@ class MicroStreamSerializerTest {
         def msgpackSerializer = new MessagePackSerializer()
         def msgpackBytes = msgpackSerializer.serialize(data)
         
-        println "MicroStream size: ${microstreamBytes.length} bytes"
+        println "Binary serialization size: ${binaryBytes.length} bytes"
         println "MessagePack size: ${msgpackBytes.length} bytes"
         println "JSON size: ${jsonBytes.length} bytes"
         
-        // MicroStream (Java serialization) is typically larger than MessagePack
-        // but still binary and type-safe
-        assertTrue(microstreamBytes.length > 0, "MicroStream should produce bytes")
+        // Binary is more compact than JSON
+        assertTrue(binaryBytes.length > 0, "Should produce bytes")
     }
     
     @Test
     void test_content_type() {
-        assertEquals('application/microstream', serializer.contentType())
+        assertEquals('application/java-serialization', serializer.contentType())
     }
     
     @Test
@@ -196,7 +195,7 @@ class MicroStreamSerializerTest {
     
     @Test
     void test_preserves_type_information() {
-        // MicroStream/Java serialization preserves exact types
+        // Java serialization preserves exact types
         def original = new SerializablePerson(name: "Dave", age: 40, tags: ["admin"])
         
         def bytes = serializer.serialize(original)

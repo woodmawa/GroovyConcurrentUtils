@@ -4,29 +4,35 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 
 /**
- * Binary message serializer using Java serialization.
+ * Binary message serializer using Java's native serialization.
  * 
  * <p>Simple, reliable binary serialization. Works with any Serializable object.
- * Named MicroStreamSerializer for backward compatibility.</p>
+ * This is a fallback option - MessagePackSerializer is recommended for better performance.</p>
  * 
  * <h2>Characteristics</h2>
  * <ul>
- *   <li>Binary format (compact)</li>
+ *   <li>Binary format</li>
  *   <li>Type-safe</li>
  *   <li>Supports complex object graphs</li>
  *   <li>JVM-only (not cross-language)</li>
  *   <li>Requires Serializable interface</li>
+ *   <li>Slower than MessagePack</li>
  * </ul>
  * 
- * <h2>Note</h2>
- * <p>This implementation uses Java serialization.
- * For higher performance, consider using MessagePackSerializer instead.</p>
+ * <h2>Use Cases</h2>
+ * <ul>
+ *   <li>Fallback when MessagePack isn't available</li>
+ *   <li>Testing and debugging</li>
+ *   <li>Serializing complex Java objects with custom serialization logic</li>
+ * </ul>
+ * 
+ * <p><strong>Note:</strong> For production remote actor messaging, use MessagePackSerializer instead.</p>
  * 
  * @since 2.0.0
  */
 @Slf4j
 @CompileStatic
-class MicroStreamSerializer implements MessageSerializer {
+class JavaSerializer implements MessageSerializer {
     
     @Override
     byte[] serialize(Object obj) throws SerializationException {
@@ -41,7 +47,7 @@ class MicroStreamSerializer implements MessageSerializer {
             return baos.toByteArray()
             
         } catch (Exception e) {
-            throw new SerializationException("Failed to serialize", e)
+            throw new SerializationException("Failed to serialize with Java serialization", e)
         }
     }
     
@@ -57,7 +63,7 @@ class MicroStreamSerializer implements MessageSerializer {
             return obj
             
         } catch (Exception e) {
-            throw new SerializationException("Failed to deserialize", e)
+            throw new SerializationException("Failed to deserialize with Java serialization", e)
         }
     }
     

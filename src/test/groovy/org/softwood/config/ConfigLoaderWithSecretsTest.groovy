@@ -3,6 +3,7 @@ package org.softwood.config
 import groovy.transform.CompileDynamic
 import org.junit.jupiter.api.Test
 import org.softwood.actor.remote.security.SecretsResolver
+import org.softwood.config.cache.ConfigCache
 
 import static org.junit.jupiter.api.Assertions.*
 
@@ -18,6 +19,10 @@ class ConfigLoaderWithSecretsTest {
         System.setProperty('TLS_KEYSTORE_PASSWORD', 'test-password-from-env')
         
         try {
+            // CRITICAL: Clear the config cache so it re-parses config.groovy
+            // with the new system property value
+            ConfigCache.clear()
+            
             // Load config (which uses SecretsResolver)
             def config = ConfigLoader.loadConfig()
             
@@ -32,6 +37,8 @@ class ConfigLoaderWithSecretsTest {
             
         } finally {
             System.clearProperty('TLS_KEYSTORE_PASSWORD')
+            // Clear cache again for other tests
+            ConfigCache.clear()
         }
     }
     
@@ -39,6 +46,9 @@ class ConfigLoaderWithSecretsTest {
     void test_config_loader_uses_default_when_secret_missing() {
         // Don't set any secret
         System.clearProperty('TLS_KEYSTORE_PASSWORD')
+        
+        // Clear cache to ensure fresh parse
+        ConfigCache.clear()
         
         // Load config
         def config = ConfigLoader.loadConfig()
@@ -51,5 +61,22 @@ class ConfigLoaderWithSecretsTest {
         
         // Should use default 'changeit'
         assertEquals('changeit', password)
+    }
+    
+    @Test
+    void test_secrets_resolver_directly() {
+        // Test the SecretsResolver directly (bypassing config loading)
+        System.setProperty('TEST_SECRET', 'secret-value')
+        
+        try {
+            def value = SecretsResolver.resolve('TEST_SECRET')
+            assertEquals('secret-value', value)
+            
+            def withDefault = SecretsResolver.resolve('MISSING_SECRET', 'default')
+            assertEquals('default', withDefault)
+            
+        } finally {
+            System.clearProperty('TEST_SECRET')
+        }
     }
 }

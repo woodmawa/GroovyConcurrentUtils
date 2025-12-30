@@ -6,16 +6,16 @@ import org.junit.jupiter.api.Test
 import static org.junit.jupiter.api.Assertions.*
 
 /**
- * Tests for binary message serializer.
+ * Tests for Java binary message serializer.
  */
 @CompileDynamic
-class MicroStreamSerializerTest {
+class JavaSerializerTest {
     
-    private final MicroStreamSerializer serializer = new MicroStreamSerializer()
+    private final JavaSerializer serializer = new JavaSerializer()
     
     @Test
     void test_serialize_deserialize_string() {
-        def original = "Hello, Serialization!"
+        def original = "Hello, Java Serialization!"
         def bytes = serializer.serialize(original)
         def result = serializer.deserialize(bytes)
         
@@ -123,8 +123,8 @@ class MicroStreamSerializerTest {
             ]
         ]
         
-        // Binary serialization
-        def binaryBytes = serializer.serialize(data)
+        // Java serialization
+        def javaBytes = serializer.serialize(data)
         
         // JSON (for comparison)
         def jsonSerializer = new JsonSerializer()
@@ -134,12 +134,14 @@ class MicroStreamSerializerTest {
         def msgpackSerializer = new MessagePackSerializer()
         def msgpackBytes = msgpackSerializer.serialize(data)
         
-        println "Binary serialization size: ${binaryBytes.length} bytes"
+        println "Java serialization size: ${javaBytes.length} bytes"
         println "MessagePack size: ${msgpackBytes.length} bytes"
         println "JSON size: ${jsonBytes.length} bytes"
         
-        // Binary is more compact than JSON
-        assertTrue(binaryBytes.length > 0, "Should produce bytes")
+        // MessagePack should be most compact
+        assertTrue(msgpackBytes.length < javaBytes.length, 
+            "MessagePack should be more compact than Java serialization")
+        assertTrue(javaBytes.length > 0, "Should produce bytes")
     }
     
     @Test
@@ -204,6 +206,41 @@ class MicroStreamSerializerTest {
         // Type is preserved
         assertTrue(result instanceof SerializablePerson)
         assertEquals(SerializablePerson, result.class)
+    }
+    
+    @Test
+    void test_performance_comparison_with_messagepack() {
+        // Prepare test data
+        def testData = (1..100).collect { i ->
+            [
+                id: i,
+                name: "Person $i",
+                active: i % 2 == 0,
+                score: i * 1.5
+            ]
+        }
+        
+        // Java serialization
+        long javaStart = System.nanoTime()
+        def javaBytes = serializer.serialize(testData)
+        def javaResult = serializer.deserialize(javaBytes)
+        long javaTime = System.nanoTime() - javaStart
+        
+        // MessagePack
+        def msgpackSerializer = new MessagePackSerializer()
+        long msgpackStart = System.nanoTime()
+        def msgpackBytes = msgpackSerializer.serialize(testData)
+        def msgpackResult = msgpackSerializer.deserialize(msgpackBytes)
+        long msgpackTime = System.nanoTime() - msgpackStart
+        
+        println "Java serialization: ${javaTime / 1000}μs, ${javaBytes.length} bytes"
+        println "MessagePack:        ${msgpackTime / 1000}μs, ${msgpackBytes.length} bytes"
+        println "MessagePack is ${String.format('%.1f', javaTime / (double)msgpackTime)}x faster"
+        println "MessagePack is ${String.format('%.1f', javaBytes.length / (double)msgpackBytes.length)}x more compact"
+        
+        // Both should work correctly
+        assertEquals(100, (javaResult as List).size())
+        assertEquals(100, (msgpackResult as List).size())
     }
     
     /**

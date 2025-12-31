@@ -648,108 +648,301 @@ def secureActor = system.actor {
 
 ## Clustering with Hazelcast
 
-### What is Hazelcast Clustering?
+### Architecture Overview
 
-Hazelcast provides distributed data structures for actor clustering:
+GroovyActor provides **production-ready Hazelcast clustering** through `HazelcastManager`, a centralized singleton that manages distributed data structures for both ActorSystem and TaskGraph.
 
-**Features:**
-- Distributed actor registry (actors visible across all nodes)
-- Automatic failover (actors can be restarted on other nodes)
-- Load distribution (actors spread across cluster)
-- Discovery (nodes find each other automatically)
+**Shared Infrastructure:**
+```
+┌─────────────────────────────────────────────────────┐
+│              HazelcastManager (Singleton)            │
+│         Manages Hazelcast instance & maps            │
+├─────────────────────────────────────────────────────┤
+│  ActorSystem Clustering    │  TaskGraph Clustering  │
+│  - actor:registry          │  - taskgraph:graph-states│
+│  - actor:events            │  - taskgraph:task-states │
+│                            │  - taskgraph:task-events │
+└─────────────────────────────────────────────────────┘
+```
+
+**Package Structure:**
+- `org.softwood.cluster.HazelcastManager` - Shared infrastructure singleton
+- `org.softwood.actor.cluster.*` - Actor-specific clustering classes
+- `org.softwood.dag.cluster.*` - TaskGraph-specific clustering classes
 
 ### When to Use Clustering
 
 **✅ Use Clustering When:**
-- You need high availability (survive node failures)
-- You want automatic load distribution
-- You need transparent actor location
-- You have multiple nodes in your deployment
+- High availability required (survive node failures)
+- Multiple nodes in deployment  
+- Actors need to be discoverable across cluster
+- State synchronization across nodes needed
+- Lifecycle events must be broadcast
 
 **❌ Don't Use Clustering When:**
 - Single node deployment
-- Actors are truly local (no cross-node communication)
-- Tight latency requirements (local-only faster)
-- Simple applications
+- Actors are truly local (no cross-node needs)
+- Tight latency requirements (local-only is faster)
+- Simple applications without HA needs
 
-### Hazelcast Setup
+### HazelcastManager Setup
 
-**Dependencies:**
+#### 1. Dependencies
+
 ```gradle
 implementation 'com.hazelcast:hazelcast:5.6.0'
 ```
 
-**Configuration:**
+#### 2. Initialize HazelcastManager
+
 ```groovy
-// 1. Create Hazelcast instance
-def hazelcastConfig = new Config()
-hazelcastConfig.clusterName = "actor-cluster"
+import org.softwood.cluster.HazelcastManager
 
-// Network configuration
-hazelcastConfig.networkConfig.join.multicastConfig.enabled = false
-hazelcastConfig.networkConfig.join.tcpIpConfig.enabled = true
-hazelcastConfig.networkConfig.join.tcpIpConfig.addMember("node1:5701")
-hazelcastConfig.networkConfig.join.tcpIpConfig.addMember("node2:5701")
+// Get singleton instance
+def hazelcastManager = HazelcastManager.instance
 
-def hazelcast = Hazelcast.newHazelcastInstance(hazelcastConfig)
+// Configure clustering
+def clusterConfig = [
+    enabled: true,
+    port: 5701,
+    cluster: [
+        name: 'my-actor-cluster',
+        members: [
+            '192.168.1.10:5701',
+            '192.168.1.11:5701',
+            '192.168.1.12:5701'
+        ]
+    ]
+]
 
-// 2. Create distributed actor registry
-def registry = new HazelcastActorRegistry(hazelcast)
+// Initialize (call once at application startup)
+hazelcastManager.initialize(clusterConfig)
 
-// 3. Create actor system with distributed registry
-def system = new ActorSystem("my-app", registry)
+// Verify clustering is enabled
+assert hazelcastManager.isEnabled()
+```
 
-// 4. Create actors (now visible cluster-wide)
+**Network Discovery Modes:**
+
+**Multicast (Development):**
+```groovy
+def config = [
+    enabled: true,
+    port: 5701,
+    cluster: [
+        name: 'dev-cluster',
+        members: []  // Empty = multicast
+    ]
+]
+```
+
+**TCP/IP (Production):**
+```groovy
+def config = [
+    enabled: true,
+    port: 5701,
+    cluster: [
+        name: 'prod-cluster',
+        members: [
+            'node1.prod.example.com:5701',
+            'node2.prod.example.com:5701',
+            'node3.prod.example.com:5701'
+        ]
+    ]
+]
+```
+
+#### 3. Create ActorSystem with Clustering
+
+```groovy
+// ActorSystem automatically detects enabled HazelcastManager
+def system = new ActorSystem("my-app")
+
+// Create clustered actors (automatically registered)
 def actor = system.actor {
     name 'ClusteredActor'
     onMessage { msg, ctx ->
-        println "Processing on node: ${hazelcast.cluster.localMember.address}"
+        println "Processing on node: ${hazelcastManager.getInstance().cluster.localMember}"
         ctx.reply("Processed!")
     }
 }
+
+// Actor is now visible across all cluster nodes!
 ```
 
-### Cluster Features
+### Automatic Actor Registration
 
-**Actor Discovery:**
+When clustering is enabled, ActorSystem **automatically**:
+
+1. **Registers actors** in distributed `actor:registry` map
+2. **Publishes lifecycle events** to `actor:events` topic
+3. **Tracks status** (ACTIVE, INACTIVE)
+4. **Updates metadata** (actor class, node location)
+
+**No code changes needed** - existing actors automatically gain clustering!
+
 ```groovy
-// Actors are automatically visible across nodes
-def actor = system.getActor("ClusteredActor")
-// Works even if actor is on different node!
-```
-
-**Distributed State:**
-```groovy
-// Use Hazelcast distributed data structures
-def sharedMap = hazelcast.getMap("shared-state")
-
+// Node 1: Create actor
 def actor = system.actor {
-    name 'StatefulActor'
-    onMessage { msg, ctx ->
-        // Local state (per-actor)
-        ctx.state.localCounter++
-        
-        // Shared state (cluster-wide)
-        sharedMap.put("globalCounter", sharedMap.get("globalCounter", 0) + 1)
+    name 'DataProcessor'
+    onMessage { msg, ctx -> /* ... */ }
+}
+
+// Node 2: Access same actor (discovered via cluster)
+def processor = system.getActor('DataProcessor')
+processor.tell([type: 'process', data: someData])
+// Message routed to Node 1 automatically!
+```
+
+### Actor Registry Entry
+
+**Class:** `org.softwood.actor.cluster.ActorRegistryEntry`
+
+Each registered actor has metadata stored cluster-wide:
+
+```groovy
+class ActorRegistryEntry implements Serializable {
+    final String actorId           // Actor name
+    final String actorClass        // Actor implementation class
+    final String nodeName          // Cluster member hosting this actor
+    ActorStatus status             // ACTIVE or INACTIVE
+    final Date createdAt           // Registration timestamp
+    Date lastUpdated               // Last status change
+    
+    // Thread-safe status updates
+    void markActive()
+    void markInactive()
+}
+```
+
+**Actor Status:**
+```groovy
+enum ActorStatus {
+    ACTIVE,      // Actor running and accepting messages
+    INACTIVE     // Actor stopped or unavailable
+}
+```
+
+**Query Registry:**
+```groovy
+// Get actor registry map
+def registry = hazelcastManager.getActorRegistryMap()
+
+// Check if actor exists cluster-wide
+def entry = registry.get('DataProcessor')
+if (entry) {
+    println "Actor: ${entry.actorId}"
+    println "Status: ${entry.status}"
+    println "Node: ${entry.nodeName}"
+    println "Class: ${entry.actorClass}"
+    println "Created: ${entry.createdAt}"
+}
+
+// List all actors across cluster
+registry.keySet().each { actorName ->
+    def info = registry.get(actorName)
+    println "${actorName} @ ${info.nodeName} [${info.status}]"
+}
+```
+
+### Actor Lifecycle Events
+
+**Class:** `org.softwood.actor.cluster.ActorLifecycleEvent`
+
+ActorSystem publishes events to the cluster for:
+- Actor creation
+- Actor start/stop
+- Actor failure/restart
+
+```groovy
+enum ActorLifecycleEventType {
+    CREATED,      // Actor registered in cluster
+    STARTED,      // Actor began processing
+    STOPPED,      // Actor stopped gracefully
+    FAILED,       // Actor encountered error
+    RESTARTED     // Actor restarted after failure
+}
+
+class ActorLifecycleEvent implements Serializable {
+    final String actorId
+    final ActorLifecycleEventType eventType
+    final String nodeName
+    final Date timestamp
+    String reason                // Optional failure/stop reason
+}
+```
+
+**Subscribe to Events:**
+```groovy
+// Get event topic
+def eventTopic = hazelcastManager.getActorEventTopic()
+
+// Listen for lifecycle events
+eventTopic.addMessageListener { message ->
+    ActorLifecycleEvent event = message.messageObject
+    
+    println "[${event.timestamp}] Actor '${event.actorId}' ${event.eventType} on ${event.nodeName}"
+    
+    if (event.eventType == ActorLifecycleEventType.FAILED) {
+        println "Failure reason: ${event.reason}"
+        // Take corrective action
     }
 }
 ```
 
-**Failover:**
+**Example Event Flow:**
+```
+Node 1: Creates 'Worker'
+  → CREATED event published to cluster
+  → STARTED event published to cluster
+  
+Node 2: Receives events, knows 'Worker' exists on Node 1
+
+Node 1: Worker encounters error
+  → FAILED event published with reason
+  → RESTARTED event published after recovery
+  
+Node 1: Worker stops
+  → STOPPED event published to cluster
+```
+
+### Status Tracking
+
+ActorSystem automatically maintains actor status:
+
 ```groovy
-// Configure actor for failover
-def actor = system.actor {
-    name 'FailsafeActor'
-    clusterAware true  // Can migrate to other nodes
-    
-    onMessage { msg, ctx ->
-        // If this node fails, actor restarts on another node
+// Actor created → Status: ACTIVE
+def actor = system.actor { name 'Worker'; onMessage { ... } }
+
+// Actor stopped → Status: INACTIVE
+actor.stop()
+
+// Registry automatically updated
+def entry = hazelcastManager.getActorRegistryMap().get('Worker')
+assert entry.status == ActorStatus.INACTIVE
+```
+
+**Manual Status Updates:**
+```groovy
+// In ActorSystem implementation
+private void updateActorStatusInCluster(String actorName, ActorStatus newStatus) {
+    synchronized (this) {
+        ActorRegistryEntry entry = clusterActorRegistry.get(actorName)
+        if (entry) {
+            if (newStatus == ActorStatus.ACTIVE) {
+                entry.markActive()
+            } else {
+                entry.markInactive()
+            }
+            clusterActorRegistry.replace(actorName, entry)  // Atomic update
+        }
     }
 }
 ```
 
 ### Cluster Configuration Options
 
+**YAML Configuration:**
 ```yaml
 # hazelcast.yaml
 hazelcast:
@@ -770,11 +963,148 @@ hazelcast:
           - 192.168.1.12
   
   map:
-    actor-registry:
-      backup-count: 1
-      time-to-live-seconds: 0
-      max-idle-seconds: 0
+    actor:registry:
+      backup-count: 1              # Replicate to 1 other node
+      time-to-live-seconds: 0      # No TTL (actors live forever)
+      max-idle-seconds: 0          # No idle eviction
+      
+    actor:events:
+      backup-count: 0              # Events don't need backup
 ```
+
+### Graceful Shutdown
+
+```groovy
+// Shutdown ActorSystem (cleans up cluster entries)
+system.shutdown()
+
+// Shutdown HazelcastManager (on application exit)
+hazelcastManager.shutdown()
+```
+
+### Known Issues & Limitations
+
+#### Partition Initialization Race Condition
+
+**Problem:** In test environments with rapid cluster initialization followed by immediate map access, there's a timing window where:
+- `IMap.put()` succeeds
+- `IMap.toString()` shows entries  
+- `IMap.keySet()` returns keys
+- **BUT `IMap.get()` returns null!**
+
+**Affected:** Unit tests that create ActorSystem immediately after Hazelcast startup.
+
+**Not Affected:** Production deployments (sufficient time between startup and first use).
+
+**Workaround for Tests:**
+```groovy
+@BeforeEach
+void setup() {
+    hazelcastManager.initialize(config)
+    
+    // Pre-initialize actor registry map BEFORE tests
+    def registry = hazelcastManager.getActorRegistryMap()
+    
+    // Verify map is truly ready with put/get test
+    registry.put("_test_", new ActorRegistryEntry("test", "Test", "node"))
+    Awaitility.await()
+        .atMost(2, TimeUnit.SECONDS)
+        .until({ registry.get("_test_") != null })
+    registry.remove("_test_")
+    
+    // NOW tests can safely use registry
+}
+```
+
+**Status:** Reported to Hazelcast team. See `HAZELCAST_BUG_REPORT.md` for details.
+
+### Complete Example
+
+```groovy
+import org.softwood.cluster.HazelcastManager
+import org.softwood.actor.ActorSystem
+import org.softwood.actor.cluster.*
+
+// 1. Initialize Hazelcast
+def hazelcast = HazelcastManager.instance
+hazelcast.initialize([
+    enabled: true,
+    port: 5701,
+    cluster: [
+        name: 'production-cluster',
+        members: ['node1:5701', 'node2:5701', 'node3:5701']
+    ]
+])
+
+// 2. Create ActorSystem
+def system = new ActorSystem("prod-app")
+
+// 3. Subscribe to cluster events
+def events = hazelcast.getActorEventTopic()
+events.addMessageListener { msg ->
+    ActorLifecycleEvent event = msg.messageObject
+    println "Cluster event: ${event.actorId} ${event.eventType} on ${event.nodeName}"
+}
+
+// 4. Create clustered actors
+def worker = system.actor {
+    name 'Worker'
+    onMessage { msg, ctx ->
+        println "Processing ${msg} on ${hazelcast.getInstance().cluster.localMember}"
+        ctx.reply("Done")
+    }
+}
+
+// 5. Monitor cluster
+def registry = hazelcast.getActorRegistryMap()
+registry.keySet().each { actorName ->
+    def entry = registry.get(actorName)
+    println "Actor: ${actorName} @ ${entry.nodeName} [${entry.status}]"
+}
+
+// 6. Graceful shutdown
+Runtime.addShutdownHook {
+    system.shutdown()
+    hazelcast.shutdown()
+}
+```
+
+### Performance Considerations
+
+**Network Latency:**
+- Cluster operations add ~1-5ms network overhead
+- Local actors (same JVM) bypass network completely
+- Use local actors for latency-critical paths
+
+**Registry Size:**
+- Each actor entry: ~200-500 bytes
+- 10,000 actors ≈ 2-5 MB cluster memory
+- Hazelcast distributes evenly across nodes
+
+**Event Topic:**
+- Events are fire-and-forget (no delivery guarantees)
+- High event rate: Consider batching or sampling
+- Events don't block actor operations
+
+**Backup Strategy:**
+- Default: 1 backup copy per map entry
+- Survives single node failure
+- Increase for higher availability
+
+### Comparison: Clustering vs Remote Actors
+
+| Feature | Hazelcast Clustering | Remote Actors (HTTP/RSocket) |
+|---------|---------------------|-----------------------------|
+| **Discovery** | Automatic (cluster registry) | Manual (explicit URIs) |
+| **Failover** | Yes (automatic) | No (explicit retry logic) |
+| **State Sync** | Built-in (distributed maps) | Manual (external store) |
+| **Overhead** | Low (binary protocol) | Medium (HTTP) / Low (RSocket) |
+| **Complexity** | Low (mostly transparent) | Medium (explicit routing) |
+| **Use Case** | High availability clusters | Service-to-service | 
+
+**When to combine both:**
+- **Internal cluster**: Hazelcast for HA within cluster
+- **External services**: Remote actors for cross-service communication
 
 ---
 

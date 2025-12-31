@@ -46,8 +46,12 @@ actor {
 }
 
 hazelcast {
-
+    enabled = false  // Master switch for clustering
     port = 5701
+    cluster {
+        name = 'taskgraph-cluster'
+        members = []  // Empty = multicast discovery, or specify ['host1:5701', 'host2:5701']
+    }
 }
 
 database {
@@ -78,6 +82,7 @@ environments {
     dev {
         distributed = false
         hazelcast {
+            enabled = false  // Clustering disabled in dev
             cluster {
                 name = 'dev-cluster'
             }
@@ -97,6 +102,7 @@ environments {
     test {
         distributed = false
         hazelcast {
+            enabled = false  // Clustering disabled in test
             cluster {
                 name = 'test-cluster'
             }
@@ -119,8 +125,10 @@ environments {
     production {
         distributed = true
         hazelcast {
+            enabled = true  // Clustering enabled in production
             cluster {
                 name = 'production-cluster'
+                members = []  // Configure with actual production node addresses
             }
             port = 5703
         }

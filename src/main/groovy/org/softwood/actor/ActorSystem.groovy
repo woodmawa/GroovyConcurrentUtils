@@ -3,14 +3,21 @@
 // ═════════════════════════════════════════════════════════════
 package org.softwood.actor
 
+import com.hazelcast.map.IMap
+import com.hazelcast.topic.ITopic
 import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
+import org.softwood.actor.cluster.ActorLifecycleEvent
+import org.softwood.actor.cluster.ActorLifecycleEventType
+import org.softwood.actor.cluster.ActorRegistryEntry
+import org.softwood.actor.cluster.ActorStatus
+import org.softwood.actor.lifecycle.DeathWatchRegistry
+import org.softwood.actor.hierarchy.ActorHierarchyRegistry
 import org.softwood.actor.remote.RemotingTransport
 import org.softwood.actor.remote.RemoteActorRef
 import org.softwood.actor.scheduling.ActorScheduler
-import org.softwood.actor.lifecycle.DeathWatchRegistry
-import org.softwood.actor.hierarchy.ActorHierarchyRegistry
+import org.softwood.cluster.HazelcastManager
 
 /**
  * ActorSystem: Primary entry point for creating and managing actors in production.
@@ -115,6 +122,12 @@ class ActorSystem implements Closeable {
     final DeathWatchRegistry deathWatch
     // Hierarchy registry for parent-child relationships
     final ActorHierarchyRegistry hierarchy
+    
+    // Clustering support (optional)
+    private boolean clusteringEnabled = false
+    private IMap<String, ActorRegistryEntry> clusterActorRegistry
+    private ITopic<ActorLifecycleEvent> clusterEventTopic
+    private String localNodeName
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -133,12 +146,151 @@ class ActorSystem implements Closeable {
         this.scheduler = new ActorScheduler()
         this.deathWatch = new DeathWatchRegistry()
         this.hierarchy = new ActorHierarchyRegistry()
-        log.info "ActorSystem '$name' created (distributed: ${registry.isDistributed()})"
+        
+        // Initialize clustering if enabled
+        initializeClustering()
+        
+        log.info "ActorSystem '$name' created (distributed: ${registry.isDistributed()}, clustering: ${clusteringEnabled})"
     }
 
     // ─────────────────────────────────────────────────────────────
     // Actor Creation & Management
     // ─────────────────────────────────────────────────────────────
+    
+    /**
+     * Initialize clustering if HazelcastManager is enabled.
+     * Sets up distributed actor registry and event topic.
+     */
+    private void initializeClustering() {
+        def hazelcastManager = HazelcastManager.instance
+        
+        if (!hazelcastManager.isEnabled()) {
+            log.debug "Hazelcast clustering is not enabled for ActorSystem"
+            return
+        }
+        
+        try {
+            // Get distributed data structures
+            clusterActorRegistry = hazelcastManager.getActorRegistryMap()
+            clusterEventTopic = hazelcastManager.getActorEventTopic()
+            
+            // Get local node name
+            localNodeName = hazelcastManager.getInstance().getCluster().getLocalMember().toString()
+            
+            clusteringEnabled = true
+            log.info "ActorSystem clustering enabled: node=$localNodeName, registry=$clusterActorRegistry"
+            
+        } catch (Exception e) {
+            log.warn "Failed to initialize actor clustering, continuing without clustering", e
+            clusteringEnabled = false
+        }
+    }
+    
+    /**
+     * Register actor in cluster registry (if clustering enabled).
+     */
+    private void registerActorInCluster(String actorName, Actor actor) {
+        if (!clusteringEnabled || clusterActorRegistry == null) {
+            return
+        }
+        
+        try {
+            synchronized (this) {
+                String actorClass = actor.class.simpleName
+                ActorRegistryEntry entry = new ActorRegistryEntry(actorName, actorClass, localNodeName)
+                // Use put() for new entries (replace() would fail if entry doesn't exist)
+                clusterActorRegistry.put(actorName, entry)
+                log.info "Actor '$actorName' registered in cluster: $entry"
+            }
+            
+            // Publish CREATED event outside synchronized block to avoid holding lock during I/O
+            ActorLifecycleEvent event = new ActorLifecycleEvent(
+                actorName, 
+                ActorLifecycleEventType.CREATED, 
+                localNodeName
+            )
+            clusterEventTopic.publish(event)
+            
+            log.debug "Published CREATED event for actor '$actorName'"
+        } catch (Exception e) {
+            log.error "Failed to register actor '$actorName' in cluster", e
+        }
+    }
+    
+    /**
+     * Unregister actor from cluster registry (if clustering enabled).
+     */
+    private void unregisterActorFromCluster(String actorName) {
+        if (!clusteringEnabled || clusterActorRegistry == null) return
+        
+        try {
+            synchronized (this) {
+                clusterActorRegistry.remove(actorName)
+            }
+            
+            // Publish STOPPED event outside synchronized block
+            ActorLifecycleEvent event = new ActorLifecycleEvent(
+                actorName,
+                ActorLifecycleEventType.STOPPED,
+                localNodeName
+            )
+            clusterEventTopic.publish(event)
+            
+            log.debug "Unregistered actor '$actorName' from cluster"
+        } catch (Exception e) {
+            log.warn "Failed to unregister actor '$actorName' from cluster", e
+        }
+    }
+    
+    /**
+     * Update actor status in cluster (if clustering enabled).
+     * Uses get-modify-replace pattern to ensure Hazelcast detects the change.
+     */
+    private void updateActorStatusInCluster(String actorName, ActorStatus newStatus) {
+        if (!clusteringEnabled || clusterActorRegistry == null) return
+        
+        try {
+            synchronized (this) {
+                ActorRegistryEntry entry = clusterActorRegistry.get(actorName)
+                if (entry != null) {
+                    // Update status based on enum
+                    switch (newStatus) {
+                        case ActorStatus.ACTIVE:
+                            entry.markActive()
+                            break
+                        case ActorStatus.SUSPENDED:
+                            entry.markSuspended()
+                            break
+                        case ActorStatus.STOPPED:
+                            entry.markStopped()
+                            break
+                    }
+                    // Use replace() to force Hazelcast to detect the change
+                    clusterActorRegistry.replace(actorName, entry)
+                }
+            }
+        } catch (Exception e) {
+            log.warn "Failed to update actor '$actorName' status in cluster", e
+        }
+    }
+    
+    /**
+     * Find actor location in cluster.
+     * Returns the node name where the actor is running, or null if not found.
+     */
+    String findActorNode(String actorName) {
+        if (!clusteringEnabled || clusterActorRegistry == null) {
+            return null
+        }
+        
+        try {
+            ActorRegistryEntry entry = clusterActorRegistry.get(actorName)
+            return entry?.ownerNode
+        } catch (Exception e) {
+            log.warn "Failed to find actor '$actorName' in cluster", e
+            return null
+        }
+    }
 
     Actor createActor(String actorName, Closure handler, Map initialState = [:]) {
         if (registry.contains(actorName)) {
@@ -154,6 +306,9 @@ class ActorSystem implements Closeable {
             ((GroovyActor) actor).setSystem(this)
         }
         registry.register(actorName, actor)
+        
+        // Register in cluster if clustering is enabled
+        registerActorInCluster(actorName, actor)
 
         log.debug "Created actor: $actorName"
         return actor
@@ -167,6 +322,10 @@ class ActorSystem implements Closeable {
         if (actor) {
             actor.stop()
             registry.unregister(actorName)
+            
+            // Unregister from cluster if clustering is enabled
+            unregisterActorFromCluster(actorName)
+            
             log.debug "Removed actor: $actorName"
         }
     }

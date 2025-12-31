@@ -1,6 +1,10 @@
 package org.softwood.dag
 
+import com.hazelcast.map.IMap
+import com.hazelcast.topic.ITopic
 import groovy.util.logging.Slf4j
+import org.softwood.cluster.HazelcastManager
+import org.softwood.dag.cluster.*
 import org.softwood.dag.persistence.EclipseStoreManager
 import org.softwood.dag.persistence.PersistenceConfig
 import org.softwood.dag.persistence.TaskState as PersistenceTaskState
@@ -38,6 +42,13 @@ class TaskGraph {
     
     /** Unique run ID (generated per execution) */
     private String runId
+    
+    /** Clustering support (optional) */
+    private boolean clusteringEnabled = false
+    private IMap<String, GraphExecutionState> clusterGraphState
+    private IMap<String, TaskRuntimeState> clusterTaskState
+    private ITopic<ClusterTaskEvent> clusterEventTopic
+    private String localNodeName
 
     // --------------------------------------------------------------------
     // STATIC BUILDER METHOD
@@ -157,6 +168,45 @@ class TaskGraph {
     // --------------------------------------------------------------------
     // EXECUTION
     // --------------------------------------------------------------------
+    
+    /**
+     * Initialize clustering if enabled in configuration.
+     * Obtains Hazelcast maps and topics for distributed state management.
+     */
+    private void initializeClusteredExecution() {
+        def hazelcastManager = HazelcastManager.instance
+        
+        if (!hazelcastManager.isEnabled()) {
+            log.debug "Hazelcast clustering is not enabled"
+            return
+        }
+        
+        try {
+            // Get distributed data structures
+            clusterGraphState = hazelcastManager.getGraphStateMap()
+            clusterTaskState = hazelcastManager.getTaskStateMap()
+            clusterEventTopic = hazelcastManager.getTaskEventTopic()
+            
+            // Get local node name
+            localNodeName = hazelcastManager.getInstance().getCluster().getLocalMember().toString()
+            
+            clusteringEnabled = true
+            log.info "Clustering enabled: node=$localNodeName"
+            
+            // Create and publish initial graph state
+            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+            GraphExecutionState graphState = new GraphExecutionState(graphId, runId, localNodeName)
+            graphState.markRunning()
+            
+            String key = "${graphId}-${runId}"
+            clusterGraphState.put(key, graphState)
+            log.debug "Published initial graph state to cluster: $graphState"
+            
+        } catch (Exception e) {
+            log.warn "Failed to initialize clustering, continuing in local mode", e
+            clusteringEnabled = false
+        }
+    }
 
     /**
      * Start graph execution by scheduling all root tasks.
@@ -184,6 +234,9 @@ class TaskGraph {
         // Generate unique run ID
         runId = UUID.randomUUID().toString()
         
+        // Initialize clustering if enabled
+        initializeClusteredExecution()
+        
         // Initialize persistence if enabled
         initializePersistence()
 
@@ -198,6 +251,77 @@ class TaskGraph {
         roots.each { schedule(it) }
 
         return graphCompletionPromise
+    }
+
+    // --------------------------------------------------------------------
+    // CLUSTERING INTEGRATION
+    // --------------------------------------------------------------------
+    
+    /**
+     * Publish task state change to cluster (if clustering is enabled).
+     */
+    private void publishTaskStateToCluster(String taskId, String state, String errorMsg = null) {
+        if (!clusteringEnabled) return
+        
+        try {
+            // Update task state in distributed map
+            String key = "${runId}-${taskId}"
+            TaskRuntimeState taskState = clusterTaskState.get(key)
+            
+            if (taskState == null) {
+                taskState = new TaskRuntimeState(taskId, runId, state)
+                if (state == "RUNNING") {
+                    taskState.markRunning(localNodeName)
+                }
+            } else {
+                taskState.setState(state)
+                if (state == "COMPLETED") {
+                    taskState.markCompleted()
+                } else if (state == "FAILED") {
+                    taskState.markFailed(errorMsg)
+                } else if (state == "SKIPPED") {
+                    taskState.markSkipped()
+                }
+            }
+            
+            clusterTaskState.put(key, taskState)
+            
+            // Publish event to cluster topic
+            ClusterTaskEvent event = errorMsg ? 
+                new ClusterTaskEvent(taskId, runId, state, localNodeName, errorMsg) :
+                new ClusterTaskEvent(taskId, runId, state, localNodeName)
+            clusterEventTopic.publish(event)
+            
+            log.debug "Published task state to cluster: $event"
+            
+        } catch (Exception e) {
+            log.warn "Failed to publish task state to cluster", e
+        }
+    }
+    
+    /**
+     * Update graph state in cluster (if clustering is enabled).
+     * Uses explicit replace to ensure Hazelcast detects the modification.
+     */
+    private void updateClusterGraphState(String taskId, String state) {
+        if (!clusteringEnabled || clusterGraphState == null) return
+        
+        try {
+            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+            String key = "${graphId}-${runId}"
+            
+            // Get-modify-replace pattern to ensure Hazelcast detects the change
+            synchronized (this) {  // Synchronize to avoid lost updates
+                GraphExecutionState graphState = clusterGraphState.get(key)
+                if (graphState != null) {
+                    graphState.updateTaskState(taskId, state)
+                    // Use replace() to explicitly mark entry as modified
+                    clusterGraphState.replace(key, graphState)
+                }
+            }
+        } catch (Exception e) {
+            log.warn "Failed to update cluster graph state", e
+        }
     }
 
     // --------------------------------------------------------------------
@@ -305,6 +429,21 @@ class TaskGraph {
                     // Finalize persistence with failure info
                     finalizePersistence(true, firstFailure.id, firstFailure.error)
                     
+                    // Update cluster graph state
+                    if (clusteringEnabled && clusterGraphState != null) {
+                        try {
+                            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+                            String key = "${graphId}-${runId}"
+                            GraphExecutionState graphState = clusterGraphState.get(key)
+                            if (graphState != null) {
+                                graphState.markFailed(firstFailure.id, firstFailure.error?.message)
+                                clusterGraphState.put(key, graphState)
+                            }
+                        } catch (Exception e) {
+                            log.warn "Failed to update cluster graph state on failure", e
+                        }
+                    }
+                    
                     graphCompletionPromise.fail(firstFailure.error)
                 } else {
                     // All tasks completed successfully - collect results
@@ -315,6 +454,21 @@ class TaskGraph {
 
                     // Finalize persistence with success
                     finalizePersistence(false)
+                    
+                    // Update cluster graph state
+                    if (clusteringEnabled && clusterGraphState != null) {
+                        try {
+                            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+                            String key = "${graphId}-${runId}"
+                            GraphExecutionState graphState = clusterGraphState.get(key)
+                            if (graphState != null) {
+                                graphState.markCompleted()
+                                clusterGraphState.put(key, graphState)
+                            }
+                        } catch (Exception e) {
+                            log.warn "Failed to update cluster graph state on completion", e
+                        }
+                    }
                     
                     // Resolve the graph completion promise
                     def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
@@ -341,6 +495,10 @@ class TaskGraph {
         
         // Persist SCHEDULED state
         persistTaskStateChange(t.id, PersistenceTaskState.SCHEDULED, [name: t.name ?: t.id])
+        
+        // Publish to cluster
+        publishTaskStateToCluster(t.id, "SCHEDULED")
+        updateClusterGraphState(t.id, "SCHEDULED")
 
         log.debug "schedule(): execute ${t.id}"
 
@@ -348,6 +506,10 @@ class TaskGraph {
         
         // Persist RUNNING state
         persistTaskStateChange(t.id, PersistenceTaskState.RUNNING, [:])
+        
+        // Publish to cluster
+        publishTaskStateToCluster(t.id, "RUNNING")
+        updateClusterGraphState(t.id, "RUNNING")
         
         Promise<?> execPromise = t.execute(prevPromise)
 
@@ -360,6 +522,10 @@ class TaskGraph {
             
             // Persist COMPLETED state
             persistTaskStateChange(t.id, PersistenceTaskState.COMPLETED, [result: result])
+            
+            // Publish to cluster
+            publishTaskStateToCluster(t.id, "COMPLETED")
+            updateClusterGraphState(t.id, "COMPLETED")
 
             if (!(t instanceof RouterTask)) {
                 scheduleNormalSuccessors(t)
@@ -381,6 +547,10 @@ class TaskGraph {
                 errorMessage: error.message,
                 errorStackTrace: stackTraceToString(error)
             ])
+            
+            // Publish to cluster
+            publishTaskStateToCluster(t.id, "FAILED", error.message)
+            updateClusterGraphState(t.id, "FAILED")
             
             // CRITICAL: When a task fails, mark all downstream tasks as skipped
             // so the graph can complete
@@ -426,6 +596,10 @@ class TaskGraph {
                     
                     // Persist SKIPPED state
                     persistTaskStateChange(tid, PersistenceTaskState.SKIPPED, [:])
+                    
+                    // Publish to cluster
+                    publishTaskStateToCluster(tid, "SKIPPED")
+                    updateClusterGraphState(tid, "SKIPPED")
                     
                     // Check completion after marking tasks as skipped
                     checkGraphCompletion()
@@ -509,6 +683,10 @@ class TaskGraph {
                 
                 // Persist SKIPPED state
                 persistTaskStateChange(taskId, PersistenceTaskState.SKIPPED, [:])
+                
+                // Publish to cluster
+                publishTaskStateToCluster(taskId, "SKIPPED")
+                updateClusterGraphState(taskId, "SKIPPED")
                 
                 log.debug "Marked task ${taskId} as SKIPPED due to upstream failure"
                 

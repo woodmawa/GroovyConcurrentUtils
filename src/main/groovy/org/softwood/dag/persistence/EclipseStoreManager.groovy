@@ -255,7 +255,7 @@ class EclipseStoreManager implements AutoCloseable {
             snapshot.endTime = Instant.now()
             snapshot.finalStatus = GraphExecutionStatus.COMPLETED
             
-            // Store the final snapshot and all modified objects
+            // Store the final snapshot and all modified objects SYNCHRONOUSLY
             storage.store(snapshot.taskStates)  // Explicitly store the map
             storage.store(snapshot.contextGlobals)  // Explicitly store the globals
             storage.store(snapshot)  // Store the root
@@ -283,7 +283,7 @@ class EclipseStoreManager implements AutoCloseable {
             snapshot.failureMessage = error.message
             snapshot.failureStackTrace = stackTraceToString(error)
             
-            // Store the final snapshot and all modified objects
+            // Store the final snapshot and all modified objects SYNCHRONOUSLY
             storage.store(snapshot.taskStates)  // Explicitly store the map
             storage.store(snapshot.contextGlobals)  // Explicitly store the globals
             storage.store(snapshot)  // Store the root
@@ -341,7 +341,8 @@ class EclipseStoreManager implements AutoCloseable {
     }
     
     /**
-     * Close the storage manager and cleanup thread-local
+     * Close the storage manager and cleanup thread-local.
+     * Blocks until all data is flushed to disk.
      */
     @Override
     void close() {
@@ -349,6 +350,7 @@ class EclipseStoreManager implements AutoCloseable {
         
         try {
             if (storage != null) {
+                // storage.close() is synchronous and blocks until all data is flushed
                 storage.close()
             }
             

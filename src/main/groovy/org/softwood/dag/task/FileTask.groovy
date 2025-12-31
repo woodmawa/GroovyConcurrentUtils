@@ -1,0 +1,436 @@
+package org.softwood.dag.task
+
+import groovy.util.logging.Slf4j
+import org.softwood.promise.Promise
+
+/**
+ * FileTask - Process Files with Rich DSL Support
+ *
+ * Provides specialized task type for file processing operations with:
+ * - File discovery from directories with patterns
+ * - Promise-based file list injection from upstream tasks
+ * - GDK method delegation for natural file operations
+ * - Pipeline visibility via tap() points
+ * - Parallel processing using virtual threads
+ * - Rich execution summaries
+ *
+ * <h3>Key Features:</h3>
+ * <ul>
+ *   <li>Multiple file sources (directory discovery, explicit files, upstream promises)</li>
+ *   <li>File-level filtering before processing</li>
+ *   <li>Closure delegation to File for GDK method access</li>
+ *   <li>tap() points for pipeline visibility</li>
+ *   <li>Built-in statistics tracking</li>
+ *   <li>Automatic parallel processing with virtual threads</li>
+ *   <li>Data emission to downstream tasks</li>
+ *   <li>Collection and aggregation within task</li>
+ * </ul>
+ *
+ * <h3>DSL Example - Simple File Processing:</h3>
+ * <pre>
+ * graph.fileTask {
+ *     name 'ProcessLogs'
+ *     
+ *     sources {
+ *         directory('/var/logs') {
+ *             pattern '*.log'
+ *             recursive true
+ *         }
+ *     }
+ *     
+ *     filter { file ->
+ *         file.size() > 1.KB && file.canRead()
+ *     }
+ *     
+ *     tap { files, ctx ->
+ *         println "Processing ${files.size()} log files"
+ *     }
+ *     
+ *     eachFile { ctx ->
+ *         // delegate is File - GDK methods available!
+ *         def errorCount = 0
+ *         eachLine { line ->
+ *             if (line.contains('ERROR')) {
+ *                 errorCount++
+ *             }
+ *         }
+ *         
+ *         ctx.emit([
+ *             file: name,
+ *             size: size(),
+ *             errors: errorCount
+ *         ])
+ *     }
+ *     
+ *     aggregate { ctx ->
+ *         [
+ *             filesProcessed: ctx.filesProcessed(),
+ *             totalErrors: ctx.emitted().sum { it.errors }
+ *         ]
+ *     }
+ * }
+ * </pre>
+ *
+ * <h3>DSL Example - Chaining from Previous Task:</h3>
+ * <pre>
+ * graph.scriptTask {
+ *     name 'FindFiles'
+ *     execute { ctx ->
+ *         new File('/data').listFiles().findAll { it.name.endsWith('.csv') }
+ *     }
+ * }
+ * 
+ * graph.fileTask {
+ *     name 'ProcessCSVs'
+ *     dependsOn 'FindFiles'  // Gets List<File> from previous promise
+ *     
+ *     eachFile { ctx ->
+ *         def records = readLines().drop(1)  // Skip header via GDK
+ *         ctx.emit([file: name, records: records.size()])
+ *     }
+ * }
+ * </pre>
+ *
+ * <h3>DSL Example - Advanced with Statistics:</h3>
+ * <pre>
+ * graph.fileTask {
+ *     name 'AnalyzeDataset'
+ *     
+ *     sources { directory('/data/csvs') { pattern '*.csv' } }
+ *     
+ *     eachFile { ctx ->
+ *         def records = readLines().size()
+ *         def bytes = size()
+ *         
+ *         ctx.track('recordCount', records)
+ *         ctx.track('fileSize', bytes)
+ *         ctx.emit([file: name, records: records])
+ *     }
+ *     
+ *     tap { results, ctx ->
+ *         println "Progress: ${ctx.filesProcessed()}/${ctx.filesTotal()}"
+ *     }
+ *     
+ *     aggregate { ctx ->
+ *         [
+ *             totalFiles: ctx.filesProcessed(),
+ *             totalRecords: ctx.stats('recordCount').sum,
+ *             avgRecords: ctx.stats('recordCount').average,
+ *             totalSize: ctx.stats('fileSize').sum
+ *         ]
+ *     }
+ * }
+ * </pre>
+ */
+@Slf4j
+class FileTask extends TaskBase<Object> {
+
+    // =========================================================================
+    // Configuration
+    // =========================================================================
+    
+    /** File sources (directories with patterns, explicit files) */
+    List<FileSourceSpec> fileSources = []
+    
+    /** Explicit file list */
+    List<File> explicitFiles = []
+    
+    /** File filter closure */
+    Closure fileFilter
+    
+    /** Per-file processing closure (delegate = File) */
+    Closure eachFileClosure
+    
+    /** Aggregation closure (after all files processed) */
+    Closure aggregationClosure
+    
+    /** Custom execution closure (full control) */
+    Closure customExecute
+    
+    /** Tap points for pipeline visibility */
+    List<TapPoint> tapPoints = []
+    
+    // =========================================================================
+    // Constructor
+    // =========================================================================
+    
+    FileTask(String id, String name, TaskContext ctx) {
+        super(id, name, ctx)
+    }
+
+    // =========================================================================
+    // DSL Methods - File Sources
+    // =========================================================================
+    
+    /**
+     * Define file sources using DSL.
+     * 
+     * <pre>
+     * sources {
+     *     directory('/var/logs') {
+     *         pattern '*.log'
+     *         recursive true
+     *     }
+     *     directory('/backup/logs') {
+     *         pattern 'error-*.log'
+     *     }
+     * }
+     * </pre>
+     */
+    void sources(@DelegatesTo(FileSourcesBuilder) Closure spec) {
+        def builder = new FileSourcesBuilder()
+        spec.delegate = builder
+        spec.resolveStrategy = Closure.DELEGATE_FIRST
+        spec.call()
+        
+        fileSources.addAll(builder.sources)
+    }
+    
+    /**
+     * Explicitly specify files to process.
+     */
+    void files(List<File> fileList) {
+        explicitFiles.addAll(fileList)
+    }
+    
+    // =========================================================================
+    // DSL Methods - Processing
+    // =========================================================================
+    
+    /**
+     * Filter files before processing.
+     */
+    void filter(Closure filterClosure) {
+        this.fileFilter = filterClosure
+    }
+    
+    /**
+     * Process each file individually.
+     * Closure delegate is set to the File being processed.
+     */
+    void eachFile(@DelegatesTo(File) Closure processClosure) {
+        this.eachFileClosure = processClosure
+    }
+    
+    /**
+     * Aggregate results after all files processed.
+     */
+    void aggregate(Closure aggClosure) {
+        this.aggregationClosure = aggClosure
+    }
+    
+    /**
+     * Custom execution logic (full control).
+     */
+    void execute(Closure execClosure) {
+        this.customExecute = execClosure
+    }
+    
+    /**
+     * Add a tap point for visibility.
+     * 
+     * <pre>
+     * tap { data, ctx ->
+     *     println "Current state: ${data}"
+     * }
+     * </pre>
+     */
+    void tap(Closure tapClosure) {
+        tapPoints << new TapPoint(closure: tapClosure)
+    }
+    
+    // =========================================================================
+    // Execution Implementation
+    // =========================================================================
+    
+    @Override
+    protected Promise<Object> runTask(TaskContext taskCtx, Object prevResult) {
+        log.debug("FileTask[${name}] starting execution")
+        
+        return taskCtx.promiseFactory.executeAsync {
+            // Create file-specific context
+            FileTaskContext fileCtx = new FileTaskContext(
+                baseContext: taskCtx,
+                taskName: name
+            )
+            
+            long startTime = System.currentTimeMillis()
+            
+            try {
+                // 1. Discover files
+                List<File> files = discoverFiles(prevResult, fileCtx)
+                executeTaps('discovery', files, fileCtx)
+                
+                // 2. Filter files
+                if (fileFilter) {
+                    files = files.findAll { file ->
+                        try {
+                            fileFilter.call(file)
+                        } catch (Exception e) {
+                            log.warn("Filter failed for ${file}: ${e.message}")
+                            false
+                        }
+                    }
+                    executeTaps('filter', files, fileCtx)
+                }
+                
+                fileCtx.setTotalFiles(files.size())
+                log.debug("FileTask[${name}] processing ${files.size()} files")
+                
+                // 3. Execute processing logic
+                Object result = null
+                
+                if (customExecute) {
+                    // Custom execution
+                    fileCtx.files = files
+                    result = customExecute.call(fileCtx)
+                    
+                } else if (eachFileClosure) {
+                    // Standard per-file processing
+                    result = processFiles(files, fileCtx)
+                    
+                } else {
+                    // No processing closure - just return files
+                    result = files
+                }
+                
+                // 4. Aggregation
+                if (aggregationClosure && !customExecute) {
+                    result = aggregationClosure.call(fileCtx)
+                    executeTaps('aggregate', result, fileCtx)
+                }
+                
+                // 5. Build execution summary
+                long duration = System.currentTimeMillis() - startTime
+                fileCtx.summary.totalDuration = duration
+                fileCtx.summary.filesProcessed = fileCtx.filesProcessed()
+                fileCtx.summary.filesSkipped = files.size() - fileCtx.filesProcessed()
+                
+                log.debug("FileTask[${name}] completed: ${fileCtx.filesProcessed()} files in ${duration}ms")
+                
+                // Return result wrapped with summary
+                return new FileTaskResult(
+                    data: result,
+                    summary: fileCtx.summary
+                )
+                
+            } catch (Exception e) {
+                log.error("FileTask[${name}] failed", e)
+                fileCtx.summary.errorsEncountered++
+                throw e
+            }
+        }
+    }
+    
+    /**
+     * Discover files from all configured sources.
+     */
+    private List<File> discoverFiles(Object prevResult, FileTaskContext ctx) {
+        List<File> allFiles = []
+        
+        // 1. From previous task's promise (if List<File>)
+        if (prevResult instanceof List && prevResult.every { it instanceof File }) {
+            log.debug("FileTask[${name}] using ${prevResult.size()} files from previous task")
+            allFiles.addAll(prevResult as List<File>)
+        }
+        
+        // 2. From explicit files
+        if (explicitFiles) {
+            log.debug("FileTask[${name}] adding ${explicitFiles.size()} explicit files")
+            allFiles.addAll(explicitFiles)
+        }
+        
+        // 3. From directory sources
+        fileSources.each { source ->
+            def discovered = source.discover()
+            log.debug("FileTask[${name}] discovered ${discovered.size()} files from ${source.directory}")
+            allFiles.addAll(discovered)
+        }
+        
+        // Remove duplicates
+        return allFiles.unique { it.canonicalPath }
+    }
+    
+    /**
+     * Process all files using eachFile closure.
+     */
+    private Object processFiles(List<File> files, FileTaskContext ctx) {
+        List<Promise> filePromises = []
+        
+        files.each { file ->
+            // Process each file in its own virtual thread
+            Promise filePromise = ctx.baseContext.promiseFactory.executeAsync {
+                try {
+                    ctx.currentFile = file
+                    
+                    // Set closure delegate to File for GDK access
+                    eachFileClosure.delegate = file
+                    eachFileClosure.resolveStrategy = Closure.DELEGATE_FIRST
+                    
+                    // Call closure with context
+                    def result = eachFileClosure.call(ctx)
+                    
+                    ctx.incrementFilesProcessed()
+                    executeTaps('file', file, ctx)
+                    
+                    return result
+                    
+                } catch (Exception e) {
+                    log.error("Error processing file ${file}: ${e.message}", e)
+                    ctx.summary.errorsEncountered++
+                    ctx.logError(file, e)
+                    return null
+                }
+            }
+            
+            filePromises << filePromise
+        }
+        
+        // Wait for all files to complete
+        Promise.all(filePromises).get()
+        
+        // Return emitted results
+        return ctx.emitted()
+    }
+    
+    /**
+     * Execute tap points for visibility.
+     */
+    private void executeTaps(String phase, Object data, FileTaskContext ctx) {
+        tapPoints.each { tap ->
+            try {
+                tap.closure.call(data, ctx)
+            } catch (Exception e) {
+                log.warn("Tap failed at phase '${phase}': ${e.message}")
+            }
+        }
+    }
+    
+    // =========================================================================
+    // Helper Classes
+    // =========================================================================
+    
+    /**
+     * Builder for file sources DSL.
+     */
+    static class FileSourcesBuilder {
+        List<FileSourceSpec> sources = []
+        
+        void directory(String path, @DelegatesTo(FileSourceSpec) Closure config = null) {
+            def spec = new FileSourceSpec(directory: new File(path))
+            if (config) {
+                config.delegate = spec
+                config.resolveStrategy = Closure.DELEGATE_FIRST
+                config.call()
+            }
+            sources << spec
+        }
+    }
+    
+    /**
+     * Tap point holder.
+     */
+    static class TapPoint {
+        Closure closure
+    }
+}

@@ -234,6 +234,71 @@ interface Promise<T> {
     boolean cancel(boolean mayInterruptIfRunning)
 
     // =========================================================================
+    // Static Factory Methods (Combining)
+    // =========================================================================
+
+    /**
+     * Wait for all promises to complete successfully.
+     * Returns a Promise that completes with a List of all successful values
+     * in the same order as the input. If any promise fails, the result fails.
+     *
+     * <p>This is a static convenience method that delegates to {@link Promises#all}.
+     * It allows for cleaner imports - you only need to import {@code Promise}, not
+     * {@code Promises}.</p>
+     *
+     * <h3>Example:</h3>
+     * <pre>
+     * import org.softwood.promise.Promise
+     *
+     * def p1 = Promise.async { fetchUser(1) }
+     * def p2 = Promise.async { fetchUser(2) }
+     * def p3 = Promise.async { fetchUser(3) }
+     *
+     * Promise.all([p1, p2, p3]).onComplete { users ->
+     *     println "Got ${users.size()} users"
+     * }
+     * </pre>
+     *
+     * @param promises iterable of promises to wait on
+     * @param <T> value type
+     * @return new Promise&lt;List&lt;T&gt;&gt;
+     * @see Promises#all
+     */
+    static <T> Promise<List<T>> all(Iterable<Promise<T>> promises) {
+        return Promises.all(promises)
+    }
+
+    /**
+     * Execute multiple promises and return the first one that succeeds.
+     * If all promises fail, returns a failed promise with aggregated errors.
+     *
+     * <p>This is a static convenience method that delegates to {@link Promises#any}.
+     * It allows for cleaner imports - you only need to import {@code Promise}, not
+     * {@code Promises}.</p>
+     *
+     * <h3>Example:</h3>
+     * <pre>
+     * import org.softwood.promise.Promise
+     *
+     * def p1 = Promise.async { fetchFromServer1() }
+     * def p2 = Promise.async { fetchFromServer2() }
+     * def p3 = Promise.async { fetchFromServer3() }
+     *
+     * Promise.any([p1, p2, p3]).onComplete { result ->
+     *     println "First server responded: ${result}"
+     * }
+     * </pre>
+     *
+     * @param promises iterable of promises to race
+     * @param <T> value type
+     * @return promise that completes with the first successful result
+     * @see Promises#any
+     */
+    static <T> Promise<T> any(Iterable<Promise<T>> promises) {
+        return Promises.any(promises)
+    }
+
+    // =========================================================================
     // Conversion
     // =========================================================================
 

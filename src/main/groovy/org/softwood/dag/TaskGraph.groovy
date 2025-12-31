@@ -395,7 +395,7 @@ class TaskGraph {
                 persistenceManager.markGraphCompleted()
             }
             
-            // Close and cleanup
+            // Close and cleanup - storage.close() blocks until all data is flushed
             persistenceManager.close()
             
         } catch (Exception e) {

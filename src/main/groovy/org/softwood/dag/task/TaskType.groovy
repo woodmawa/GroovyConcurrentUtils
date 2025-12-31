@@ -87,6 +87,13 @@ enum TaskType {
      */
     LOOP(LoopTask, false),
 
+    /**
+     * File task for processing files with rich DSL support.
+     * Supports file discovery, filtering, per-file processing with GDK delegation,
+     * pipeline visibility via tap(), and execution summaries.
+     */
+    FILE(FileTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -290,6 +297,11 @@ enum TaskType {
             case 'rest':
             case 'api':
                 return HTTP
+            case 'file':
+            case 'filetask':
+            case 'files':
+            case 'fileprocessing':
+                return FILE
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

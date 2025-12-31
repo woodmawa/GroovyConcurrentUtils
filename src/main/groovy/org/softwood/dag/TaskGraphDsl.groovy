@@ -191,6 +191,77 @@ class TaskGraphDsl {
         return task(id, TaskType.HTTP, config)
     }
 
+    /**
+     * Create a script task for executing scripts in multiple languages.
+     * 
+     * Usage:
+     *   scriptTask("transform-data") {
+     *       language "javascript"
+     *       script """
+     *           function transform(data) {
+     *               return { fullName: data.first + ' ' + data.last };
+     *           }
+     *           transform(input);
+     *       """
+     *       bindings { ctx, prev -> [input: prev] }
+     *   }
+     */
+    ITask scriptTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.SCRIPT, config)
+    }
+
+    /**
+     * Create a data transform task for functional data pipelines.
+     * 
+     * Usage:
+     *   dataTransform("process-users") {
+     *       transform { ctx ->
+     *           ctx.input
+     *               .filter { it.age > 18 }
+     *               .map { [name: it.name.toUpperCase()] }
+     *       }
+     *   }
+     */
+    ITask dataTransform(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.DATA_TRANSFORM, config)
+    }
+
+    /**
+     * Create a file task for processing files with rich DSL support.
+     * 
+     * Usage:
+     *   fileTask("process-logs") {
+     *       sources {
+     *           directory('/var/logs') {
+     *               pattern '*.log'
+     *               recursive true
+     *           }
+     *       }
+     *       
+     *       filter { file -> file.size() > 1.KB }
+     *       
+     *       tap { files, ctx ->
+     *           println "Processing ${files.size()} files"
+     *       }
+     *       
+     *       eachFile { ctx ->
+     *           // delegate is File - GDK methods available!
+     *           def errorCount = 0
+     *           eachLine { line ->
+     *               if (line.contains('ERROR')) errorCount++
+     *           }
+     *           ctx.emit([file: name, errors: errorCount])
+     *       }
+     *       
+     *       aggregate { ctx ->
+     *           [totalErrors: ctx.emitted().sum { it.errors }]
+     *       }
+     *   }
+     */
+    ITask fileTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.FILE, config)
+    }
+
     // ============================================================================
     // Dependency Declaration - Simple Linear Dependencies
     // ============================================================================

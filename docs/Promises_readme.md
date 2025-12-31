@@ -317,6 +317,84 @@ assert future.get() == 42
 def future2 = promise.asType(CompletableFuture)
 ```
 
+#### Static Combining Methods
+
+##### `Promise.all(Iterable<Promise<T>> promises)`
+Wait for all promises to complete successfully. Returns a promise containing a list of all results in the same order as the input promises. If any promise fails, the returned promise fails immediately.
+
+```groovy
+import org.softwood.promise.Promise
+
+def p1 = Promises.async { fetchUser(1) }
+def p2 = Promises.async { fetchUser(2) }
+def p3 = Promises.async { fetchUser(3) }
+
+Promise.all([p1, p2, p3]).onComplete { users ->
+    println "Got ${users.size()} users"
+    users.each { println it.name }
+}
+
+// If any promise fails, all() fails
+def failing = Promises.async { throw new RuntimeException("Failed") }
+def success = Promises.async { "OK" }
+
+Promise.all([failing, success]).onError { error ->
+    println "One failed: ${error.message}"
+}
+```
+
+**Key Characteristics:**
+- Returns `Promise<List<T>>` containing all results
+- Maintains input order in result list
+- Fails fast - first error fails the entire operation
+- All promises execute in parallel
+- Similar to JavaScript's `Promise.all()`
+
+##### `Promise.any(Iterable<Promise<T>> promises)`
+Race multiple promises and return the first one that succeeds. If all promises fail, returns a failed promise with aggregated errors.
+
+```groovy
+import org.softwood.promise.Promise
+
+def p1 = Promises.async { fetchFromServer1() }
+def p2 = Promises.async { fetchFromServer2() }
+def p3 = Promises.async { fetchFromServer3() }
+
+Promise.any([p1, p2, p3]).onComplete { result ->
+    println "First server responded: ${result}"
+}
+
+// If all fail, any() fails with aggregated errors
+def fail1 = Promises.async { throw new RuntimeException("Server 1 down") }
+def fail2 = Promises.async { throw new RuntimeException("Server 2 down") }
+
+Promise.any([fail1, fail2]).onError { error ->
+    println "All servers failed: ${error.message}"
+}
+```
+
+**Key Characteristics:**
+- Returns `Promise<T>` with the first successful result
+- Ignores slower successful promises after first completes
+- Only fails if ALL promises fail
+- All promises execute in parallel
+- Useful for fallback/redundancy scenarios
+- Similar to JavaScript's `Promise.any()`
+
+**Import Convenience:**
+
+These static methods are available directly on the `Promise` interface, so you only need one import:
+
+```groovy
+import org.softwood.promise.Promise  // Single import needed!
+
+// Both work:
+Promise.all([p1, p2, p3])    // Via Promise interface
+Promises.all([p1, p2, p3])   // Via Promises utility (still works)
+```
+
+This design follows the JavaScript Promise API pattern where `Promise.all()` and `Promise.any()` are static methods on the Promise class itself.
+
 ---
 
 ## Promises Static Facade
@@ -558,19 +636,43 @@ Promises.async {
 }
 ```
 
-### Pattern 4: Parallel Execution
+### Pattern 4: Parallel Execution with Promise.all()
 
 ```groovy
+import org.softwood.promise.Promise
+
 def userPromise = Promises.async { fetchUser(userId) }
 def ordersPromise = Promises.async { fetchOrders(userId) }
 def prefsPromise = Promises.async { fetchPreferences(userId) }
 
-// Wait for all (manual coordination)
+// Wait for all with Promise.all()
+Promise.all([userPromise, ordersPromise, prefsPromise]).onComplete { results ->
+    def (user, orders, prefs) = results
+    processUserData(user, orders, prefs)
+}
+
+// Alternative: Manual coordination (old way)
 def user = userPromise.get()
 def orders = ordersPromise.get()
 def prefs = prefsPromise.get()
-
 processUserData(user, orders, prefs)
+```
+
+### Pattern 4a: Failover with Promise.any()
+
+```groovy
+import org.softwood.promise.Promise
+
+// Try multiple data sources, use first that succeeds
+def primaryPromise = Promises.async { fetchFromPrimary() }
+def secondaryPromise = Promises.async { fetchFromSecondary() }
+def cachePromise = Promises.async { fetchFromCache() }
+
+Promise.any([primaryPromise, secondaryPromise, cachePromise]).onComplete { data ->
+    println "Got data from fastest source: ${data}"
+}.onError { error ->
+    println "All sources failed: ${error.message}"
+}
 ```
 
 ### Pattern 5: CompletableFuture Integration

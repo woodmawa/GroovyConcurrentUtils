@@ -280,6 +280,19 @@ class TaskFactory {
         return new HttpTask(id, name, ctx)
     }
 
+    /**
+     * Create a FileTask - file processing with rich DSL support.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new FileTask instance
+     */
+    static FileTask createFileTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating FileTask: id=$id, name=$name")
+        return new FileTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
@@ -354,6 +367,9 @@ class TaskFactory {
 
             case TaskType.HTTP:
                 return createHttpTask(id, name, ctx)
+
+            case TaskType.FILE:
+                return createFileTask(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

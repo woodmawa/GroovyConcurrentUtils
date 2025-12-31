@@ -42,6 +42,9 @@ class FileSourceSpec {
     /** Custom filter closure */
     Closure<Boolean> customFilter
     
+    /** Security validator (injected from FileTask) */
+    FileTaskSecurityValidator validator
+    
     // =========================================================================
     // DSL Methods
     // =========================================================================
@@ -134,12 +137,22 @@ class FileSourceSpec {
         
         if (recursive) {
             directory.eachFileRecurse(fileType) { file ->
+                // Security: validate symlink before processing
+                if (validator && !validator.validateSymlink(file)) {
+                    return  // Skip this file
+                }
+                
                 if (matches(file, patternRegex, currentTime)) {
                     matchedFiles << file
                 }
             }
         } else {
             directory.eachFile(fileType) { file ->
+                // Security: validate symlink before processing
+                if (validator && !validator.validateSymlink(file)) {
+                    return  // Skip this file
+                }
+                
                 if (matches(file, patternRegex, currentTime)) {
                     matchedFiles << file
                 }

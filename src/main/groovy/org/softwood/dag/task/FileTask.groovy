@@ -150,12 +150,69 @@ class FileTask extends TaskBase<Object> {
     /** Tap points for pipeline visibility */
     List<TapPoint> tapPoints = []
     
+    /** Security configuration (optional) */
+    FileTaskSecurityConfig securityConfig
+    
+    /** Security validator (lazy-initialized) */
+    private FileTaskSecurityValidator validator
+    
     // =========================================================================
     // Constructor
     // =========================================================================
     
     FileTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
+    }
+    
+    // =========================================================================
+    // Security Configuration DSL
+    // =========================================================================
+    
+    /**
+     * Configure security settings for file operations.
+     * 
+     * <pre>
+     * fileTask {
+     *     securityConfig FileTaskSecurityConfig.strict([new File('/var/app/data')])
+     *     // or
+     *     securityConfig {
+     *         strictMode true
+     *         allowedDirectories = [new File('/var/logs')]
+     *         maxFiles 5000
+     *     }
+     * }
+     * </pre>
+     */
+    void securityConfig(FileTaskSecurityConfig config) {
+        this.securityConfig = config
+        this.validator = null  // Reset validator to be re-initialized
+    }
+    
+    /**
+     * Configure security using DSL.
+     */
+    void securityConfig(@DelegatesTo(strategy = Closure.DELEGATE_FIRST) Closure config) {
+        def builder = FileTaskSecurityConfig.builder()
+        config.delegate = builder
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+        this.securityConfig = builder.build()
+        this.validator = null  // Reset validator
+    }
+    
+    /**
+     * Get or create security validator.
+     */
+    private FileTaskSecurityValidator getValidator() {
+        if (validator == null) {
+            // Create default permissive config if none specified
+            if (securityConfig == null) {
+                log.debug("No security config specified, using permissive defaults")
+                securityConfig = FileTaskSecurityConfig.permissive()
+            }
+            validator = new FileTaskSecurityValidator(securityConfig)
+        }
+        return validator
     }
 
     // =========================================================================
@@ -324,6 +381,7 @@ class FileTask extends TaskBase<Object> {
     
     /**
      * Discover files from all configured sources.
+     * Applies security validation to all discovered files.
      */
     private List<File> discoverFiles(Object prevResult, FileTaskContext ctx) {
         List<File> allFiles = []
@@ -340,15 +398,36 @@ class FileTask extends TaskBase<Object> {
             allFiles.addAll(explicitFiles)
         }
         
-        // 3. From directory sources
+        // 3. From directory sources (security validation happens in FileSourceSpec)
         fileSources.each { source ->
+            // Pass validator to source for integrated security
+            source.validator = getValidator()
             def discovered = source.discover()
             log.debug("FileTask[${name}] discovered ${discovered.size()} files from ${source.directory}")
             allFiles.addAll(discovered)
         }
         
         // Remove duplicates
-        return allFiles.unique { it.canonicalPath }
+        allFiles = allFiles.unique { it.canonicalPath }
+        
+        // 4. Apply security validation
+        log.debug("FileTask[${name}] validating ${allFiles.size()} files")
+        allFiles = getValidator().validateFiles(allFiles)
+        
+        // 5. Filter by size
+        allFiles = allFiles.findAll { file ->
+            getValidator().validateFileSize(file)
+        }
+        
+        // 6. Validate file count
+        getValidator().validateFileCount(allFiles.size())
+        
+        // 7. Validate total size
+        getValidator().validateTotalSize(allFiles)
+        
+        log.debug("FileTask[${name}] ${allFiles.size()} files passed security validation")
+        
+        return allFiles
     }
     
     /**

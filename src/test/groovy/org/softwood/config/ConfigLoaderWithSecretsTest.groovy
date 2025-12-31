@@ -19,8 +19,7 @@ class ConfigLoaderWithSecretsTest {
         System.setProperty('TLS_KEYSTORE_PASSWORD', 'test-password-from-env')
         
         try {
-            // CRITICAL: Clear the config cache so it re-parses config.groovy
-            // with the new system property value
+            // Clear the config cache so it re-parses config.groovy
             ConfigCache.clear()
             
             // Load config (which uses SecretsResolver)
@@ -37,7 +36,6 @@ class ConfigLoaderWithSecretsTest {
             
         } finally {
             System.clearProperty('TLS_KEYSTORE_PASSWORD')
-            // Clear cache again for other tests
             ConfigCache.clear()
         }
     }

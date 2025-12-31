@@ -2,6 +2,7 @@ package org.softwood.config
 
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
+import groovy.util.ConfigObject
 import org.yaml.snakeyaml.Yaml
 
 import java.nio.file.Files
@@ -31,13 +32,17 @@ class ParserSupport {
                 return toMap(p)
             }
             if (sourceName.endsWith('.groovy')) {
-                ConfigSlurper cs = new ConfigSlurper()
-                if (profile != null && !profile.isEmpty()) {
-                    cs.setEnvironment(profile)
-                }
-                return (Map<String, Object>) cs.parse(
-                        ParserSupport.class.getResource(sourceName)
-                ).flatten()
+                // Use ConfigSlurper with environment in constructor (not setEnvironment)
+                // This ensures imports work correctly when parsing from URL
+                ConfigSlurper cs = profile != null && !profile.isEmpty() 
+                    ? new ConfigSlurper(profile)
+                    : new ConfigSlurper()
+                
+                // Parse from URL (this makes imports work)
+                URL url = ParserSupport.class.getResource(sourceName)
+                ConfigObject result = cs.parse(url)
+                
+                return flatten(result)
             }
         } finally {
             try { is.close() } catch (ignored) {}
@@ -66,11 +71,16 @@ class ParserSupport {
             return toMap(p)
         }
         if (name.endsWith('.groovy')) {
-            ConfigSlurper cs = new ConfigSlurper()
-            if (profile != null && !profile.isEmpty()) {
-                cs.setEnvironment(profile)
-            }
-            return (Map<String, Object>) cs.parse(path.toUri().toURL()).flatten()
+            // Use ConfigSlurper with environment in constructor (not setEnvironment)
+            // This ensures imports work correctly when parsing from URL
+            ConfigSlurper cs = profile != null && !profile.isEmpty()
+                ? new ConfigSlurper(profile)
+                : new ConfigSlurper()
+            
+            // Parse from URL (this makes imports work)
+            ConfigObject result = cs.parse(path.toUri().toURL())
+            
+            return flatten(result)
         }
 
         return [:]

@@ -28,9 +28,30 @@ class ClasspathConfigSource {
             }
 
             // ------------------------------------------------------------
-            // 3) Groovy base config (with environments {})
+            // 3) Groovy base config (special handling)
+            // Load config.groovy (not config-dev.groovy) but parse with profile
+            // for environments{} block selection
             // ------------------------------------------------------------
-            loadOne(out, basePath, base, null, true, false)
+            for (String ext : ConfigSpec.SUPPORTED_EXTENSIONS) {
+                if (ext != 'groovy') continue
+                
+                String name = base + '.groovy'  // Always load base file
+                String path = (basePath + '/' + name).replace('//', '/')
+                InputStream is = ClasspathConfigSource.class.getResourceAsStream(path)
+                
+                if (is != null) {
+                    String cacheKey = profile != null ? path + "?profile=" + profile : path
+                    Map<String, Object> parsed = ConfigCache.getOrParse(cacheKey) {
+                        InputStream fresh = ClasspathConfigSource.class.getResourceAsStream(path)
+                        if (fresh == null) return [:]
+                        // Parse base file WITH profile for environments{} selection
+                        return ParserSupport.parse(fresh, path, profile)
+                    }
+                    if (!parsed.isEmpty()) {
+                        out.add(new NamedMap("classpath:" + path, parsed))
+                    }
+                }
+            }
 
             // ------------------------------------------------------------
             // 4) Groovy profile config (rare but supported)
@@ -73,8 +94,9 @@ class ClasspathConfigSource {
 
             if (is == null) continue
 
-            // Use ConfigCache to avoid re-parsing unchanged resources
-            Map<String, Object> parsed = ConfigCache.getOrParse(path) {
+            // Use ConfigCache with profile-aware key to avoid re-parsing unchanged resources
+            String cacheKey = profile != null ? path + "?profile=" + profile : path
+            Map<String, Object> parsed = ConfigCache.getOrParse(cacheKey) {
                 // Parse only if not cached
                 InputStream fresh = ClasspathConfigSource.class.getResourceAsStream(path)
                 if (fresh == null) return [:]

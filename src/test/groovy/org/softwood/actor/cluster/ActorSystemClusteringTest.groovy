@@ -280,7 +280,9 @@ class ActorSystemClusteringTest {
         
         // Then: The node should be returned
         assert nodeName != null
-        assert nodeName.contains("172.25.112.1") || nodeName.contains("localhost")
+        // Check it's a valid Hazelcast member format: "Member [IP]:PORT - UUID this"
+        assert nodeName.startsWith("Member ["), "Node name should be Hazelcast member format: $nodeName"
+        assert nodeName.contains(":"), "Node name should contain port: $nodeName"
         log.info "Actor 'calculator' found on node: $nodeName"
         
         // And: Non-existent actors return null

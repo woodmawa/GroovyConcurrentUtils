@@ -1,6 +1,8 @@
 package org.softwood.dag.cluster
 
 import groovy.transform.CompileStatic
+import org.softwood.cluster.ClusterMessageValidator
+
 import java.time.Instant
 
 /**
@@ -8,13 +10,15 @@ import java.time.Instant
  * Unlike TaskEvent which contains Throwable (not serializable), this class
  * only contains serializable state information.
  * 
+ * Supports message signing for integrity validation.
+ * 
  * @author Will Woodman
  * @since 1.0
  */
 @CompileStatic
 class ClusterTaskEvent implements Serializable {
     
-    private static final long serialVersionUID = 1L
+    private static final long serialVersionUID = 2L  // Incremented for signature field
     
     /** Task identifier */
     String taskId
@@ -33,6 +37,9 @@ class ClusterTaskEvent implements Serializable {
     
     /** Error message if task failed */
     String errorMessage
+    
+    /** HMAC signature for message integrity (optional) */
+    String signature
     
     /**
      * Default constructor for serialization
@@ -63,8 +70,53 @@ class ClusterTaskEvent implements Serializable {
         this.errorMessage = errorMsg
     }
     
+    /**
+     * Sign this event using the provided validator.
+     * Sets the signature field based on event data.
+     * 
+     * @param validator Message validator with signing key
+     * @return this event (for method chaining)
+     */
+    ClusterTaskEvent sign(ClusterMessageValidator validator) {
+        if (validator == null) {
+            return this
+        }
+        
+        String messageData = getSignatureData()
+        this.signature = validator.sign(messageData)
+        return this
+    }
+    
+    /**
+     * Verify this event's signature using the provided validator.
+     * 
+     * @param validator Message validator with signing key
+     * @return true if signature is valid, false otherwise
+     */
+    boolean verify(ClusterMessageValidator validator) {
+        if (validator == null) {
+            return true  // No validation if validator not provided
+        }
+        
+        String messageData = getSignatureData()
+        return validator.verify(messageData, this.signature)
+    }
+    
+    /**
+     * Get the canonical string representation of this event for signing.
+     * Includes all fields except signature itself.
+     */
+    private String getSignatureData() {
+        return "${taskId}:${graphRunId}:${state}:${sourceNode}:${timestamp}:${errorMessage ?: ''}"
+    }
+    
     @Override
     String toString() {
-        return "ClusterTaskEvent[task=$taskId, run=$graphRunId, state=$state, node=$sourceNode]"
+        def str = "ClusterTaskEvent[task=$taskId, run=$graphRunId, state=$state, node=$sourceNode"
+        if (signature) {
+            str += ", signed=true"
+        }
+        str += "]"
+        return str
     }
 }

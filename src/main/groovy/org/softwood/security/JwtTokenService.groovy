@@ -1,4 +1,4 @@
-package org.softwood.actor.remote.security
+package org.softwood.security
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j

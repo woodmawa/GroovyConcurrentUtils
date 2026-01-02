@@ -1,5 +1,7 @@
 package org.softwood.dag.task
 
+import groovy.util.logging.Slf4j
+
 /**
  * Security configuration for FileTask operations.
  * 
@@ -24,6 +26,7 @@ package org.softwood.dag.task
  * }
  * </pre>
  */
+@Slf4j
 class FileTaskSecurityConfig {
     
     // =========================================================================
@@ -215,6 +218,24 @@ class FileTaskSecurityConfig {
      * NOT RECOMMENDED FOR PRODUCTION.
      */
     static FileTaskSecurityConfig permissive() {
+        // SECURITY: Prevent permissive configuration in production
+        def env = System.getenv('ENVIRONMENT') ?: System.getProperty('environment') ?: ''
+        if (env.toLowerCase() in ['production', 'prod', 'live', 'staging']) {
+            throw new IllegalStateException(
+                "Permissive FileTask configuration cannot be used in production environment. " +
+                "ENVIRONMENT=${env}. " +
+                "Use strict() factory method instead."
+            )
+        }
+        
+        log.warn("=" * 80)
+        log.warn("⚠️  USING PERMISSIVE FILE TASK CONFIGURATION")
+        log.warn("  - Path restrictions: DISABLED")
+        log.warn("  - Symlink validation: DISABLED")
+        log.warn("  - Resource limits: DISABLED")
+        log.warn("  - FOR DEVELOPMENT/TESTING ONLY")
+        log.warn("=" * 80)
+        
         return builder()
             .strictMode(false)
             .followSymlinks(true)

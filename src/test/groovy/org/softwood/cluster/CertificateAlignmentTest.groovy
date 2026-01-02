@@ -1,6 +1,6 @@
 package org.softwood.cluster
 
-import org.softwood.actor.remote.security.CertificateResolver
+import org.softwood.security.CertificateResolver
 import spock.lang.Specification
 
 class CertificateAlignmentTest extends Specification {

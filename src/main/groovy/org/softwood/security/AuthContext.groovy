@@ -1,7 +1,7 @@
-package org.softwood.actor.remote.security
+package org.softwood.security
 
 import groovy.transform.CompileStatic
-import org.softwood.actor.remote.security.JwtTokenService.TokenClaims
+import org.softwood.security.JwtTokenService.TokenClaims
 
 /**
  * Authentication context for authenticated requests.

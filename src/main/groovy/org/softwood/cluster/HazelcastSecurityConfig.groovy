@@ -1,7 +1,7 @@
 package org.softwood.cluster
 
 import groovy.util.logging.Slf4j
-import org.softwood.actor.remote.security.CertificateResolver
+import org.softwood.security.CertificateResolver
 
 /**
  * Security configuration for Hazelcast clustering.
@@ -16,6 +16,16 @@ import org.softwood.actor.remote.security.CertificateResolver
  */
 @Slf4j
 class HazelcastSecurityConfig {
+    
+    // Security Constants
+    private static final int MIN_USERNAME_LENGTH = 8
+    private static final int MIN_PASSWORD_LENGTH = 12
+    private static final int MIN_SIGNING_KEY_LENGTH = 32
+    private static final List<String> WEAK_PASSWORDS = [
+        'password', 'admin', '12345678', '123456789', '1234567890',
+        'changeme', 'default', 'test', 'demo', 'secret',
+        'qwerty', 'letmein', 'welcome', 'monkey', 'dragon'
+    ]
     
     // TLS/SSL Configuration
     boolean tlsEnabled = false
@@ -59,6 +69,14 @@ class HazelcastSecurityConfig {
     // Logging Configuration
     boolean logSecurityEvents = true
     boolean logAllMessages = false
+    
+    /**
+     * Checks if running in production environment.
+     */
+    private static boolean isProductionEnvironment() {
+        def env = System.getenv('ENVIRONMENT') ?: System.getProperty('environment') ?: ''
+        return env.toLowerCase() in ['production', 'prod', 'live', 'staging']
+    }
     
     // =========================================================================
     // Certificate Resolution Methods
@@ -131,28 +149,21 @@ class HazelcastSecurityConfig {
         }
         
         if (authenticationEnabled) {
-            if (!clusterUsername || clusterUsername.length() < 8) {
-                throw new IllegalStateException(
-                    "clusterUsername must be at least 8 characters when authenticationEnabled=true"
-                )
-            }
-            if (!clusterPassword || clusterPassword.length() < 8) {
-                throw new IllegalStateException(
-                    "clusterPassword must be at least 8 characters when authenticationEnabled=true"
-                )
-            }
+            validateCredential(clusterUsername, "clusterUsername", MIN_USERNAME_LENGTH, false)
+            validateCredential(clusterPassword, "clusterPassword", MIN_PASSWORD_LENGTH, true)
         }
         
         if (messageSigningEnabled) {
-            if (!messageSigningKey || messageSigningKey.length() < 32) {
-                throw new IllegalStateException(
-                    "messageSigningKey must be at least 32 characters when messageSigningEnabled=true. " +
-                    "Current length: ${messageSigningKey?.length() ?: 0}"
-                )
-            }
+            validateCredential(messageSigningKey, "messageSigningKey", MIN_SIGNING_KEY_LENGTH, true)
         }
         
         if (!disableMulticast && allowedMembers.isEmpty()) {
+            if (isProductionEnvironment()) {
+                throw new IllegalStateException(
+                    "Multicast with no member whitelist is not allowed in production. " +
+                    "Either set disableMulticast=true or configure allowedMembers."
+                )
+            }
             log.warn("⚠️  Multicast enabled with no member whitelist - cluster is discoverable by anyone on network!")
         }
         
@@ -212,6 +223,28 @@ class HazelcastSecurityConfig {
     // =========================================================================
     
     static HazelcastSecurityConfig insecure() {
+        // SECURITY: Prevent insecure configuration in production
+        if (isProductionEnvironment()) {
+            throw new IllegalStateException(
+                "Insecure Hazelcast configuration cannot be used in production environment. " +
+                "ENVIRONMENT=${System.getenv('ENVIRONMENT')}. " +
+                "Use secure() or fromConfig() factory methods instead."
+            )
+        }
+        
+        log.error("=" * 80)
+        log.error("⚠️  ⚠️  ⚠️  USING INSECURE HAZELCAST CONFIGURATION  ⚠️  ⚠️  ⚠️")
+        log.error("=" * 80)
+        log.error("This configuration has:")
+        log.error("  ❌ NO TLS/SSL encryption")
+        log.error("  ❌ NO authentication")
+        log.error("  ❌ NO message signing")
+        log.error("  ❌ Multicast enabled (discoverable on network)")
+        log.error("  ❌ Security logging disabled")
+        log.error("=" * 80)
+        log.error("FOR DEVELOPMENT/TESTING ONLY - DO NOT USE IN PRODUCTION")
+        log.error("=" * 80)
+        
         return builder()
             .tlsEnabled(false)
             .authenticationEnabled(false)
@@ -360,5 +393,62 @@ class HazelcastSecurityConfig {
         }
         
         return builder.build()
+    }
+    
+    // =========================================================================
+    // Security Helper Methods
+    // =========================================================================
+
+    /**
+    * Validates a credential (username, password, or key) for security requirements.
+    *
+    * @param credential the credential value
+    * @param fieldName name of the field (for error messages)
+    * @param minLength minimum required length
+    * @param checkWeakValues whether to check against known weak values
+    */
+    private void validateCredential(String credential, String fieldName, int minLength, boolean checkWeakValues) {
+        if (!credential) {
+            throw new IllegalStateException("${fieldName} cannot be null or empty")
+        }
+
+        if (credential.length() < minLength) {
+            throw new IllegalStateException(
+                    "${fieldName} must be at least ${minLength} characters (currently ${credential.length()})"
+            )
+        }
+
+        if (checkWeakValues) {
+            def lowerCred = credential.toLowerCase()
+
+            // Check against known weak passwords
+            for (String weak : WEAK_PASSWORDS) {
+                if (lowerCred.contains(weak)) {
+                    throw new IllegalStateException(
+                            "${fieldName} appears to contain a weak or common value. " +
+                                    "Please use a stronger, randomly-generated credential."
+                    )
+                }
+            }
+
+            // Check for simple patterns
+            if (credential.matches('^[0-9]+$')) {
+                throw new IllegalStateException(
+                        "${fieldName} cannot be all numbers"
+                )
+            }
+
+            if (credential.matches('^[a-zA-Z]+$')) {
+                throw new IllegalStateException(
+                        "${fieldName} must contain at least some numbers or special characters"
+                )
+            }
+
+            // Warn about potential entropy issues
+            def uniqueChars = credential.toSet().size()
+            if (uniqueChars < credential.length() / 2) {
+                log.warn("${fieldName} has low character diversity (only ${uniqueChars} unique characters)")
+            }
+        }
     }
 }

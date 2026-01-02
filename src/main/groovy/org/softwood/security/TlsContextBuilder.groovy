@@ -1,4 +1,4 @@
-package org.softwood.actor.remote.security
+package org.softwood.security
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
@@ -48,7 +48,7 @@ class TlsContextBuilder {
     private String trustStorePath
     private char[] trustStorePassword
     private List<String> protocols = ['TLSv1.3', 'TLSv1.2']
-    private List<String> cipherSuites = []
+    private List<String> cipherSuites = getStrongDefaultCipherSuites()
     
     // Certificate resolution support
     private boolean useResolver = false
@@ -58,6 +58,25 @@ class TlsContextBuilder {
     private String trustStorePropertyName
     private String trustStoreEnvVar
     private boolean developmentMode = false
+    
+    /**
+     * Returns a list of strong cipher suites for TLS 1.3 and 1.2.
+     * These follow current best practices (as of 2025).
+     */
+    private static List<String> getStrongDefaultCipherSuites() {
+        return [
+            // TLS 1.3 ciphers (preferred - authenticated encryption)
+            'TLS_AES_256_GCM_SHA384',
+            'TLS_AES_128_GCM_SHA256',
+            'TLS_CHACHA20_POLY1305_SHA256',
+            
+            // TLS 1.2 ciphers (fallback for older systems)
+            'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384',
+            'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256',
+            'TLS_DHE_RSA_WITH_AES_256_GCM_SHA384',
+            'TLS_DHE_RSA_WITH_AES_128_GCM_SHA256'
+        ]
+    }
     
     /**
      * Creates a new TLS context builder.
@@ -215,6 +234,27 @@ class TlsContextBuilder {
      */
     SSLContext build() throws Exception {
         log.info("Building SSL context with protocols: ${protocols}")
+        
+        // SECURITY: Validate cipher suites
+        if (cipherSuites.isEmpty()) {
+            log.warn("No cipher suites configured, using strong defaults")
+            cipherSuites = getStrongDefaultCipherSuites()
+        } else {
+            // Warn about potentially weak ciphers
+            def weakCiphers = cipherSuites.findAll { cipher ->
+                cipher.contains('_CBC_') ||    // CBC mode (vulnerable to padding oracle)
+                cipher.contains('_3DES_') ||   // 3DES (deprecated, 112-bit)
+                cipher.contains('_RC4_') ||    // RC4 (broken)
+                cipher.contains('_MD5') ||     // MD5 (weak hash)
+                cipher.contains('_SHA1') ||    // SHA1 (deprecated for signing)
+                cipher.contains('_NULL_')      // No encryption!
+            }
+            
+            if (!weakCiphers.isEmpty()) {
+                log.warn("Weak cipher suites detected: ${weakCiphers}")
+                log.warn("Consider removing these from your configuration")
+            }
+        }
         
         // Initialize resolver if needed
         if (useResolver && !resolver) {

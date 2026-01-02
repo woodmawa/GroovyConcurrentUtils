@@ -2,7 +2,7 @@ package org.softwood.config
 
 import groovy.transform.CompileDynamic
 import org.junit.jupiter.api.Test
-import org.softwood.actor.remote.security.SecretsResolver
+import org.softwood.security.SecretsResolver
 import org.softwood.config.cache.ConfigCache
 
 import static org.junit.jupiter.api.Assertions.*

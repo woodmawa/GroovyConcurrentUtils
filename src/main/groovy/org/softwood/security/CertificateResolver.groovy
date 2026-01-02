@@ -1,10 +1,16 @@
-package org.softwood.actor.remote.security
+package org.softwood.security
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.security.KeyStore
+import java.security.cert.X509Certificate
+import java.security.cert.CertificateExpiredException
+import java.security.cert.CertificateNotYetValidException
+import java.time.temporal.ChronoUnit
+import java.time.Instant
 
 /**
  * Resolves certificate paths using multiple strategies.
@@ -155,6 +161,55 @@ class CertificateResolver {
     }
     
     /**
+     * Validates that a path does not contain directory traversal sequences.
+     * Protects against attacks like ../../../../etc/passwd
+     * 
+     * @param path the path to validate
+     * @return true if path is safe, false if it contains traversal attempts
+     */
+    private boolean isPathSafe(String path) {
+        if (!path) return true
+        
+        // Normalize for checking
+        def normalized = path.trim()
+        
+        // Check for parent directory references
+        if (normalized.contains('..')) {
+            log.warn("SECURITY: Rejected path containing '..' traversal: ${sanitizePathForLogging(normalized)}")
+            return false
+        }
+        
+        // Check for home directory expansion
+        if (normalized.startsWith('~')) {
+            log.warn("SECURITY: Rejected path starting with '~': ${sanitizePathForLogging(normalized)}")
+            return false
+        }
+        
+        // Check for null bytes (can cause path truncation on some systems)
+        if (normalized.contains('\u0000')) {
+            log.warn("SECURITY: Rejected path containing null byte")
+            return false
+        }
+        
+        // Check for double slashes that might be used to bypass filters
+        if (normalized.contains('//') || normalized.contains('\\\\')) {
+            log.trace("Path contains double slashes: ${sanitizePathForLogging(normalized)}")
+            // Don't reject - might be legitimate URL or Windows UNC path
+        }
+        
+        return true
+    }
+    
+    /**
+     * Sanitizes a path for logging to avoid exposing sensitive information.
+     */
+    private String sanitizePathForLogging(String path) {
+        if (!path) return "<empty>"
+        if (path.length() <= 40) return path
+        return path.substring(0, 20) + "..." + path.substring(path.length() - 17)
+    }
+    
+    /**
      * Resolves a path, checking if it exists on filesystem or classpath.
      * 
      * @param path the path to resolve
@@ -165,14 +220,28 @@ class CertificateResolver {
         
         def trimmedPath = path.trim()
         
+        // SECURITY: Validate path before attempting to resolve
+        if (!isPathSafe(trimmedPath)) {
+            log.error("SECURITY: Path traversal attempt blocked: ${sanitizePathForLogging(trimmedPath)}")
+            return null
+        }
+        
         // Try as filesystem path
         try {
-            def filePath = Paths.get(trimmedPath)
+            def filePath = Paths.get(trimmedPath).normalize()
+            
+            // Additional check: ensure normalization didn't introduce traversal
+            def normalizedStr = filePath.toString()
+            if (normalizedStr.contains('..')) {
+                log.warn("SECURITY: Normalized path still contains '..': ${sanitizePathForLogging(normalizedStr)}")
+                return null
+            }
+            
             if (Files.exists(filePath)) {
                 return filePath.toAbsolutePath().toString()
             }
         } catch (Exception e) {
-            log.trace("Path not found on filesystem: ${trimmedPath}", e)
+            log.trace("Path not found on filesystem: ${sanitizePathForLogging(trimmedPath)}", e)
         }
         
         // Try as classpath resource
@@ -350,5 +419,95 @@ class CertificateResolver {
         }
         
         return null
+    }
+    
+    /**
+     * Validates that a keystore/truststore contains only valid (non-expired) certificates.
+     * 
+     * @param resolvedPath path to the keystore/truststore file
+     * @param password keystore password
+     * @param keystoreType type of keystore (JKS, PKCS12, etc.)
+     * @return true if all certificates are valid, false otherwise
+     */
+    boolean validateCertificateExpiration(String resolvedPath, char[] password, String keystoreType = 'JKS') {
+        if (!resolvedPath) {
+            log.warn("Cannot validate null certificate path")
+            return false
+        }
+        
+        try {
+            // Load the keystore
+            KeyStore ks = KeyStore.getInstance(keystoreType)
+            def stream = openStream(resolvedPath)
+            if (!stream) {
+                log.error("Cannot open certificate file for validation: ${sanitizePathForLogging(resolvedPath)}")
+                return false
+            }
+            
+            try {
+                ks.load(stream, password)
+            } finally {
+                stream.close()
+            }
+            
+            // Check all certificates
+            def aliases = ks.aliases()
+            boolean allValid = true
+            int validCount = 0
+            int expiredCount = 0
+            int notYetValidCount = 0
+            
+            while (aliases.hasMoreElements()) {
+                def alias = aliases.nextElement()
+                def cert = ks.getCertificate(alias)
+                
+                if (cert instanceof X509Certificate) {
+                    X509Certificate x509 = (X509Certificate) cert
+                    
+                    try {
+                        // Check if certificate is currently valid
+                        x509.checkValidity()
+                        validCount++
+                        
+                        // Warn if expiring soon (within 30 days)
+                        def notAfter = x509.getNotAfter()
+                        def daysUntilExpiry = ChronoUnit.DAYS.between(
+                            Instant.now(),
+                            notAfter.toInstant()
+                        )
+                        
+                        if (daysUntilExpiry < 30) {
+                            log.warn("⚠️  Certificate '${alias}' expires in ${daysUntilExpiry} days (on ${notAfter})")
+                        }
+                        
+                        if (daysUntilExpiry < 7) {
+                            log.error("🚨 Certificate '${alias}' expires in ${daysUntilExpiry} days! URGENT renewal needed!")
+                        }
+                        
+                    } catch (CertificateExpiredException e) {
+                        log.error("❌ Certificate '${alias}' has EXPIRED on ${x509.getNotAfter()}")
+                        expiredCount++
+                        allValid = false
+                        
+                    } catch (CertificateNotYetValidException e) {
+                        log.error("❌ Certificate '${alias}' is not yet valid until ${x509.getNotBefore()}")
+                        notYetValidCount++
+                        allValid = false
+                    }
+                }
+            }
+            
+            if (allValid) {
+                log.info("✓ All ${validCount} certificate(s) in keystore are valid")
+            } else {
+                log.error("Certificate validation failed: ${expiredCount} expired, ${notYetValidCount} not yet valid, ${validCount} valid")
+            }
+            
+            return allValid
+            
+        } catch (Exception e) {
+            log.error("Failed to validate certificates in ${sanitizePathForLogging(resolvedPath)}", e)
+            return false
+        }
     }
 }

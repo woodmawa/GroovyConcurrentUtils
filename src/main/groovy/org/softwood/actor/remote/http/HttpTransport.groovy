@@ -9,8 +9,8 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.actor.ActorSystem
 import org.softwood.actor.remote.RemotingTransport
-import org.softwood.actor.remote.security.AuthConfig
-import org.softwood.actor.remote.security.JwtTokenService
+import org.softwood.security.AuthConfig
+import org.softwood.security.JwtTokenService
 
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.KeyManagerFactory

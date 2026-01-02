@@ -1,7 +1,7 @@
 package org.softwood.sampleScripts.securityExamples
 
 import org.softwood.actor.remote.rsocket.RSocketTransport
-import org.softwood.actor.remote.security.CertificateResolver
+import org.softwood.security.CertificateResolver
 
 /**
  * Practical Usage Examples for TLS Configuration in GroovyConcurrentUtils

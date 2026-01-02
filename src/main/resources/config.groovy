@@ -3,7 +3,7 @@
 //distributed = false
 
 // Remote Actor Transport Configuration
-import org.softwood.actor.remote.security.SecretsResolver
+import org.softwood.security.SecretsResolver
 
 actor {
     remote {
@@ -23,9 +23,32 @@ actor {
             tls {
                 enabled = false
                 keyStore = '/etc/actors/server-keystore.jks'
-                keyStorePassword = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
+                // SECURITY: No default passwords - must be configured via environment
+                keyStorePassword = {
+                    def env = System.getenv('ENVIRONMENT') ?: 'development'
+                    if (env.toLowerCase() in ['production', 'prod', 'staging']) {
+                        return SecretsResolver.resolveRequired('TLS_KEYSTORE_PASSWORD')
+                    } else {
+                        def password = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
+                        if (password == 'changeit') {
+                            println "⚠️  WARNING: Using default TLS keystore password in ${env} environment - NOT FOR PRODUCTION"
+                        }
+                        return password
+                    }
+                }()
                 trustStore = '/etc/actors/truststore.jks'
-                trustStorePassword = SecretsResolver.resolve('TLS_TRUSTSTORE_PASSWORD', 'changeit')
+                trustStorePassword = {
+                    def env = System.getenv('ENVIRONMENT') ?: 'development'
+                    if (env.toLowerCase() in ['production', 'prod', 'staging']) {
+                        return SecretsResolver.resolveRequired('TLS_TRUSTSTORE_PASSWORD')
+                    } else {
+                        def password = SecretsResolver.resolve('TLS_TRUSTSTORE_PASSWORD', 'changeit')
+                        if (password == 'changeit') {
+                            println "⚠️  WARNING: Using default TLS truststore password in ${env} environment - NOT FOR PRODUCTION"
+                        }
+                        return password
+                    }
+                }()
             }
         }
         
@@ -39,7 +62,19 @@ actor {
             tls {
                 enabled = false
                 keyStore = '/etc/actors/server-keystore.jks'
-                keyStorePassword = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
+                // SECURITY: No default passwords - must be configured via environment
+                keyStorePassword = {
+                    def env = System.getenv('ENVIRONMENT') ?: 'development'
+                    if (env.toLowerCase() in ['production', 'prod', 'staging']) {
+                        return SecretsResolver.resolveRequired('TLS_KEYSTORE_PASSWORD')
+                    } else {
+                        def password = SecretsResolver.resolve('TLS_KEYSTORE_PASSWORD', 'changeit')
+                        if (password == 'changeit') {
+                            println "⚠️  WARNING: Using default HTTPS keystore password in ${env} environment - NOT FOR PRODUCTION"
+                        }
+                        return password
+                    }
+                }()
             }
         }
     }
@@ -111,7 +146,13 @@ environments {
         database {
             url = 'jdbc:h2:mem:testdb'
             username = 'test'
-            password = 'test123'
+            // SECURITY: Generate random password for test database
+            password = {
+                def random = new java.security.SecureRandom()
+                def bytes = new byte[16]
+                random.nextBytes(bytes)
+                return "test_" + bytes.encodeBase64().toString()
+            }()
         }
         taskgraph {
             persistence {

@@ -3,8 +3,8 @@ package org.softwood.actor.remote.http
 import groovy.transform.CompileDynamic
 import org.junit.jupiter.api.*
 import org.softwood.actor.ActorSystem
-import org.softwood.actor.remote.security.AuthConfig
-import org.softwood.actor.remote.security.JwtTokenService
+import org.softwood.security.AuthConfig
+import org.softwood.security.JwtTokenService
 
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger

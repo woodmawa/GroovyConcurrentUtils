@@ -35,6 +35,9 @@ dependencies {
     // Optional: RSocket Load Balancer
     implementation 'io.rsocket:rsocket-load-balancer:1.1.5'
 
+    //javascript for script engine loading
+    implementation("org.openjdk.nashorn:nashorn-core:15.7")
+
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

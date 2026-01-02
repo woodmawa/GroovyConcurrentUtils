@@ -5,7 +5,7 @@ package org.softwood.actor
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
-import org.softwood.actor.remote.security.AuthContext as SecurityAuthContext
+import org.softwood.security.AuthContext as SecurityAuthContext
 import org.softwood.actor.scheduling.Cancellable
 
 import java.time.Duration

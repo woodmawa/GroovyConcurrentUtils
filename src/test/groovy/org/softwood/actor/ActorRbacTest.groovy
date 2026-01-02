@@ -2,8 +2,8 @@ package org.softwood.actor
 
 import groovy.transform.CompileDynamic
 import org.junit.jupiter.api.*
-import org.softwood.actor.remote.security.AuthContext as SecurityAuthContext
-import org.softwood.actor.remote.security.JwtTokenService
+import org.softwood.security.AuthContext as SecurityAuthContext
+import org.softwood.security.JwtTokenService
 
 import java.time.Duration
 

@@ -14,9 +14,9 @@ import io.rsocket.transport.netty.server.TcpServerTransport
 import io.rsocket.util.DefaultPayload
 import org.softwood.actor.ActorSystem
 import org.softwood.actor.remote.RemotingTransport
-import org.softwood.actor.remote.security.AuthConfig
-import org.softwood.actor.remote.security.JwtTokenService
-import org.softwood.actor.remote.security.TlsContextBuilder
+import org.softwood.security.AuthConfig
+import org.softwood.security.JwtTokenService
+import org.softwood.security.TlsContextBuilder
 import reactor.core.publisher.Mono
 import reactor.netty.tcp.TcpClient
 import reactor.netty.tcp.TcpServer
@@ -304,7 +304,7 @@ class RSocketTransport implements RemotingTransport {
                     
                     try {
                         def claims = jwtService.validateToken(token)
-                        authContext = new org.softwood.actor.remote.security.AuthContext(claims, token)
+                        authContext = new org.softwood.security.AuthContext(claims, token)
                         log.debug("Authenticated tell from: ${claims.subject}")
                     } catch (JwtTokenService.ExpiredTokenException e) {
                         log.warn("Rejected tell - token expired: ${e.message}")
@@ -361,7 +361,7 @@ class RSocketTransport implements RemotingTransport {
                     
                     try {
                         def claims = jwtService.validateToken(token)
-                        authContext = new org.softwood.actor.remote.security.AuthContext(claims, token)
+                        authContext = new org.softwood.security.AuthContext(claims, token)
                         log.debug("Authenticated ask from: ${claims.subject}")
                     } catch (JwtTokenService.ExpiredTokenException e) {
                         log.warn("Rejected ask - token expired: ${e.message}")

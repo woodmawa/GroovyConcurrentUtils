@@ -293,6 +293,32 @@ class TaskFactory {
         return new FileTask(id, name, ctx)
     }
 
+    /**
+     * Create a MessagingTask - Kafka/AMQP/Vert.x/in-memory messaging.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new MessagingTask instance
+     */
+    static MessagingTask createMessagingTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating MessagingTask: id=$id, name=$name")
+        return new MessagingTask(id, name, ctx)
+    }
+
+    /**
+     * Create a SqlTask - SQL database queries and updates.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SqlTask instance
+     */
+    static SqlTask createSqlTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating SqlTask: id=$id, name=$name")
+        return new SqlTask(id, name, ctx)
+    }
+
     // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
@@ -370,6 +396,12 @@ class TaskFactory {
 
             case TaskType.FILE:
                 return createFileTask(id, name, ctx)
+
+            case TaskType.MESSAGING:
+                return createMessagingTask(id, name, ctx)
+
+            case TaskType.SQL:
+                return createSqlTask(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

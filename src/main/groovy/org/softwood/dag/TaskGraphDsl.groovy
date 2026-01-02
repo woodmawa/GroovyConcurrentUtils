@@ -262,6 +262,59 @@ class TaskGraphDsl {
         return task(id, TaskType.FILE, config)
     }
 
+    /**
+     * Create a messaging task for Kafka/AMQP/Vert.x/in-memory messaging.
+     * 
+     * <h3>Send Messages:</h3>
+     * <pre>
+     * messagingTask("publish") {
+     *     producer new VertxEventBusProducer(vertx)  // Uses existing Vert.x!
+     *     destination "orders"
+     *     message { prev -> [orderId: prev.id] }
+     * }
+     * </pre>
+     * 
+     * <h3>Receive Messages:</h3>
+     * <pre>
+     * messagingTask("consume") {
+     *     subscribe "orders", "notifications"
+     *     onMessage { ctx, msg -> processMessage(msg) }
+     * }
+     * </pre>
+     */
+    ITask messagingTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.MESSAGING, config)
+    }
+
+    /**
+     * Create a SQL database task for queries and updates.
+     * 
+     * <h3>Query Mode:</h3>
+     * <pre>
+     * sqlTask("fetch-users") {
+     *     dataSource {
+     *         url "jdbc:h2:mem:test"
+     *         username "sa"
+     *         password ""
+     *     }
+     *     query "SELECT * FROM users WHERE age > ?"
+     *     params 18
+     * }
+     * </pre>
+     * 
+     * <h3>Update Mode:</h3>
+     * <pre>
+     * sqlTask("create-user") {
+     *     provider myProvider
+     *     update "INSERT INTO users (name, age) VALUES (?, ?)"
+     *     params { prev -> [prev.name, prev.age] }
+     * }
+     * </pre>
+     */
+    ITask sqlTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.SQL, config)
+    }
+
     // ============================================================================
     // Dependency Declaration - Simple Linear Dependencies
     // ============================================================================

@@ -94,6 +94,20 @@ enum TaskType {
      */
     FILE(FileTask, false),
 
+    /**
+     * Messaging task for sending/receiving messages via Kafka, AMQP, Vert.x, or in-memory queues.
+     * ZERO DEPENDENCIES: Uses InMemoryProducer/Consumer by default.
+     * Also supports VertxEventBusProducer (existing Vert.x dependency).
+     */
+    MESSAGING(MessagingTask, false),
+
+    /**
+     * SQL database task for executing queries and updates.
+     * ZERO DEPENDENCIES: Uses JDBC (built into JDK) by default.
+     * Add groovy-sql, H2, or HikariCP for enhanced features.
+     */
+    SQL(SqlTask, false),
+
     // =========================================================================
     // Decision Tasks (IDecisionTask)
     // =========================================================================
@@ -302,6 +316,22 @@ enum TaskType {
             case 'files':
             case 'fileprocessing':
                 return FILE
+            case 'messaging':
+            case 'messagingtask':
+            case 'kafka':
+            case 'amqp':
+            case 'queue':
+            case 'topic':
+            case 'eventbus':
+            case 'vertx':
+                return MESSAGING
+            case 'sql':
+            case 'sqltask':
+            case 'database':
+            case 'db':
+            case 'jdbc':
+            case 'query':
+                return SQL
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

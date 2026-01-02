@@ -13,6 +13,7 @@ repositories {
 dependencies {
     implementation "org.apache.groovy:groovy:$groovyVersion"
     implementation "org.apache.groovy:groovy-json:$groovyVersion"
+    implementation "org.apache.groovy:groovy-sql:$groovyVersion"
     implementation "com.hazelcast:hazelcast:5.6.0"
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
@@ -47,6 +48,7 @@ dependencies {
     testImplementation 'org.awaitility:awaitility:4.3.0'
     testImplementation 'org.spockframework:spock-core:2.4-groovy-5.0'
     testImplementation 'org.wiremock:wiremock:3.3.1'
+    testImplementation 'com.h2database:h2:2.2.224'
 }
 
 //hack to use spock with version 5 groovy till put up on maven

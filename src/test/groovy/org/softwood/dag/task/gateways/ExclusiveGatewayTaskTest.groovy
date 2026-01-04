@@ -1,4 +1,4 @@
-package org.softwood.dag
+package org.softwood.dag.task.gateways
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach

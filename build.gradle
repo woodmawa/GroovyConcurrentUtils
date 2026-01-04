@@ -14,10 +14,15 @@ dependencies {
     implementation "org.apache.groovy:groovy:$groovyVersion"
     implementation "org.apache.groovy:groovy-json:$groovyVersion"
     implementation "org.apache.groovy:groovy-sql:$groovyVersion"
+    implementation "org.apache.groovy:groovy-templates:$groovyVersion"
     implementation "com.hazelcast:hazelcast:5.6.0"
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
     implementation "org.yaml:snakeyaml:2.5"
+
+    //mail client
+    implementation("org.simplejavamail:simple-java-mail:8.12.6")
+
     //two serialisers - EclipseStore (successor to MicroStream, Java 25 compatible)
     implementation "org.eclipse.store:storage-embedded:3.1.0"
     implementation "org.eclipse.store:storage-embedded-configuration:3.1.0"

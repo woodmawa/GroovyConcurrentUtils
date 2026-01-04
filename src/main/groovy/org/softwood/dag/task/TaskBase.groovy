@@ -126,6 +126,60 @@ abstract class TaskBase<T> implements ITask<T> {
     }
 
     // ----------------------------------------------------
+    // Resolver Support
+    // ----------------------------------------------------
+    
+    /**
+     * Create a resolver for this task execution.
+     * Provides DSL access to prev and ctx during task configuration.
+     * 
+     * @param prevValue Result from previous task
+     * @param ctx Task context
+     * @return TaskResolver instance
+     */
+    protected TaskResolver createResolver(Object prevValue, TaskContext ctx) {
+        return new TaskResolver(prevValue, ctx)
+    }
+    
+    /**
+     * Execute a closure with resolver support.
+     * 
+     * This allows DSL closures to receive a resolver parameter for
+     * accessing previous task results, globals, and credentials.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * task("example") { r ->
+     *     // r is a TaskResolver
+     *     def userId = r.prev.userId
+     *     def apiKey = r.credential('api.key')
+     *     r.setGlobal('processed', true)
+     * }
+     * </pre>
+     * 
+     * @param closure DSL closure (may or may not accept resolver parameter)
+     * @param prevValue Previous task result
+     * @param ctx Task context
+     * @return Result from closure
+     */
+    protected Object executeWithResolver(Closure closure, Object prevValue, TaskContext ctx) {
+        def resolver = createResolver(prevValue, ctx)
+        
+        // Check if closure accepts parameters
+        if (closure.maximumNumberOfParameters > 0) {
+            // Closure expects resolver parameter
+            closure.delegate = resolver
+            closure.resolveStrategy = Closure.DELEGATE_FIRST
+            return closure.call(resolver)
+        } else {
+            // Closure doesn't expect parameters (legacy support)
+            closure.delegate = this
+            closure.resolveStrategy = Closure.DELEGATE_FIRST
+            return closure.call()
+        }
+    }
+    
+    // ----------------------------------------------------
     // Retry DSL Configuration
     // ----------------------------------------------------
     

@@ -1,6 +1,8 @@
-package org.softwood.dag
+package org.softwood.dag.task.gateways
 
 import org.junit.jupiter.api.Test
+import org.softwood.dag.TaskGraph
+
 import static org.junit.jupiter.api.Assertions.*
 
 import org.awaitility.Awaitility

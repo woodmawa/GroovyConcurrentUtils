@@ -1,7 +1,12 @@
-package org.softwood.dag.task
+package org.softwood.dag.task.gateways
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach
+import org.softwood.dag.task.ParallelGatewayTask
+import org.softwood.dag.task.TaskContext
+import org.softwood.dag.task.TaskFactory
+import org.softwood.dag.task.TaskType
+
 import static org.junit.jupiter.api.Assertions.*
 
 import org.softwood.dag.TaskGraph

@@ -47,6 +47,9 @@ class EclipseStoreManager implements AutoCloseable {
     // Track pending async persistence operations
     private final AtomicInteger pendingAsyncOps = new AtomicInteger(0)
     
+    // Latch to signal when persistence is fully complete
+    private CountDownLatch persistenceCompleteLatch = new CountDownLatch(1)
+    
     // Thread-local registry to prevent interference between concurrent runs
     private static final ThreadLocal<EclipseStoreManager> THREAD_LOCAL = new ThreadLocal<>()
     
@@ -264,6 +267,9 @@ class EclipseStoreManager implements AutoCloseable {
             
         } catch (Exception e) {
             log.error "Failed to mark graph as completed", e
+        } finally {
+            // Signal that persistence is complete
+            persistenceCompleteLatch.countDown()
         }
     }
     
@@ -292,6 +298,9 @@ class EclipseStoreManager implements AutoCloseable {
             
         } catch (Exception e) {
             log.error "Failed to mark graph as failed", e
+        } finally {
+            // Signal that persistence is complete
+            persistenceCompleteLatch.countDown()
         }
     }
     
@@ -307,6 +316,19 @@ class EclipseStoreManager implements AutoCloseable {
      */
     Path getSnapshotFile() {
         return snapshotFile
+    }
+    
+    /**
+     * Wait for persistence to complete.
+     * This method blocks until markGraphCompleted() or markGraphFailed() has finished.
+     * 
+     * @param timeout maximum time to wait
+     * @param unit time unit
+     * @return true if persistence completed, false if timeout
+     * @throws InterruptedException if interrupted while waiting
+     */
+    boolean awaitPersistenceComplete(long timeout = 10, TimeUnit unit = TimeUnit.SECONDS) throws InterruptedException {
+        return persistenceCompleteLatch.await(timeout, unit)
     }
     
     /**

@@ -6,11 +6,14 @@ import org.softwood.pool.ExecutorPool
 import org.softwood.promise.PromiseFactory
 import org.softwood.pool.ExecutorPoolFactory
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
+import org.softwood.dag.IBinding
+import org.softwood.dag.TaskBinding
 
 @Slf4j
 class TaskContext {
 
-    final Map<String, Object> globals = [:].asSynchronized()
+    final IBinding globals = new TaskBinding()
+    final IBinding credentials = new TaskBinding()
     final Map config
     final ExecutorPool pool
     final PromiseFactory promiseFactory
@@ -93,10 +96,10 @@ class TaskContext {
     }
 
     Object get(String key) {
-        globals[key]
+        globals.get(key)
     }
 
     void set(String key, Object value) {
-        globals[key] = value
+        globals.set(key, value)
     }
 }

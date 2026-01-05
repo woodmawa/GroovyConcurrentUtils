@@ -135,6 +135,9 @@ class FileTask extends TaskBase<Object> {
     /** Explicit file list */
     List<File> explicitFiles = []
     
+    /** Deferred file list builder (with resolver) */
+    private Closure deferredFilesBuilder
+    
     /** File filter closure */
     Closure fileFilter
     
@@ -222,19 +225,29 @@ class FileTask extends TaskBase<Object> {
     /**
      * Define file sources using DSL.
      * 
+     * <h3>Static paths:</h3>
      * <pre>
      * sources {
      *     directory('/var/logs') {
      *         pattern '*.log'
      *         recursive true
      *     }
-     *     directory('/backup/logs') {
-     *         pattern 'error-*.log'
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic paths (with resolver):</h3>
+     * <pre>
+     * sources { r ->
+     *     directory(r.global('log.directory', '/var/logs')) {
+     *         pattern r.global('log.pattern', '*.log')
+     *         recursive true
      *     }
      * }
      * </pre>
      */
     void sources(@DelegatesTo(FileSourcesBuilder) Closure spec) {
+        // Note: FileSourcesBuilder doesn't need resolver - directory() accepts path strings
+        // So we just execute normally
         def builder = new FileSourcesBuilder()
         spec.delegate = builder
         spec.resolveStrategy = Closure.DELEGATE_FIRST
@@ -245,9 +258,26 @@ class FileTask extends TaskBase<Object> {
     
     /**
      * Explicitly specify files to process.
+     * 
+     * <h3>Static file list:</h3>
+     * <pre>
+     * files([new File('/data/file1.txt'), new File('/data/file2.txt')])
+     * </pre>
+     * 
+     * <h3>Dynamic file list (with resolver):</h3>
+     * <pre>
+     * files { r ->
+     *     def dir = new File(r.global('data.directory'))
+     *     dir.listFiles().findAll { it.name.contains(r.prev.filter) }
+     * }
+     * </pre>
      */
-    void files(List<File> fileList) {
-        explicitFiles.addAll(fileList)
+    void files(Object value) {
+        if (value instanceof List) {
+            explicitFiles.addAll(value as List<File>)
+        } else if (value instanceof Closure) {
+            deferredFilesBuilder = value as Closure
+        }
     }
     
     // =========================================================================
@@ -256,6 +286,19 @@ class FileTask extends TaskBase<Object> {
     
     /**
      * Filter files before processing.
+     * 
+     * <h3>Simple filter:</h3>
+     * <pre>
+     * filter { file -> file.size() > 1024 }
+     * </pre>
+     * 
+     * <h3>Filter with resolver (for dynamic criteria):</h3>
+     * <pre>
+     * filter { r, file ->
+     *     file.size() > r.global('min.file.size', 1024) &&
+     *     file.name.contains(r.prev.searchTerm)
+     * }
+     * </pre>
      */
     void filter(Closure filterClosure) {
         this.fileFilter = filterClosure
@@ -315,14 +358,20 @@ class FileTask extends TaskBase<Object> {
             
             try {
                 // 1. Discover files
-                List<File> files = discoverFiles(prevResult, fileCtx)
+                List<File> files = discoverFiles(prevResult, fileCtx, taskCtx)
                 executeTaps('discovery', files, fileCtx)
                 
                 // 2. Filter files
                 if (fileFilter) {
                     files = files.findAll { file ->
                         try {
-                            fileFilter.call(file)
+                            // Check if filter expects resolver parameter
+                            if (fileFilter.maximumNumberOfParameters > 1) {
+                                def resolver = createResolver(prevResult, taskCtx)
+                                return fileFilter.call(resolver, file)
+                            } else {
+                                return fileFilter.call(file)
+                            }
                         } catch (Exception e) {
                             log.warn("Filter failed for ${file}: ${e.message}")
                             false
@@ -383,7 +432,7 @@ class FileTask extends TaskBase<Object> {
      * Discover files from all configured sources.
      * Applies security validation to all discovered files.
      */
-    private List<File> discoverFiles(Object prevResult, FileTaskContext ctx) {
+    private List<File> discoverFiles(Object prevResult, FileTaskContext fileCtx, TaskContext taskCtx) {
         List<File> allFiles = []
         
         // 1. From previous task's promise (if List<File>)
@@ -398,7 +447,16 @@ class FileTask extends TaskBase<Object> {
             allFiles.addAll(explicitFiles)
         }
         
-        // 3. From directory sources (security validation happens in FileSourceSpec)
+        // 3. From deferred file builder (with resolver)
+        if (deferredFilesBuilder) {
+            def files = executeWithResolver(deferredFilesBuilder, prevResult, taskCtx)
+            if (files instanceof List) {
+                log.debug("FileTask[${name}] adding ${files.size()} files from builder")
+                allFiles.addAll(files as List<File>)
+            }
+        }
+        
+        // 4. From directory sources (security validation happens in FileSourceSpec)
         fileSources.each { source ->
             // Pass validator to source for integrated security
             source.validator = getValidator()

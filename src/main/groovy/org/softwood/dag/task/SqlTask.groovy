@@ -70,6 +70,9 @@ class SqlTask extends TaskBase<Object> {
     /** SQL provider (default: JdbcSqlProvider) */
     private SqlProvider provider
     
+    /** Deferred datasource configuration (with resolver) */
+    private Closure deferredDataSourceConfig
+    
     /** SQL query/statement */
     private String sql
     
@@ -119,14 +122,37 @@ class SqlTask extends TaskBase<Object> {
     /**
      * Configure provider with JDBC connection details.
      * Creates a JdbcSqlProvider automatically.
+     * 
+     * <h3>Static Configuration:</h3>
+     * <pre>
+     * dataSource {
+     *     url = "jdbc:h2:mem:test"
+     *     username = "sa"
+     *     password = ""
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic Configuration (with resolver):</h3>
+     * <pre>
+     * dataSource { r ->
+     *     url = r.global('db.url')
+     *     username = r.credential('db.username')
+     *     password = r.credential('db.password')
+     * }
+     * </pre>
      */
     void dataSource(@DelegatesTo(JdbcSqlProvider) Closure config) {
         def jdbcProvider = new JdbcSqlProvider()
-        config.delegate = jdbcProvider
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
-        jdbcProvider.initialize()
-        this.provider = jdbcProvider
+        
+        // configureDsl returns false if needs to be deferred
+        if (!configureDsl(jdbcProvider, config, null, null)) {
+            // Defer until runTask when resolver is available
+            this.deferredDataSourceConfig = config
+        } else {
+            // Executed immediately - initialize provider
+            jdbcProvider.initialize()
+            this.provider = jdbcProvider
+        }
     }
     
     /**
@@ -168,7 +194,17 @@ class SqlTask extends TaskBase<Object> {
     }
     
     /**
-     * Set parameter builder (receives prev result).
+     * Set parameter builder.
+     * 
+     * <h3>Legacy (receives prev result directly):</h3>
+     * <pre>
+     * params { prev -> [prev.name, prev.age] }
+     * </pre>
+     * 
+     * <h3>With Resolver:</h3>
+     * <pre>
+     * params { r -> [r.prev.name, r.prev.age] }
+     * </pre>
      */
     void params(Closure builder) {
         this.paramsBuilder = builder
@@ -176,6 +212,21 @@ class SqlTask extends TaskBase<Object> {
     
     /**
      * Set result mapper (transforms query results).
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * resultMapper { rows ->
+     *     rows.collect { [id: it.id, name: it.name] }
+     * }
+     * </pre>
+     * 
+     * <h3>With Resolver:</h3>
+     * <pre>
+     * resultMapper { r, rows ->
+     *     def format = r.global('date.format', 'yyyy-MM-dd')
+     *     rows.collect { [id: it.id, date: formatDate(it.date, format)] }
+     * }
+     * </pre>
      */
     void resultMapper(Closure mapper) {
         this.resultMapper = mapper
@@ -222,8 +273,16 @@ class SqlTask extends TaskBase<Object> {
     @Override
     protected Promise<Object> runTask(TaskContext ctx, Object prevValue) {
         return ctx.promiseFactory.executeAsync {
+            // Configure deferred datasource if needed
+            if (deferredDataSourceConfig && !provider) {
+                def jdbcProvider = new JdbcSqlProvider()
+                executeDeferredConfig(deferredDataSourceConfig, jdbcProvider, ctx, prevValue)
+                jdbcProvider.initialize()
+                this.provider = jdbcProvider
+            }
+            
             if (!provider) {
-                throw new IllegalStateException("SqlTask: provider not configured")
+                throw new IllegalStateException("SqlTask '${id}': provider not configured")
             }
             
             switch (mode) {
@@ -243,10 +302,10 @@ class SqlTask extends TaskBase<Object> {
     
     private Object executeQuery(TaskContext ctx, Object prevValue) {
         if (!sql) {
-            throw new IllegalStateException("SqlTask: query not configured")
+            throw new IllegalStateException("SqlTask '${id}': query not configured")
         }
         
-        def params = buildParams(prevValue)
+        def params = buildParams(ctx, prevValue)
         
         if (logSql) {
             log.info("SqlTask '{}': executing query: {}", id, sql)
@@ -259,7 +318,7 @@ class SqlTask extends TaskBase<Object> {
         
         // Apply result mapper if configured
         if (resultMapper) {
-            return resultMapper.call(results)
+            return applyResultMapper(results, ctx, prevValue)
         }
         
         return results
@@ -267,10 +326,10 @@ class SqlTask extends TaskBase<Object> {
     
     private Object executeUpdate(TaskContext ctx, Object prevValue) {
         if (!sql) {
-            throw new IllegalStateException("SqlTask: update statement not configured")
+            throw new IllegalStateException("SqlTask '${id}': update statement not configured")
         }
         
-        def params = buildParams(prevValue)
+        def params = buildParams(ctx, prevValue)
         
         if (logSql) {
             log.info("SqlTask '{}': executing update: {}", id, sql)
@@ -289,7 +348,7 @@ class SqlTask extends TaskBase<Object> {
     
     private Object executeCriteria(TaskContext ctx, Object prevValue) {
         if (!criteriaBuilder) {
-            throw new IllegalStateException("SqlTask: criteria not configured")
+            throw new IllegalStateException("SqlTask '${id}': criteria not configured")
         }
         
         def built = criteriaBuilder.build()
@@ -305,7 +364,7 @@ class SqlTask extends TaskBase<Object> {
         
         // Apply result mapper if configured
         if (resultMapper) {
-            return resultMapper.call(results)
+            return applyResultMapper(results, ctx, prevValue)
         }
         
         return results
@@ -313,7 +372,7 @@ class SqlTask extends TaskBase<Object> {
     
     private Object executeCustom(TaskContext ctx, Object prevValue) {
         if (!executeClosure) {
-            throw new IllegalStateException("SqlTask: execute closure not configured")
+            throw new IllegalStateException("SqlTask '${id}': execute closure not configured")
         }
         
         if (useTransaction) {
@@ -323,12 +382,30 @@ class SqlTask extends TaskBase<Object> {
         }
     }
     
-    private List<Object> buildParams(Object prevValue) {
+    /**
+     * Build parameters using resolver-aware execution.
+     */
+    private List<Object> buildParams(TaskContext ctx, Object prevValue) {
         if (paramsBuilder) {
-            def result = paramsBuilder.call(prevValue)
+            def result = executeWithResolver(paramsBuilder, prevValue, ctx)
             return result instanceof List ? (List<Object>)result : [result]
         }
         return sqlParams
+    }
+    
+    /**
+     * Apply result mapper using resolver-aware execution.
+     */
+    private Object applyResultMapper(Object results, TaskContext ctx, Object prevValue) {
+        // Check if mapper expects resolver parameter
+        if (resultMapper.maximumNumberOfParameters > 1) {
+            // Mapper expects (resolver, results)
+            def resolver = createResolver(prevValue, ctx)
+            return resultMapper.call(resolver, results)
+        } else {
+            // Legacy mapper expects just (results)
+            return resultMapper.call(results)
+        }
     }
     
     // =========================================================================

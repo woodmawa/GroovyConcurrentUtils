@@ -113,7 +113,7 @@ class TaskResolver {
      * @return Map of all globals (never null, may be empty)
      */
     Map<String, Object> getGlobals() {
-        return ctx.globals ?: [:]
+        return ctx.globals?.getAll() ?: [:]
     }
     
     /**
@@ -135,7 +135,7 @@ class TaskResolver {
      */
     Object global(String key, Object defaultValue) {
         def globals = ctx.globals
-        return globals?.containsKey(key) ? globals[key] : defaultValue
+        return globals?.has(key) ? globals[key] : defaultValue
     }
     
     /**
@@ -181,7 +181,7 @@ class TaskResolver {
      * @return true if key exists in globals
      */
     boolean hasGlobal(String key) {
-        return ctx.globals?.containsKey(key) ?: false
+        return ctx.globals?.has(key) ?: false
     }
     
     /**

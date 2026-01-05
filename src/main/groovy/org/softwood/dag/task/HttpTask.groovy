@@ -63,6 +63,14 @@ class HttpTask extends TaskBase<HttpResponse> {
     private final HttpClient httpClient
     private CookieJar cookieJar
     
+    // Deferred configurations (with resolver)
+    private Closure deferredAuthConfig
+    private Closure deferredHeadersConfig
+    private Closure deferredJsonConfig
+    private Closure deferredFormDataConfig
+    private Closure deferredQueryParamsConfig
+    private Object urlValue  // Can be String or Closure
+    
     HttpTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
         
@@ -79,17 +87,20 @@ class HttpTask extends TaskBase<HttpResponse> {
     
     /**
      * Set the request URL.
+     * 
+     * <h3>Static URL:</h3>
+     * <pre>
+     * url "https://api.example.com/users"
+     * </pre>
+     * 
+     * <h3>Dynamic URL (with resolver):</h3>
+     * <pre>
+     * url { r -> "${r.global('api.baseUrl')}/users" }
+     * url { r -> "https://api.example.com/users/${r.prev.userId}" }
+     * </pre>
      */
-    void url(String url) {
-        request.url = url
-    }
-    
-    /**
-     * Set the request URL dynamically from previous task result.
-     */
-    void url(Closure<String> urlProvider) {
-        // Will be evaluated at runtime with prev value
-        request.url = urlProvider
+    void url(Object value) {
+        this.urlValue = value
     }
     
     /**
@@ -102,17 +113,28 @@ class HttpTask extends TaskBase<HttpResponse> {
     /**
      * Configure request headers.
      * 
-     * Usage:
-     *   headers {
-     *       "Accept" "application/json"
-     *       "User-Agent" "MyApp/1.0"
-     *   }
+     * <h3>Static headers:</h3>
+     * <pre>
+     * headers {
+     *     "Accept" "application/json"
+     *     "User-Agent" "MyApp/1.0"
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic headers (with resolver):</h3>
+     * <pre>
+     * headers { r ->
+     *     "X-Request-ID" UUID.randomUUID().toString()
+     *     "X-User-ID" r.prev.userId
+     *     "Authorization" "Bearer ${r.credential('api.token')}"
+     * }
+     * </pre>
      */
     void headers(@DelegatesTo(HeadersDsl) Closure config) {
         def dsl = new HeadersDsl(request.headers)
-        config.delegate = dsl
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
+        if (!configureDsl(dsl, config, null, null)) {
+            this.deferredHeadersConfig = config
+        }
     }
     
     /**
@@ -125,17 +147,27 @@ class HttpTask extends TaskBase<HttpResponse> {
     /**
      * Configure query parameters.
      * 
-     * Usage:
-     *   queryParams {
-     *       "page" "1"
-     *       "size" "20"
-     *   }
+     * <h3>Static params:</h3>
+     * <pre>
+     * queryParams {
+     *     "page" "1"
+     *     "size" "20"
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic params (with resolver):</h3>
+     * <pre>
+     * queryParams { r ->
+     *     "userId" r.prev.userId
+     *     "filter" r.global('default.filter')
+     * }
+     * </pre>
      */
     void queryParams(@DelegatesTo(QueryParamsDsl) Closure config) {
         def dsl = new QueryParamsDsl(request.queryParams)
-        config.delegate = dsl
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
+        if (!configureDsl(dsl, config, null, null)) {
+            this.deferredQueryParamsConfig = config
+        }
     }
     
     /**
@@ -155,19 +187,32 @@ class HttpTask extends TaskBase<HttpResponse> {
     /**
      * Set request body as JSON from a map/closure.
      * 
-     * Usage:
-     *   json {
-     *       name "Alice"
-     *       email "alice@example.com"
-     *   }
+     * <h3>Static JSON:</h3>
+     * <pre>
+     * json {
+     *     name "Alice"
+     *     email "alice@example.com"
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic JSON (with resolver):</h3>
+     * <pre>
+     * json { r ->
+     *     userId r.prev.userId
+     *     timestamp new Date().time
+     *     apiKey r.credential('api.key')
+     * }
+     * </pre>
      */
     void json(@DelegatesTo(JsonBodyDsl) Closure config) {
         def dsl = new JsonBodyDsl()
-        config.delegate = dsl
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
-        request.body = dsl.data
-        request.contentType = 'application/json'
+        if (!configureDsl(dsl, config, null, null)) {
+            this.deferredJsonConfig = config
+            request.contentType = 'application/json'
+        } else {
+            request.body = dsl.data
+            request.contentType = 'application/json'
+        }
     }
     
     /**
@@ -180,17 +225,28 @@ class HttpTask extends TaskBase<HttpResponse> {
     /**
      * Configure form data (application/x-www-form-urlencoded).
      * 
-     * Usage:
-     *   formData {
-     *       username "alice"
-     *       password "secret"
-     *   }
+     * <h3>Static form data:</h3>
+     * <pre>
+     * formData {
+     *     username "alice"
+     *     password "secret"
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic form data (with resolver):</h3>
+     * <pre>
+     * formData { r ->
+     *     username r.credential('app.username')
+     *     password r.credential('app.password')
+     *     client_id r.global('oauth.clientId')
+     * }
+     * </pre>
      */
     void formData(@DelegatesTo(FormDataDsl) Closure config) {
         def dsl = new FormDataDsl(request.formData)
-        config.delegate = dsl
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
+        if (!configureDsl(dsl, config, null, null)) {
+            this.deferredFormDataConfig = config
+        }
     }
     
     /**
@@ -222,10 +278,10 @@ class HttpTask extends TaskBase<HttpResponse> {
         
         if (enable) {
             // Get or create shared cookie jar from context globals
-            if (!ctx.globals.containsKey('_httpCookieJar')) {
-                ctx.globals['_httpCookieJar'] = new CookieJar()
+            if (!ctx.globals.has('_httpCookieJar')) {
+                ctx.globals.set('_httpCookieJar', new CookieJar())
             }
-            this.cookieJar = ctx.globals['_httpCookieJar'] as CookieJar
+            this.cookieJar = ctx.globals.get('_httpCookieJar') as CookieJar
         }
     }
     
@@ -240,18 +296,29 @@ class HttpTask extends TaskBase<HttpResponse> {
     /**
      * Configure authentication.
      * 
-     * Usage:
-     *   auth {
-     *       bearer "token-123"
-     *       // or: basic "user", "pass"
-     *       // or: apiKey "key-123"
-     *   }
+     * <h3>Static auth:</h3>
+     * <pre>
+     * auth {
+     *     bearer "token-123"
+     *     // or: basic "user", "pass"
+     *     // or: apiKey "key-123"
+     * }
+     * </pre>
+     * 
+     * <h3>Dynamic auth (with resolver - RECOMMENDED for security):</h3>
+     * <pre>
+     * auth { r ->
+     *     bearer r.credential('api.token')
+     *     // or: basic r.credential('api.username'), r.credential('api.password')
+     *     // or: apiKey r.credential('api.key')
+     * }
+     * </pre>
      */
     void auth(@DelegatesTo(AuthDsl) Closure config) {
         def dsl = new AuthDsl(request)
-        config.delegate = dsl
-        config.resolveStrategy = Closure.DELEGATE_FIRST
-        config.call()
+        if (!configureDsl(dsl, config, null, null)) {
+            this.deferredAuthConfig = config
+        }
     }
     
     /**
@@ -299,17 +366,41 @@ class HttpTask extends TaskBase<HttpResponse> {
     protected Promise<HttpResponse> runTask(TaskContext ctx, Object prevValue) {
         log.debug("HttpTask($id): executing HTTP request")
         
-        // Resolve URL if it's a closure
-        String finalUrl = request.url
-        if (request.url instanceof Closure) {
-            finalUrl = ((Closure) request.url).call(prevValue)
-        }
+        // Evaluate URL (supports both static and dynamic)
+        String finalUrl = evaluateValue(urlValue, ctx, prevValue)
         
         if (!finalUrl) {
             throw new IllegalStateException("HttpTask($id): URL not specified")
         }
         
         request.url = finalUrl
+        
+        // Execute deferred configurations
+        if (deferredAuthConfig) {
+            def dsl = new AuthDsl(request)
+            executeDeferredConfig(deferredAuthConfig, dsl, ctx, prevValue)
+        }
+        
+        if (deferredHeadersConfig) {
+            def dsl = new HeadersDsl(request.headers)
+            executeDeferredConfig(deferredHeadersConfig, dsl, ctx, prevValue)
+        }
+        
+        if (deferredQueryParamsConfig) {
+            def dsl = new QueryParamsDsl(request.queryParams)
+            executeDeferredConfig(deferredQueryParamsConfig, dsl, ctx, prevValue)
+        }
+        
+        if (deferredJsonConfig) {
+            def dsl = new JsonBodyDsl()
+            executeDeferredConfig(deferredJsonConfig, dsl, ctx, prevValue)
+            request.body = dsl.data
+        }
+        
+        if (deferredFormDataConfig) {
+            def dsl = new FormDataDsl(request.formData)
+            executeDeferredConfig(deferredFormDataConfig, dsl, ctx, prevValue)
+        }
         
         return ctx.promiseFactory.executeAsync {
             executeHttpRequest()

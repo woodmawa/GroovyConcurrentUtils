@@ -163,6 +163,10 @@ abstract class TaskBase<T> implements ITask<T> {
      * @return Result from closure
      */
     protected Object executeWithResolver(Closure closure, Object prevValue, TaskContext ctx) {
+        if (!closure) {
+            return null
+        }
+        
         def resolver = createResolver(prevValue, ctx)
         
         // Check if closure accepts parameters
@@ -176,6 +180,141 @@ abstract class TaskBase<T> implements ITask<T> {
             closure.delegate = this
             closure.resolveStrategy = Closure.DELEGATE_FIRST
             return closure.call()
+        }
+    }
+    
+    /**
+     * Evaluate a value that may be static or a closure requiring resolver.
+     * 
+     * This is the key helper that makes DSL methods resolver-aware:
+     * - If value is a Closure → execute with resolver
+     * - If value is static → return as-is
+     * 
+     * <h3>Usage in Task DSL Methods:</h3>
+     * <pre>
+     * void url(Object urlValue) {
+     *     this.urlValue = urlValue  // Store as-is
+     * }
+     * 
+     * // Later in runTask():
+     * String actualUrl = evaluateValue(urlValue, ctx, prevValue)
+     * </pre>
+     * 
+     * <h3>Supports both patterns:</h3>
+     * <pre>
+     * url "https://api.example.com/data"  // Static
+     * url { r -> r.global('api.url') }     // Dynamic with resolver
+     * </pre>
+     * 
+     * @param value Static value or Closure
+     * @param ctx Task context
+     * @param prevValue Previous task result  
+     * @return Evaluated value
+     */
+    protected Object evaluateValue(Object value, TaskContext ctx, Object prevValue) {
+        if (value instanceof Closure) {
+            return executeWithResolver((Closure) value, prevValue, ctx)
+        }
+        return value
+    }
+    
+    /**
+     * Configure a DSL delegate with resolver-aware closure execution.
+     * 
+     * This helper handles the common pattern of:
+     * 1. Create a DSL object
+     * 2. Set it as closure delegate
+     * 3. Execute closure with resolver if needed
+     * 
+     * <h3>Usage Pattern:</h3>
+     * <pre>
+     * void config(@DelegatesTo(ConfigDsl) Closure configClosure) {
+     *     def dsl = new ConfigDsl()
+     *     configureDsl(dsl, configClosure, null, null)  // null = defer to runTask
+     *     // OR during runTask:
+     *     configureDsl(dsl, configClosure, ctx, prevValue)
+     * }
+     * </pre>
+     * 
+     * @param delegate DSL object to configure
+     * @param config Configuration closure
+     * @param ctx Task context (null = not executing yet)
+     * @param prevValue Previous task result (null = not executing yet)
+     * @return true if executed immediately, false if should be deferred
+     */
+    protected boolean configureDsl(Object delegate, Closure config, TaskContext ctx, Object prevValue) {
+        if (!config) {
+            return true
+        }
+        
+        // Check if closure needs resolver (has parameters)
+        if (config.maximumNumberOfParameters > 0) {
+            // Needs resolver - check if we have context
+            if (ctx == null) {
+                // No context yet - cannot execute, caller should defer
+                return false
+            }
+            
+            // Execute with resolver
+            def resolver = createResolver(prevValue, ctx)
+            config.delegate = delegate
+            config.resolveStrategy = Closure.DELEGATE_FIRST
+            config.call(resolver)
+            return true
+            
+        } else {
+            // No parameters - execute immediately
+            config.delegate = delegate
+            config.resolveStrategy = Closure.DELEGATE_FIRST
+            config.call()
+            return true
+        }
+    }
+    
+    /**
+     * Store a closure for deferred execution if it needs resolver.
+     * 
+     * This is a convenience method for the common pattern:
+     * <pre>
+     * if (closure.maximumNumberOfParameters > 0) {
+     *     deferredClosure = closure
+     *     return true
+     * } else {
+     *     // execute now
+     *     return false
+     * }
+     * </pre>
+     * 
+     * @param closure Closure to check
+     * @return true if closure needs resolver (should be deferred)
+     */
+    protected boolean needsResolver(Closure closure) {
+        return closure != null && closure.maximumNumberOfParameters > 0
+    }
+    
+    /**
+     * Execute a deferred configuration closure with resolver.
+     * 
+     * Typical pattern in runTask():
+     * <pre>
+     * if (deferredConfig) {
+     *     def dsl = new ConfigDsl()
+     *     executeDeferredConfig(deferredConfig, dsl, ctx, prevValue)
+     *     // Use configured dsl...
+     * }
+     * </pre>
+     * 
+     * @param config Deferred configuration closure
+     * @param delegate DSL object to configure
+     * @param ctx Task context
+     * @param prevValue Previous task result
+     */
+    protected void executeDeferredConfig(Closure config, Object delegate, TaskContext ctx, Object prevValue) {
+        if (config) {
+            def resolver = createResolver(prevValue, ctx)
+            config.delegate = delegate
+            config.resolveStrategy = Closure.DELEGATE_FIRST
+            config.call(resolver)
         }
     }
     

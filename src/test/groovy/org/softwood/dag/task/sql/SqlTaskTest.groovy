@@ -80,7 +80,7 @@ class SqlTaskTest extends Specification {
             sqlTask("fetch-filtered") {
                 provider this.provider
                 query "SELECT * FROM users WHERE age > ?"
-                params { prev -> [prev.minAge] }
+                params { r -> [r.prev.minAge] }
             }
             
             chainVia("set-age", "fetch-filtered")
@@ -217,7 +217,7 @@ class SqlTaskTest extends Specification {
             sqlTask("insert-user") {
                 provider this.provider
                 update "INSERT INTO users (id, name, age, email) VALUES (?, ?, ?, ?)"
-                params { prev -> [5, prev.name, prev.age, prev.email] }
+                params { r -> [5, r.prev.name, r.prev.age, r.prev.email] }
             }
             
             chainVia("prepare-data", "insert-user")
@@ -320,13 +320,13 @@ class SqlTaskTest extends Specification {
             sqlTask("insert-user") {
                 provider this.provider
                 update "INSERT INTO users (id, name, age, email) VALUES (?, ?, ?, ?)"
-                params { prev -> [8, prev.name, prev.age, prev.email] }
+                params { r -> [8, r.prev.name, r.prev.age, r.prev.email] }
             }
             
             sqlTask("verify-insert") {
                 provider this.provider
                 query "SELECT * FROM users WHERE name = ?"
-                params { prev -> ["Henry"] }
+                params { r -> ["Henry"] }
             }
             
             chainVia("create-user-data", "insert-user", "verify-insert")

@@ -96,7 +96,7 @@ class TaskResolverTest extends Specification {
         
         then:
         removed == "testValue"
-        !ctx.globals.containsKey("testKey")
+        !ctx.globals.has("testKey")
     }
     
     // =========================================================================

@@ -67,6 +67,9 @@ class TaskGraphPersistenceIntegrationTest {
         def resultPromise = graph.run()
         def result = resultPromise.get()
         
+        // Wait for persistence to complete
+        assertTrue(graph.awaitPersistence(), "Persistence should complete within timeout")
+        
         // Then
         assertEquals("single-result", result)
     }
@@ -108,8 +111,8 @@ class TaskGraphPersistenceIntegrationTest {
         def resultPromise = graph.run()
         def result = resultPromise.get()
         
-        // Small delay to ensure persistence has flushed
-        Thread.sleep(500)
+        // Wait for persistence to complete
+        assertTrue(graph.awaitPersistence(), "Persistence should complete within timeout")
         
         // Then - Verify result
         assertEquals("result2", result)
@@ -192,6 +195,9 @@ class TaskGraphPersistenceIntegrationTest {
             assertTrue(e.message.contains("Task 2 failed") || e.message.contains("task2"),
                 "Expected error message to contain 'Task 2 failed' or 'task2', but got: ${e.message}")
         }
+        
+        // Wait for persistence to complete
+        assertTrue(graph.awaitPersistence(), "Persistence should complete within timeout")
         
         // Then - Verify snapshot exists
         Path graphStateDir = testDir.resolve("graphState")
@@ -356,6 +362,9 @@ class TaskGraphPersistenceIntegrationTest {
         
         // When
         graph.run().get()
+        
+        // Wait for persistence to complete
+        assertTrue(graph.awaitPersistence(), "Persistence should complete within timeout")
         
         // Then
         Path graphStateDir = testDir.resolve("graphState")

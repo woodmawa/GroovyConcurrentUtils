@@ -109,6 +109,29 @@ class TaskGraph {
     Promise<?> run() {
         return start()
     }
+    
+    /**
+     * Wait for persistence to complete (if persistence is enabled).
+     * This method blocks until the graph's persistence manager has finished writing all data.
+     * 
+     * Useful in tests to ensure persistence is complete before making assertions.
+     * 
+     * @param timeout maximum time to wait (default 10 seconds)
+     * @param unit time unit (default SECONDS)
+     * @return true if persistence completed, false if timeout or persistence not enabled
+     */
+    boolean awaitPersistence(long timeout = 10, java.util.concurrent.TimeUnit unit = java.util.concurrent.TimeUnit.SECONDS) {
+        if (persistenceManager == null) {
+            return true  // No persistence, consider it "complete"
+        }
+        
+        try {
+            return persistenceManager.awaitPersistenceComplete(timeout, unit)
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+    }
 
     // --------------------------------------------------------------------
     // BUILD / WIRING
@@ -386,7 +409,7 @@ class TaskGraph {
         
         try {
             // Update context globals
-            persistenceManager.updateContextGlobals(ctx.globals)
+            persistenceManager.updateContextGlobals(ctx.globals.getAll())
             
             // Mark graph completion status
             if (graphFailed) {

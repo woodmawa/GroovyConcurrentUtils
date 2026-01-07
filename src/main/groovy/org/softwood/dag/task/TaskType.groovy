@@ -78,8 +78,9 @@ enum TaskType {
     /**
      * Call activity task for invoking subprocesses/subgraphs.
      * Supports input/output mapping and subprocess composition.
+     * DEPRECATED: Use SUBPROCESS instead (backward compatibility alias).
      */
-    CALL_ACTIVITY(CallActivityTask, false),
+    CALL_ACTIVITY(SubprocessTask, false),
 
     /**
      * Loop task for iteration over collections.
@@ -107,6 +108,27 @@ enum TaskType {
      * Add groovy-sql, H2, or HikariCP for enhanced features.
      */
     SQL(SqlTask, false),
+
+    /**
+     * Subprocess task for invoking subprocesses/subgraphs.
+     * Supports input/output mapping and subprocess composition.
+     * Renamed from CALL_ACTIVITY for clarity.
+     */
+    SUBPROCESS(SubprocessTask, false),
+
+    /**
+     * Aggregator task for combining results from parallel tasks.
+     * Essential for fork-join patterns - waits for multiple tasks and combines their results.
+     * Supports completion strategies, timeouts, and partial result handling.
+     */
+    AGGREGATOR(AggregatorTask, false),
+
+    /**
+     * Event gateway task for first-event-wins pattern.
+     * Waits for multiple possible events and proceeds with whichever occurs first.
+     * Supports both event-based and time-based triggers.
+     */
+    EVENT_GATEWAY(EventGatewayTask, false),
 
     // =========================================================================
     // Decision Tasks (IDecisionTask)
@@ -136,6 +158,13 @@ enum TaskType {
      * BPMN Exclusive Gateway equivalent.
      */
     EXCLUSIVE_GATEWAY(ExclusiveGatewayTask, true),
+
+    /**
+     * Inclusive gateway (OR) that routes to ALL matching paths.
+     * Evaluates all conditions and routes to every path that matches.
+     * BPMN Inclusive Gateway equivalent.
+     */
+    INCLUSIVE_GATEWAY(InclusiveRouterTask, true),
 
     /**
      * Switch-case style router that routes based on discrete value matching.
@@ -271,9 +300,20 @@ enum TaskType {
                 return DATA_TRANSFORM
             case 'callactivity':
             case 'callactivitytask':
-            case 'subprocess':
             case 'call':
                 return CALL_ACTIVITY
+            case 'subprocess':
+            case 'subprocesstask':
+                return SUBPROCESS
+            case 'aggregator':
+            case 'aggregatortask':
+            case 'aggregate':
+            case 'combine':
+                return AGGREGATOR
+            case 'eventgateway':
+            case 'eventgatewaytask':
+            case 'await':
+                return EVENT_GATEWAY
             case 'loop':
             case 'looptask':
             case 'iterate':
@@ -296,6 +336,11 @@ enum TaskType {
             case 'xor':
             case 'xorgateway':
                 return EXCLUSIVE_GATEWAY
+            case 'inclusive':
+            case 'inclusivegateway':
+            case 'or':
+            case 'orgateway':
+                return INCLUSIVE_GATEWAY
             case 'switch':
             case 'switchrouter':
             case 'case':

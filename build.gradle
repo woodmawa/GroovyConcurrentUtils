@@ -1,9 +1,9 @@
 plugins {
     id 'groovy'
-    id 'application'
+    id 'java-library'
 }
 
-group = 'org.example'
+group = 'org.softwood'
 version = '1.0-SNAPSHOT'
 
 repositories {
@@ -56,12 +56,6 @@ dependencies {
     testImplementation 'com.h2database:h2:2.2.224'
 }
 
-//hack to use spock with version 5 groovy till put up on maven
-/*
-tasks.withType(GroovyCompile).configureEach {
-    options.forkOptions.jvmArgs << '-Dspock.iKnowWhatImDoing.disableGroovyVersionCheck=true'    //it works! But be aware that "options" not "groovyOptions"!
-}
-*/
 
 java {
     toolchain {
@@ -72,7 +66,6 @@ java {
 tasks.withType(JavaCompile).configureEach {
     options.release = 25
 }
-
 
 test {
     useJUnitPlatform()
@@ -88,7 +81,3 @@ test {
     ]
 }
 
-application {
-    // Fully qualified main class containing 'static void main(String[] args)'
-    mainClass = 'org.softwood.Main'
-}

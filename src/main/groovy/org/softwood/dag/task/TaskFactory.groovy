@@ -160,16 +160,42 @@ class TaskFactory {
     }
 
     /**
-     * Create a CallActivityTask - subprocess invocation task.
+     * Create a SubprocessTask - subprocess invocation task.
      *
      * @param id unique task identifier
      * @param name human-readable task name
      * @param ctx task execution context
-     * @return new CallActivityTask instance
+     * @return new SubprocessTask instance
      */
-    static CallActivityTask createCallActivityTask(String id, String name, TaskContext ctx) {
-        log.debug("Creating CallActivityTask: id=$id, name=$name")
-        return new CallActivityTask(id, name, ctx)
+    static SubprocessTask createSubprocessTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating SubprocessTask: id=$id, name=$name")
+        return new SubprocessTask(id, name, ctx)
+    }
+
+    /**
+     * Create an AggregatorTask - combines results from parallel tasks.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new AggregatorTask instance
+     */
+    static AggregatorTask createAggregatorTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating AggregatorTask: id=$id, name=$name")
+        return new AggregatorTask(id, name, ctx)
+    }
+
+    /**
+     * Create an EventGatewayTask - first-event-wins pattern.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new EventGatewayTask instance
+     */
+    static EventGatewayTask createEventGatewayTask(String id, String name, TaskContext ctx) {
+        log.debug("Creating EventGatewayTask: id=$id, name=$name")
+        return new EventGatewayTask(id, name, ctx)
     }
 
     /**
@@ -265,6 +291,19 @@ class TaskFactory {
     static ParallelGatewayTask createParallelGateway(String id, String name, TaskContext ctx) {
         log.debug("Creating ParallelGatewayTask: id=$id, name=$name")
         return new ParallelGatewayTask(id, name, ctx)
+    }
+
+    /**
+     * Create an InclusiveRouterTask - OR gateway (routes to all matching paths).
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new InclusiveRouterTask instance
+     */
+    static InclusiveRouterTask createInclusiveGateway(String id, String name, TaskContext ctx) {
+        log.debug("Creating InclusiveRouterTask: id=$id, name=$name")
+        return new InclusiveRouterTask(id, name, ctx)
     }
 
     /**
@@ -368,7 +407,14 @@ class TaskFactory {
                 return createDataTransformTask(id, name, ctx)
 
             case TaskType.CALL_ACTIVITY:
-                return createCallActivityTask(id, name, ctx)
+            case TaskType.SUBPROCESS:
+                return createSubprocessTask(id, name, ctx)
+
+            case TaskType.AGGREGATOR:
+                return createAggregatorTask(id, name, ctx)
+
+            case TaskType.EVENT_GATEWAY:
+                return createEventGatewayTask(id, name, ctx)
 
             case TaskType.LOOP:
                 return createLoopTask(id, name, ctx)
@@ -384,6 +430,9 @@ class TaskFactory {
 
             case TaskType.EXCLUSIVE_GATEWAY:
                 return createExclusiveGateway(id, name, ctx)
+
+            case TaskType.INCLUSIVE_GATEWAY:
+                return createInclusiveGateway(id, name, ctx)
 
             case TaskType.SWITCH_ROUTER:
                 return createSwitchRouter(id, name, ctx)

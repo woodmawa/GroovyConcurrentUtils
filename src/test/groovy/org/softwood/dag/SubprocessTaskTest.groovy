@@ -12,21 +12,21 @@ import org.softwood.promise.Promise
 import org.softwood.dag.task.*
 
 /**
- * Tests for CallActivityTask - Subprocess Invocation
+ * Tests for SubprocessTask - Subprocess Invocation
  */
-class CallActivityTaskTest {
+class SubprocessTaskTest {
 
     private TaskContext ctx
 
     @BeforeEach
     void setup() {
         ctx = new TaskContext()
-        CallActivityTask.clearRegistry()
+        SubprocessTask.clearRegistry()
     }
 
     @AfterEach
     void cleanup() {
-        CallActivityTask.clearRegistry()
+        SubprocessTask.clearRegistry()
     }
 
     private static <T> T awaitPromise(Promise<T> p) {
@@ -38,7 +38,7 @@ class CallActivityTaskTest {
 
     @Test
     void testBasicSubProcess() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
             c.promiseFactory.executeAsync {
                 "processed: ${input}".toString()
@@ -53,11 +53,11 @@ class CallActivityTaskTest {
 
     @Test
     void testInputMapping() {
-        ctx.globals.orderId = "ORDER-123"
+        ctx.globals.set("orderId", "ORDER-123")
         
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.inputMapper = { c ->
-            [id: c.globals.orderId, priority: "high"]
+            [id: c.globals.get("orderId"), priority: "high"]
         }
         task.subProcessProvider = { c, input ->
             c.promiseFactory.executeAsync {
@@ -73,7 +73,7 @@ class CallActivityTaskTest {
 
     @Test
     void testOutputMapping() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
             c.promiseFactory.executeAsync {
                 [status: "success", data: "result"]
@@ -91,7 +91,7 @@ class CallActivityTaskTest {
 
     @Test
     void testSubProcessGraph() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
             def graph = TaskGraph.build {
                 serviceTask("step1") {
@@ -129,7 +129,7 @@ class CallActivityTaskTest {
     void testErrorHandler() {
         def errorHandled = false
         
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
             throw new RuntimeException("Subprocess failed")
         }
@@ -148,7 +148,7 @@ class CallActivityTaskTest {
 
     @Test
     void testTimeout() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.timeout = Duration.ofMillis(100)
         task.subProcessProvider = { c, input ->
             c.promiseFactory.executeAsync {
@@ -163,7 +163,6 @@ class CallActivityTaskTest {
             awaitPromise(promise)
         }
         
-        // The TimeoutException might be wrapped in UndeclaredThrowableException
         def isTimeout = exception instanceof java.util.concurrent.TimeoutException ||
                         exception.cause instanceof java.util.concurrent.TimeoutException
         
@@ -172,14 +171,13 @@ class CallActivityTaskTest {
 
     @Test
     void testSubProcessRegistry() {
-        // Register a subprocess
-        CallActivityTask.registerSubProcess("test-subprocess", { c, input ->
+        SubprocessTask.registerSubProcess("test-subprocess", { c, input ->
             c.promiseFactory.executeAsync {
                 "subprocess result: ${input}".toString()
             }
         })
         
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessRef = "test-subprocess"
         
         def promise = task.execute(ctx.promiseFactory.createPromise("test"))
@@ -187,13 +185,12 @@ class CallActivityTaskTest {
         
         assertEquals("subprocess result: test", result.toString())
         
-        // Cleanup
-        CallActivityTask.unregisterSubProcess("test-subprocess")
+        SubprocessTask.unregisterSubProcess("test-subprocess")
     }
 
     @Test
     void testInvalidSubProcessRef() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessRef = "non-existent"
         
         def promise = task.execute(ctx.promiseFactory.createPromise(null))
@@ -208,14 +205,14 @@ class CallActivityTaskTest {
         def graph = TaskGraph.build {
             serviceTask("prepare") {
                 action { ctx, prev ->
-                    ctx.globals.data = [value: 100]
+                    ctx.globals.set("data", [value: 100])
                     ctx.promiseFactory.executeAsync { "prepared" }
                 }
             }
             
-            task("subprocess", TaskType.CALL_ACTIVITY) {
+            task("subprocess", TaskType.SUBPROCESS) {
                 input { ctx ->
-                    ctx.globals.data
+                    ctx.globals.get("data")
                 }
                 
                 subProcess { ctx, input ->
@@ -262,10 +259,8 @@ class CallActivityTaskTest {
 
     @Test
     void testNonPromiseSubProcess() {
-        // Subprocess can return non-promise values
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
-            // Return direct value, not promise
             "direct result: ${input}".toString()
         }
         
@@ -277,16 +272,16 @@ class CallActivityTaskTest {
 
     @Test
     void testComplexInputOutputMapping() {
-        ctx.globals.order = [
+        ctx.globals.set("order", [
             id: "ORD-001",
             items: [[name: "Item1", qty: 2], [name: "Item2", qty: 1]],
             customer: [id: "CUST-123", tier: "gold"]
-        ]
+        ])
         
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         
         task.inputMapper = { c ->
-            def order = c.globals.order
+            def order = c.globals.get("order")
             [
                 orderId: order.id,
                 itemCount: order.items.size(),
@@ -306,7 +301,7 @@ class CallActivityTaskTest {
         }
         
         task.outputMapper = { result ->
-            ctx.globals.processedOrder = result
+            ctx.globals.set("processedOrder", result)
             "Order ${result.orderId}: ${result.items} items, discount: ${result.discount}".toString()
         }
         
@@ -314,18 +309,16 @@ class CallActivityTaskTest {
         def result = awaitPromise(promise)
         
         assertEquals("Order ORD-001: 2 items, discount: 0.1", result.toString())
-        assertNotNull(ctx.globals.processedOrder)
-        assertTrue(ctx.globals.processedOrder.processed)
+        assertNotNull(ctx.globals.get("processedOrder"))
+        assertTrue(ctx.globals.get("processedOrder").processed)
     }
 
     @Test
     void testNestedSubProcesses() {
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         
         task.subProcessProvider = { c, input ->
-            // Outer subprocess
             def outerGraph = TaskGraph.build {
-                // Use serviceTask instead of nested call activity for simplicity
                 serviceTask("inner") {
                     action { ctx, prev ->
                         ctx.promiseFactory.executeAsync {
@@ -359,14 +352,12 @@ class CallActivityTaskTest {
 
     @Test
     void testSubProcessWithSharedContext() {
-        // Test that subprocess can access parent context globals
-        ctx.globals.sharedData = "parent-data"
+        ctx.globals.set("sharedData", "parent-data")
         
-        def task = new CallActivityTask("call", "Call Activity", ctx)
+        def task = new SubprocessTask("call", "Subprocess", ctx)
         task.subProcessProvider = { c, input ->
             c.promiseFactory.executeAsync {
-                // Access parent context
-                "subprocess sees: ${c.globals.sharedData}".toString()
+                "subprocess sees: ${c.globals.get('sharedData')}".toString()
             }
         }
         

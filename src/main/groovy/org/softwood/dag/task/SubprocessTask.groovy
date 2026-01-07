@@ -7,7 +7,7 @@ import java.time.Duration
 import java.util.concurrent.TimeoutException
 
 /**
- * CallActivityTask - Subprocess/Subgraph Invocation
+ * SubprocessTask - Subprocess/Subgraph Invocation
  *
  * Invokes a subprocess (typically a TaskGraph) and integrates its result
  * into the parent workflow. Supports input/output mapping, error handling,
@@ -25,7 +25,7 @@ import java.util.concurrent.TimeoutException
  *
  * <h3>DSL Example - Inline Subprocess:</h3>
  * <pre>
- * callActivity("orderWorkflow") {
+ * subprocess("orderWorkflow") {
  *     input { ctx ->
  *         [
  *             orderId: ctx.globals.currentOrder.id,
@@ -65,7 +65,7 @@ import java.util.concurrent.TimeoutException
  *
  * <h3>DSL Example - Reference-Based:</h3>
  * <pre>
- * callActivity("subprocess") {
+ * subprocess("subprocess") {
  *     subProcessRef "order-fulfillment-v2"
  *     
  *     input { ctx ->
@@ -80,7 +80,7 @@ import java.util.concurrent.TimeoutException
  *
  * <h3>DSL Example - Simple Pass-Through:</h3>
  * <pre>
- * callActivity("validate") {
+ * subprocess("validate") {
  *     subProcess { ctx, input ->
  *         ValidationGraph.build(input).run()
  *     }
@@ -88,7 +88,7 @@ import java.util.concurrent.TimeoutException
  * </pre>
  */
 @Slf4j
-class CallActivityTask extends TaskBase<Object> {
+class SubprocessTask extends TaskBase<Object> {
 
     // =========================================================================
     // Configuration
@@ -115,7 +115,7 @@ class CallActivityTask extends TaskBase<Object> {
     /** Subprocess registry (static for reference lookups) */
     static Map<String, Closure> subProcessRegistry = [:]
 
-    CallActivityTask(String id, String name, TaskContext ctx) {
+    SubprocessTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
 
@@ -208,7 +208,7 @@ class CallActivityTask extends TaskBase<Object> {
     @Override
     protected Promise<Object> runTask(TaskContext ctx, Object prevValue) {
         
-        log.debug("CallActivityTask($id): starting subprocess invocation")
+        log.debug("SubprocessTask($id): starting subprocess invocation")
         
         // Validate configuration
         validateConfiguration()
@@ -219,7 +219,7 @@ class CallActivityTask extends TaskBase<Object> {
         // Map input data
         Object inputData = mapInput(ctx, prevValue)
         
-        log.info("CallActivityTask($id): invoking subprocess with input: ${inputData?.getClass()?.simpleName}")
+        log.info("SubprocessTask($id): invoking subprocess with input: ${inputData?.getClass()?.simpleName}")
         
         // Invoke subprocess
         return ctx.promiseFactory.executeAsync {
@@ -240,24 +240,24 @@ class CallActivityTask extends TaskBase<Object> {
                 // Wait for subprocess with timeout
                 Object result
                 if (timeout) {
-                    log.debug("CallActivityTask($id): waiting for subprocess with timeout ${timeout.toMillis()}ms")
+                    log.debug("SubprocessTask($id): waiting for subprocess with timeout ${timeout.toMillis()}ms")
                     result = resultPromise.get(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)
                 } else {
-                    log.debug("CallActivityTask($id): waiting for subprocess (no timeout)")
+                    log.debug("SubprocessTask($id): waiting for subprocess (no timeout)")
                     result = resultPromise.get()
                 }
                 
-                log.info("CallActivityTask($id): subprocess completed successfully")
+                log.info("SubprocessTask($id): subprocess completed successfully")
                 
                 // Map output
                 return mapOutput(result)
                 
             } catch (TimeoutException e) {
-                log.error("CallActivityTask($id): subprocess timeout after ${timeout}")
+                log.error("SubprocessTask($id): subprocess timeout after ${timeout}")
                 handleError(e)
                 throw e
             } catch (Exception e) {
-                log.error("CallActivityTask($id): subprocess failed", e)
+                log.error("SubprocessTask($id): subprocess failed", e)
                 handleError(e)
                 throw e
             }
@@ -267,19 +267,19 @@ class CallActivityTask extends TaskBase<Object> {
     private void validateConfiguration() {
         if (!subProcessProvider && !subProcessRef) {
             throw new IllegalStateException(
-                "CallActivityTask($id): requires either subProcess or subProcessRef"
+                "SubprocessTask($id): requires either subProcess or subProcessRef"
             )
         }
         
         if (subProcessProvider && subProcessRef) {
             throw new IllegalStateException(
-                "CallActivityTask($id): cannot specify both subProcess and subProcessRef"
+                "SubprocessTask($id): cannot specify both subProcess and subProcessRef"
             )
         }
         
         if (subProcessRef && !subProcessRegistry.containsKey(subProcessRef)) {
             throw new IllegalStateException(
-                "CallActivityTask($id): subprocess reference '$subProcessRef' not found in registry"
+                "SubprocessTask($id): subprocess reference '$subProcessRef' not found in registry"
             )
         }
     }
@@ -297,7 +297,7 @@ class CallActivityTask extends TaskBase<Object> {
             try {
                 return inputMapper.call(ctx)
             } catch (Exception e) {
-                log.error("CallActivityTask($id): error mapping input", e)
+                log.error("SubprocessTask($id): error mapping input", e)
                 throw new IllegalStateException("Failed to map input data", e)
             }
         } else {
@@ -311,7 +311,7 @@ class CallActivityTask extends TaskBase<Object> {
             try {
                 return outputMapper.call(result)
             } catch (Exception e) {
-                log.error("CallActivityTask($id): error mapping output", e)
+                log.error("SubprocessTask($id): error mapping output", e)
                 throw new IllegalStateException("Failed to map output data", e)
             }
         } else {
@@ -325,7 +325,7 @@ class CallActivityTask extends TaskBase<Object> {
             try {
                 errorHandler.call(error)
             } catch (Exception e) {
-                log.error("CallActivityTask($id): error in error handler", e)
+                log.error("SubprocessTask($id): error in error handler", e)
             }
         }
     }

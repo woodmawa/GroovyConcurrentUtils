@@ -182,6 +182,14 @@ class TaskGraph {
             }
         }
 
+        // Resolve source tasks for AggregatorTasks
+        tasks.values().each { t ->
+            if (t instanceof org.softwood.dag.task.AggregatorTask) {
+                t.resolveSourceTasks(tasks)
+                log.debug "Resolved source tasks for AggregatorTask ${t.id}"
+            }
+        }
+        
         log.debug "Final graph structure:"
         tasks.values().each { t ->
             log.debug "  Task ${t.id}: predecessors=${t.predecessors} successors=${t.successors}"

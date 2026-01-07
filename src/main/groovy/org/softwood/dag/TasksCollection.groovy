@@ -158,10 +158,10 @@ class TasksCollection {
     }
     
     /**
-     * Register and configure a call activity task.
+     * Register and configure a subprocess task (formerly call activity).
      */
-    CallActivityTask callActivity(String id, @DelegatesTo(CallActivityTask) Closure config) {
-        def task = TaskFactory.createTask(TaskType.CALL_ACTIVITY, id, id, ctx) as CallActivityTask
+    SubprocessTask callActivity(String id, @DelegatesTo(SubprocessTask) Closure config) {
+        def task = TaskFactory.createTask(TaskType.SUBPROCESS, id, id, ctx) as SubprocessTask
         config.delegate = task
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.call()
@@ -169,7 +169,7 @@ class TasksCollection {
         registry[id] = task
         // Call activities don't auto-start
         
-        log.debug("TasksCollection: registered call activity '${id}'")
+        log.debug("TasksCollection: registered subprocess '${id}'")
         return task
     }
     

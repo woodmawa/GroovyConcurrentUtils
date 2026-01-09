@@ -258,9 +258,62 @@ class ForkDsl {
         if (routerTask) {
             buildRouterFork(source)
         } else if (targetIds) {
-            buildFanOutFork(source)
+            // Check if any target is a RouterTask - if so, auto-wire its targets
+            detectAndWireRouterTargets()
+            
+            // If we detected a router, use router fork logic
+            if (routerTask) {
+                buildRouterFork(source)
+            } else {
+                buildFanOutFork(source)
+            }
         } else {
             throw new IllegalStateException("fork($id): no targets specified")
+        }
+    }
+
+    /**
+     * Detect if any targetId refers to a RouterTask and auto-wire its targets.
+     * This allows: task("router", TaskType.INCLUSIVE_GATEWAY) { route "a" when { } }
+     *              fork { from "x"; to "router" }
+     */
+    private void detectAndWireRouterTargets() {
+        List<String> routersToRemove = []
+        List<String> additionalTargets = []
+        
+        targetIds.each { targetId ->
+            def target = graph.tasks[targetId]
+            if (target instanceof RouterTask) {
+                RouterTask router = (RouterTask) target
+                
+                // Store reference to router for later routing
+                if (!routerTask) {
+                    routerTask = router
+                    // Mark the router itself for removal from targetIds
+                    routersToRemove << targetId
+                }
+                
+                // Add router's targets to our targetIds
+                router.targetIds.each { routerTargetId ->
+                    if (!targetIds.contains(routerTargetId) && !additionalTargets.contains(routerTargetId)) {
+                        additionalTargets << routerTargetId
+                    }
+                }
+                
+                log.debug("fork($id): detected RouterTask '$targetId' with ${router.targetIds.size()} targets")
+            }
+        }
+        
+        // Remove routers from targetIds (they'll be wired as intermediate nodes)
+        routersToRemove.each { routerId ->
+            targetIds.remove(routerId)
+            log.debug("fork($id): removed router '$routerId' from targetIds")
+        }
+        
+        // Add discovered router targets
+        if (additionalTargets) {
+            targetIds.addAll(additionalTargets)
+            log.debug("fork($id): auto-wired ${additionalTargets.size()} router targets: $additionalTargets")
         }
     }
 

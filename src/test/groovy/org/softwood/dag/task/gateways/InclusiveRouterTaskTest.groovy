@@ -69,9 +69,9 @@ class InclusiveRouterTaskTest {
         def fraudTask = graph.tasks["fraud-check"]
         def complianceTask = graph.tasks["compliance-check"]
         
-        assertTrue(creditTask.completionPromise.isDone())
-        assertTrue(fraudTask.completionPromise.isDone())
-        assertTrue(complianceTask.completionPromise.isDone())
+        assertTrue(creditTask.isCompleted())
+        assertTrue(fraudTask.isCompleted())
+        assertTrue(complianceTask.isCompleted())
     }
 
     @Test
@@ -113,9 +113,9 @@ class InclusiveRouterTaskTest {
         def fraudTask = graph.tasks["fraud-check"]
         def complianceTask = graph.tasks["compliance-check"]
         
-        assertFalse(creditTask.completionPromise.isDone())
-        assertTrue(fraudTask.completionPromise.isDone())
-        assertFalse(complianceTask.completionPromise.isDone())
+        assertTrue(creditTask.isSkipped())
+        assertTrue(fraudTask.isCompleted())
+        assertTrue(complianceTask.isSkipped())
     }
 
     @Test
@@ -157,9 +157,9 @@ class InclusiveRouterTaskTest {
         def fraudTask = graph.tasks["fraud-check"]
         def complianceTask = graph.tasks["compliance-check"]
         
-        assertFalse(creditTask.completionPromise.isDone())
-        assertFalse(fraudTask.completionPromise.isDone())
-        assertFalse(complianceTask.completionPromise.isDone())
+        assertTrue(creditTask.isSkipped())
+        assertTrue(fraudTask.isSkipped())
+        assertTrue(complianceTask.isSkipped())
     }
 
     @Test
@@ -201,10 +201,10 @@ class InclusiveRouterTaskTest {
         
         def result = awaitPromise(graph.run())
         
-        assertTrue(graph.tasks["deploy-us-east"].completionPromise.isDone())
-        assertFalse(graph.tasks["deploy-us-west"].completionPromise.isDone())
-        assertTrue(graph.tasks["deploy-eu-west"].completionPromise.isDone())
-        assertFalse(graph.tasks["deploy-ap-south"].completionPromise.isDone())
+        assertTrue(graph.tasks["deploy-us-east"].isCompleted())
+        assertTrue(graph.tasks["deploy-us-west"].isSkipped())
+        assertTrue(graph.tasks["deploy-eu-west"].isCompleted())
+        assertTrue(graph.tasks["deploy-ap-south"].isSkipped())
     }
 
     @Test
@@ -277,8 +277,8 @@ class InclusiveRouterTaskTest {
         graph.ctx = ctx
         def result = awaitPromise(graph.run())
         
-        assertTrue(graph.tasks["high-value"].completionPromise.isDone())
-        assertFalse(graph.tasks["low-value"].completionPromise.isDone())
+        assertTrue(graph.tasks["high-value"].isCompleted())
+        assertTrue(graph.tasks["low-value"].isSkipped())
     }
 
     @Test
@@ -325,17 +325,19 @@ class InclusiveRouterTaskTest {
         
         def result = awaitPromise(graph.run())
         
-        assertTrue(graph.tasks["student-discount"].completionPromise.isDone())
-        assertTrue(graph.tasks["bulk-discount"].completionPromise.isDone())
-        assertTrue(graph.tasks["premium-bonus"].completionPromise.isDone())
+        assertTrue(graph.tasks["student-discount"].isCompleted())
+        assertTrue(graph.tasks["bulk-discount"].isCompleted())
+        assertTrue(graph.tasks["premium-bonus"].isCompleted())
     }
 
     @Test
     void testEmptyRoutes() {
         def router = new InclusiveRouterTask("router", "Router", ctx)
         
-        assertThrows(IllegalStateException) {
-            router.execute(ctx.promiseFactory.createPromise([data: "test"]))
+        def promise = router.execute(ctx.promiseFactory.createPromise([data: "test"]))
+        
+        assertThrows(Exception) {
+            awaitPromise(promise)
         }
     }
 
@@ -381,8 +383,8 @@ class InclusiveRouterTaskTest {
         
         def result = awaitPromise(graph.run())
         
-        assertFalse(graph.tasks["target1"].completionPromise.isDone())
-        assertTrue(graph.tasks["target2"].completionPromise.isDone())
+        assertTrue(graph.tasks["target1"].isSkipped())
+        assertTrue(graph.tasks["target2"].isCompleted())
     }
 
     @Test
@@ -418,8 +420,8 @@ class InclusiveRouterTaskTest {
         
         def result = awaitPromise(inclusiveGraph.run())
         
-        assertTrue(inclusiveGraph.tasks["good"].completionPromise.isDone())
-        assertTrue(inclusiveGraph.tasks["great"].completionPromise.isDone())
-        assertFalse(inclusiveGraph.tasks["excellent"].completionPromise.isDone())
+        assertTrue(inclusiveGraph.tasks["good"].isCompleted())
+        assertTrue(inclusiveGraph.tasks["great"].isCompleted())
+        assertTrue(inclusiveGraph.tasks["excellent"].isSkipped())
     }
 }

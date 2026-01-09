@@ -170,10 +170,11 @@ class EclipseStoreManager implements AutoCloseable {
                 }
             }
             
-            // Persist incrementally in background (non-blocking)
-            // Only persist on terminal states to reduce I/O overhead
+            // Persist incrementally
+            // Terminal states (COMPLETED, FAILED, SKIPPED) are persisted synchronously
+            // because they're infrequent and critical for state recovery
             if (state == TaskState.COMPLETED || state == TaskState.FAILED || state == TaskState.SKIPPED) {
-                persistAsync()
+                persistSync()
             }
             
             log.debug "Updated task state: $taskId -> $state"
@@ -201,6 +202,20 @@ class EclipseStoreManager implements AutoCloseable {
             } finally {
                 pendingAsyncOps.decrementAndGet()
             }
+        }
+    }
+    
+    /**
+     * Synchronously persist the snapshot (for terminal states)
+     */
+    private void persistSync() {
+        try {
+            storage.store(snapshot.taskStates)
+            storage.store(snapshot.contextGlobals)
+            storage.store(snapshot)
+            log.trace "Sync persistence completed"
+        } catch (Exception e) {
+            log.warn "Sync persistence failed", e
         }
     }
     

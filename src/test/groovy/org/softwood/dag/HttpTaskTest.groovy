@@ -118,7 +118,7 @@ class HttpTaskTest {
                 .withStatus(204)))
         
         def graph = TaskGraph.build {
-            httpTask("delete") {
+            httpTask("delete-user") {
                 url "http://localhost:8089/users/123"
                 method HttpMethod.DELETE
             }

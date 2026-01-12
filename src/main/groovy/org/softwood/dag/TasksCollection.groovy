@@ -495,57 +495,56 @@ class TasksCollection {
                 throw new IllegalStateException("Chain has no tasks")
             }
             
-            def resultPromise = collection.ctx.promiseFactory.createPromise()
+            // Execute the chain and return a properly chained promise
+            def resultPromise = chainExecute(0, initialValue)
             
-            // Attach handlers BEFORE starting chain (avoid timing issues)
+            // Apply completion handler using then()
             if (onCompleteHandler) {
-                resultPromise.onComplete(onCompleteHandler)
-            }
-            if (onErrorHandler) {
-                resultPromise.onError(onErrorHandler)
+                resultPromise = resultPromise.then(onCompleteHandler)
             }
             
-            // Start the chain
-            chainNext(0, initialValue, resultPromise)
+            // Apply error handler but still propagate the error
+            if (onErrorHandler) {
+                resultPromise = resultPromise.recover { error ->
+                    // Call the error handler
+                    onErrorHandler.call(error)
+                    // Re-throw the error so .get() will still throw
+                    throw error
+                }
+            }
             
             return resultPromise
         }
         
         /**
-         * Recursively chain tasks together.
+         * Recursively execute tasks and return a promise for the final result.
          */
-        private void chainNext(int index, Object value, Promise resultPromise) {
+        private Promise chainExecute(int index, Object value) {
             if (index >= taskIds.size()) {
-                // Chain complete - resolve with final value
-                resultPromise.accept(value)
-                return
+                // Chain complete - return resolved promise with final value
+                return collection.ctx.promiseFactory.createPromise(value)
             }
             
             def taskId = taskIds[index]
             def task = collection.find(taskId)
             
             if (!task) {
-                resultPromise.fail(new IllegalArgumentException("Unknown task: $taskId"))
-                return
+                // Return failed promise
+                def failedPromise = collection.ctx.promiseFactory.createPromise()
+                failedPromise.fail(new IllegalArgumentException("Unknown task: $taskId"))
+                return failedPromise
             }
             
-            try {
-                // Execute this task with current value
-                def inputPromise = collection.ctx.promiseFactory.createPromise(value)
-                def taskPromise = task.execute(inputPromise)
-                
-                // Chain to next task on success
-                taskPromise.onComplete { result ->
-                    chainNext(index + 1, result, resultPromise)
-                }
-                
-                // Propagate errors
-                taskPromise.onError { error ->
-                    resultPromise.fail(error)
-                }
-            } catch (Exception e) {
-                // Handle synchronous errors
-                resultPromise.fail(e)
+            // Execute this task with current value
+            def inputPromise = collection.ctx.promiseFactory.createPromise(value)
+            def taskPromise = task.execute(inputPromise)
+            
+            // Chain to next task using then()
+            return taskPromise.then { result ->
+                // Recursively execute next task
+                def nextPromise = chainExecute(index + 1, result)
+                // Return the result of the next promise
+                nextPromise.get()
             }
         }
     }

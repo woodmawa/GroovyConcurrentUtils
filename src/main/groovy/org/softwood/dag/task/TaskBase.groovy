@@ -7,6 +7,10 @@ import org.softwood.promise.Promises
 
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import org.softwood.dag.resilience.RateLimiter
+import org.softwood.dag.resilience.RateLimitExceededException
+import org.softwood.dag.resilience.TimeoutPolicy
+import org.softwood.dag.resilience.TaskTimeoutException
 
 /**
  * Abstract base class for all DAG tasks.
@@ -40,7 +44,9 @@ abstract class TaskBase<T> implements ITask<T> {
      * Task runtime behaviour
      */
     protected RetryPolicy retryPolicy = new RetryPolicy()
-    private Long taskTimeoutMillis = null
+    protected RateLimitPolicy rateLimitPolicy = new RateLimitPolicy()
+    protected TimeoutPolicy timeoutPolicy = new TimeoutPolicy()
+    private Long taskTimeoutMillis = null  // Legacy - kept for backwards compatibility
     protected Throwable lastError = null
 
     Promise<?> completionPromise = null
@@ -370,6 +376,122 @@ abstract class TaskBase<T> implements ITask<T> {
         def dsl = new RetryDsl(this.retryPolicy)
         dsl.preset(preset)
     }
+    
+    // ----------------------------------------------------
+    // Rate Limit DSL Configuration
+    // ----------------------------------------------------
+    
+    /**
+     * Configure rate limiting behavior using a DSL block.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     rateLimit {
+     *         name "api-limiter"
+     *         enabled true
+     *         onLimitExceeded { ctx -> 
+     *             log.warn("Rate limited: \${ctx.taskId}")
+     *         }
+     *     }
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param config DSL configuration closure
+     */
+    void rateLimit(@DelegatesTo(RateLimitDsl) Closure config) {
+        def dsl = new RateLimitDsl(this.rateLimitPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Configure rate limiting with just a limiter name (simple form).
+     * Automatically enables rate limiting.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     rateLimit "api-limiter"
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param limiterName name of the rate limiter to use
+     */
+    void rateLimit(String limiterName) {
+        rateLimitPolicy.name = limiterName
+        rateLimitPolicy.enabled = true
+    }
+    
+    // ----------------------------------------------------
+    // Timeout DSL Configuration
+    // ----------------------------------------------------
+    
+    /**
+     * Configure timeout behavior using a DSL block.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("slow-task") {
+     *     timeout {
+     *         duration Duration.ofSeconds(30)
+     *         warningThreshold Duration.ofSeconds(25)
+     *         onWarning { ctx -> log.warn("Task taking too long") }
+     *         onTimeout { ctx -> log.error("Task timed out") }
+     *     }
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param config DSL configuration closure
+     */
+    void timeout(@DelegatesTo(org.softwood.dag.resilience.TimeoutDsl) Closure config) {
+        def dsl = new org.softwood.dag.resilience.TimeoutDsl(this.timeoutPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Configure timeout with just a duration (simple form).
+     * Automatically enables timeout.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     timeout Duration.ofSeconds(30)
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param duration timeout duration
+     */
+    void timeout(java.time.Duration duration) {
+        timeoutPolicy.timeout(duration)
+    }
+    
+    /**
+     * Configure timeout with a preset name.
+     * 
+     * Available presets: quick, standard, long, very-long, none
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     timeout "standard"  // 30 seconds
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param preset preset name
+     */
+    void timeout(String preset) {
+        def dsl = new org.softwood.dag.resilience.TimeoutDsl(this.timeoutPolicy)
+        dsl.preset(preset)
+    }
 
 
     // ------------
@@ -455,6 +577,13 @@ abstract class TaskBase<T> implements ITask<T> {
         
         // Don't retry timeout errors (already handled separately)
         if (err instanceof TimeoutException) return false
+        if (err instanceof TaskTimeoutException) return false
+        
+        // Don't retry circuit breaker exceptions - these represent deliberate circuit state
+        if (err instanceof CircuitBreakerOpenException) return false
+        
+        // Don't retry rate limit exceptions - these are protective limits, not transient failures
+        if (err instanceof RateLimitExceededException) return false
         
         // Don't retry receive timeout errors - check by class name to avoid circular dependency
         def className = err.class.name
@@ -475,6 +604,31 @@ abstract class TaskBase<T> implements ITask<T> {
         def factory = ctx.promiseFactory
 
         return factory.executeAsync {
+            
+            // Acquire resource slot if resource monitoring is enabled
+            def resourceMonitor = ctx.resourceMonitor
+            if (resourceMonitor != null) {
+                log.debug "Task ${id}: acquiring resource slot"
+                resourceMonitor.acquireTaskSlot()
+            }
+            
+            try {
+                return executeTaskWithRetry(previousPromise)
+            } finally {
+                // Always release resource slot
+                if (resourceMonitor != null) {
+                    log.debug "Task ${id}: releasing resource slot"
+                    resourceMonitor.releaseTaskSlot()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Execute task with retry logic.
+     * Separated from runAttempt() to ensure resource cleanup happens properly.
+     */
+    protected T executeTaskWithRetry(Promise<?> previousPromise) {
 
             int attempt = 1
             long delay = retryPolicy.initialDelay.toMillis()
@@ -507,13 +661,111 @@ abstract class TaskBase<T> implements ITask<T> {
                         log.debug "Task ${id}: final unwrapped prevValue: $prevValue"
                     }
 
+                    // Check rate limit BEFORE calling runTask()
+                    if (rateLimitPolicy.isActive()) {
+                        log.debug "Task ${id}: checking rate limit '${rateLimitPolicy.name}'"
+                        
+                        // Get the rate limiter from context
+                        RateLimiter limiter = ctx.rateLimiters.get(rateLimitPolicy.name)
+                        if (limiter == null) {
+                            throw new IllegalStateException("Task ${id}: rate limiter '${rateLimitPolicy.name}' not found in context. " +
+                                "Create it first using ctx.rateLimiter('${rateLimitPolicy.name}') { ... }")
+                        }
+                        
+                        // Try to acquire permission
+                        if (!limiter.tryAcquire()) {
+                            // Rate limit exceeded - invoke callback if provided
+                            if (rateLimitPolicy.onLimitExceeded) {
+                                try {
+                                    rateLimitPolicy.onLimitExceeded.call(ctx)
+                                } catch (Exception cbErr) {
+                                    log.warn "Task ${id}: error in onLimitExceeded callback: ${cbErr.message}"
+                                }
+                            }
+                            
+                            // Throw rate limit exception
+                            def retryAfter = limiter.getRetryAfter()
+                            throw new RateLimitExceededException(
+                                "Task ${id}: rate limit exceeded (${limiter.getCurrentCount()}/${limiter.maxRequests} requests in ${limiter.timeWindow})",
+                                rateLimitPolicy.name,
+                                id,
+                                limiter.getCurrentCount(),
+                                limiter.maxRequests,
+                                limiter.timeWindow,
+                                retryAfter
+                            )
+                        }
+                        
+                        log.debug "Task ${id}: rate limit check passed (${limiter.getCurrentCount()}/${limiter.maxRequests})"
+                    }
+
                     log.debug "Task ${id}: calling runTask() with prevValue"
+                    
+                    // Determine effective timeout (timeoutPolicy takes precedence over legacy taskTimeoutMillis)
+                    Long effectiveTimeoutMillis = null
+                    if (timeoutPolicy.isActive() && timeoutPolicy.timeout != null) {
+                        effectiveTimeoutMillis = timeoutPolicy.timeout.toMillis()
+                    } else if (taskTimeoutMillis != null) {
+                        effectiveTimeoutMillis = taskTimeoutMillis
+                    }
+                    
                     Promise<T> promise = runTask(ctx, prevValue)  // Pass raw value (may be null)
 
                     log.debug "Task ${id}: runTask() returned promise, waiting for result"
-                    T result = (taskTimeoutMillis != null)
-                            ? promise.get(taskTimeoutMillis, TimeUnit.MILLISECONDS)
-                            : promise.get()
+                    
+                    T result
+                    if (effectiveTimeoutMillis != null) {
+                        def startTime = System.currentTimeMillis()
+                        
+                        try {
+                            result = promise.get(effectiveTimeoutMillis, TimeUnit.MILLISECONDS)
+                        } catch (java.lang.IllegalStateException raceErr) {
+                            // DataflowPromise race condition: error state detected but error value not yet set
+                            // Wait a moment and try again to get the actual error
+                            if (raceErr.message?.contains("Error state detected but error value is null")) {
+                                Thread.sleep(10)  // Brief delay to let error propagate
+                                try {
+                                    result = promise.get(effectiveTimeoutMillis, TimeUnit.MILLISECONDS)
+                                } catch (Throwable actualErr) {
+                                    // Now we should get the real error
+                                    throw actualErr
+                                }
+                            } else {
+                                throw raceErr
+                            }
+                        } catch (TimeoutException timeoutEx) {
+                            def elapsed = System.currentTimeMillis() - startTime
+                            
+                            // Invoke timeout callback if provided
+                            if (timeoutPolicy.onTimeout) {
+                                try {
+                                    timeoutPolicy.onTimeout.call(ctx)
+                                } catch (Exception cbErr) {
+                                    log.warn "Task ${id}: error in onTimeout callback: ${cbErr.message}"
+                                }
+                            }
+                            
+                            // Throw custom timeout exception
+                            throw new TaskTimeoutException(
+                                id,
+                                java.time.Duration.ofMillis(effectiveTimeoutMillis),
+                                java.time.Duration.ofMillis(elapsed)
+                            )
+                        }
+                    } else {
+                        try {
+                            result = promise.get()
+                        } catch (java.lang.IllegalStateException raceErr) {
+                            // DataflowPromise race condition: error state detected but error value not yet set
+                            // Wait a moment and try again to get the actual error
+                            if (raceErr.message?.contains("Error state detected but error value is null")) {
+                                Thread.sleep(10)  // Brief delay to let error propagate
+                                result = promise.get()
+                            } else {
+                                throw raceErr
+                            }
+                        }
+                    }
 
                     log.debug "Task ${id}: got result: $result"
 
@@ -534,11 +786,20 @@ abstract class TaskBase<T> implements ITask<T> {
                     }
 
                     // Check if we've exhausted retries for retriable errors
+                    // Only wrap if retries were actually configured (maxAttempts > 1)
+                    if (retryPolicy.maxAttempts <= 1) {
+                        // No retries configured - throw original exception
+                        state = TaskState.FAILED
+                        emitErrorEvent(err)
+                        throw err
+                    }
+                    
                     if (attempt >= retryPolicy.maxAttempts) {
+                        // Retries exhausted - wrap to indicate retry exhaustion
                         state = TaskState.FAILED
                         def exceeded = new RuntimeException("Task ${id}: exceeded retry attempts", err)
                         emitErrorEvent(exceeded)
-                        throw exceeded  // Wrap in RuntimeException to indicate retry exhaustion
+                        throw exceeded
                     }
 
                     // Retry with backoff
@@ -548,7 +809,7 @@ abstract class TaskBase<T> implements ITask<T> {
                     attempt++
                 }
             }
-        }
+        // End of executeTaskWithRetry
     }
 
     // ----------------------------------------------------

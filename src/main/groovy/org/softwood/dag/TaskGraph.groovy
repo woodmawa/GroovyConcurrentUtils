@@ -8,9 +8,16 @@ import org.softwood.dag.cluster.*
 import org.softwood.dag.persistence.EclipseStoreManager
 import org.softwood.dag.persistence.PersistenceConfig
 import org.softwood.dag.persistence.TaskState as PersistenceTaskState
+import org.softwood.dag.resilience.GraphTimeoutException
+import org.softwood.dag.resilience.ResourceLimitPolicy
+import org.softwood.dag.resilience.ResourceMonitor
 import org.softwood.dag.task.*
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
+
+import java.time.Duration
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 @Slf4j
 class TaskGraph {
@@ -28,6 +35,15 @@ class TaskGraph {
 
     /** Persistence configuration (optional) */
     PersistenceConfig persistenceConfig
+    
+    /** Graph-level timeout (optional) */
+    Duration graphTimeout = null
+    
+    /** Resource limit policy (optional) */
+    ResourceLimitPolicy resourceLimitPolicy = null
+    
+    /** Resource monitor (created per run if limits configured) */
+    private ResourceMonitor resourceMonitor = null
     
     /** Persistence manager (created per run) */
     private EclipseStoreManager persistenceManager
@@ -238,6 +254,29 @@ class TaskGraph {
             clusteringEnabled = false
         }
     }
+    
+    /**
+     * Initialize resource monitoring if resource limits are configured.
+     */
+    private void initializeResourceMonitoring() {
+        if (resourceLimitPolicy == null || !resourceLimitPolicy.hasLimits()) {
+            log.debug "Resource limiting is disabled"
+            return
+        }
+        
+        try {
+            resourceMonitor = new ResourceMonitor(resourceLimitPolicy)
+            
+            // Make monitor available to tasks via context
+            ctx.resourceMonitor = resourceMonitor
+            
+            log.info "Resource monitoring enabled: $resourceLimitPolicy"
+            
+        } catch (Exception e) {
+            log.error "Failed to initialize resource monitoring", e
+            resourceMonitor = null
+        }
+    }
 
     /**
      * Start graph execution by scheduling all root tasks.
@@ -268,6 +307,9 @@ class TaskGraph {
         // Initialize clustering if enabled
         initializeClusteredExecution()
         
+        // Initialize resource monitoring if enabled
+        initializeResourceMonitoring()
+        
         // Initialize persistence if enabled
         initializePersistence()
 
@@ -281,7 +323,93 @@ class TaskGraph {
 
         roots.each { schedule(it) }
 
+        // If graph timeout is set, wrap the promise with timeout enforcement
+        if (graphTimeout != null) {
+            return enforceGraphTimeout(graphCompletionPromise, graphTimeout)
+        }
+
         return graphCompletionPromise
+    }
+    
+    /**
+     * Enforce graph-level timeout by wrapping the completion promise.
+     * If timeout expires before graph completes, cancels remaining tasks and fails the graph.
+     */
+    private Promise<?> enforceGraphTimeout(Promise<?> completionPromise, Duration timeout) {
+        def wrappedPromise = ctx.promiseFactory.createPromise()
+        def startTime = System.currentTimeMillis()
+        
+        // Start timeout monitor in background
+        Thread.startVirtualThread {
+            try {
+                // Wait for either completion or timeout
+                try {
+                    def result = completionPromise.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+                    // Graph completed within timeout - success!
+                    wrappedPromise.accept(result)
+                } catch (TimeoutException timeoutEx) {
+                    // Graph timeout exceeded!
+                    def elapsed = Duration.ofMillis(System.currentTimeMillis() - startTime)
+                    def completed = tasks.values().count { it.isCompleted() || it.isSkipped() }
+                    
+                    log.error "Graph timeout exceeded: ${elapsed} > ${timeout} (completed: ${completed}/${totalTaskCount})"
+                    
+                    // Cancel all running/scheduled tasks
+                    cancelRemainingTasks()
+                    
+                    // Create timeout exception
+                    String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+                    def timeoutError = new GraphTimeoutException(
+                        graphId,
+                        timeout,
+                        elapsed,
+                        completed,
+                        totalTaskCount
+                    )
+                    
+                    // Finalize persistence with timeout failure
+                    finalizePersistence(true, "<graph-timeout>", timeoutError)
+                    
+                    // Fail the wrapped promise
+                    wrappedPromise.fail(timeoutError)
+                }
+            } catch (Exception e) {
+                log.error "Error in timeout monitor", e
+                wrappedPromise.fail(e)
+            }
+        }
+        
+        return wrappedPromise
+    }
+    
+    /**
+     * Cancel all tasks that are still running or scheduled when graph timeout occurs.
+     * Marks them as FAILED with a timeout message.
+     */
+    private void cancelRemainingTasks() {
+        synchronized (this) {
+            tasks.values().each { task ->
+                if (!task.isCompleted() && !task.isFailed() && !task.isSkipped()) {
+                    // Mark as failed due to graph timeout
+                    def timeoutError = new GraphTimeoutException(
+                        "Task cancelled due to graph timeout"
+                    )
+                    task.markFailed(timeoutError)
+                    
+                    // Persist FAILED state
+                    persistTaskStateChange(task.id, PersistenceTaskState.FAILED, [
+                        errorMessage: "Cancelled due to graph timeout",
+                        errorStackTrace: "Graph execution exceeded maximum duration"
+                    ])
+                    
+                    // Publish to cluster
+                    publishTaskStateToCluster(task.id, "FAILED", "Graph timeout")
+                    updateClusterGraphState(task.id, "FAILED")
+                    
+                    log.debug "Cancelled task ${task.id} due to graph timeout"
+                }
+            }
+        }
     }
 
     // --------------------------------------------------------------------

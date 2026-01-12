@@ -103,7 +103,7 @@ class BusinessRuleTask extends TaskBase<Map> {
     Closure evaluationRule
     
     /** Action when rule evaluates to true: (ctx, data) -> result */
-    Closure trueAction
+    Closure action
     
     /** Action when rule evaluates to false: (ctx, data) -> void */
     Closure falseAction
@@ -156,7 +156,7 @@ class BusinessRuleTask extends TaskBase<Map> {
     }
     
     void action(Closure action) {
-        this.trueAction = action
+        this.action = action
     }
     
     void onFalse(Closure action) {
@@ -164,7 +164,7 @@ class BusinessRuleTask extends TaskBase<Map> {
     }
     
     void onTrue(Closure action) {
-        this.trueAction = action
+        this.action = action
     }
     
     void priority(int p) {
@@ -213,7 +213,7 @@ class BusinessRuleTask extends TaskBase<Map> {
             )
         }
         
-        if (!evaluationRule && !trueAction) {
+        if (!evaluationRule && !action) {
             throw new IllegalStateException(
                 "BusinessRuleTask($id): requires either evaluate or action"
             )
@@ -338,9 +338,9 @@ class BusinessRuleTask extends TaskBase<Map> {
             Object actionResult = null
             
             // Execute appropriate action
-            if (ruleResult && trueAction) {
+            if (ruleResult && action) {
                 log.debug("BusinessRuleTask($id): executing true action")
-                actionResult = trueAction.call(ctx, data)
+                actionResult = action.call(ctx, data)
             } else if (!ruleResult && falseAction) {
                 log.debug("BusinessRuleTask($id): executing false action")
                 actionResult = falseAction.call(ctx, data)

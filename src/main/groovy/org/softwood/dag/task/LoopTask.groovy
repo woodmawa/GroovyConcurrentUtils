@@ -63,7 +63,7 @@ class LoopTask extends TaskBase<Object> {
     Closure collectionProvider
     
     /** Action to execute for each item */
-    Closure loopAction
+    Closure action
     
     /** Optional: initial accumulator value */
     Object initialAccumulator
@@ -120,7 +120,7 @@ class LoopTask extends TaskBase<Object> {
      *   action { ctx, item, index, acc -> ... }
      */
     void action(Closure action) {
-        this.loopAction = action
+        this.action = action
     }
     
     /**
@@ -206,7 +206,7 @@ class LoopTask extends TaskBase<Object> {
             }
         }
         
-        if (!loopAction) {
+        if (!action) {
             return ctx.promiseFactory.executeAsync {
                 throw new IllegalStateException("LoopTask ${id}: no action specified")
             }
@@ -278,11 +278,11 @@ class LoopTask extends TaskBase<Object> {
                 def result
                 if (initialAccumulator != null) {
                     // Call with accumulator
-                    result = loopAction.call(ctx, item, i, accumulator)
+                    result = action.call(ctx, item, i, accumulator)
                     accumulator = result
                 } else {
                     // Call without accumulator
-                    result = loopAction.call(ctx, item, i)
+                    result = action.call(ctx, item, i)
                 }
                 
                 // Handle if result is a Promise
@@ -373,7 +373,7 @@ class LoopTask extends TaskBase<Object> {
                 if (!broken) {
                     def promise = ctx.promiseFactory.executeAsync {
                         try {
-                            def result = loopAction.call(ctx, item, globalIndex)
+                            def result = action.call(ctx, item, globalIndex)
                             
                             // Handle if result is a Promise
                             if (result instanceof Promise) {

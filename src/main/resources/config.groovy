@@ -112,6 +112,41 @@ taskgraph {
     }
 }
 
+// ==============================================================================
+// EXECUTION TIMEOUT CONFIGURATION
+// ==============================================================================
+timeout {
+    defaults {
+        taskTimeout = java.time.Duration.ofMinutes(5)     // Default task execution timeout
+        graphTimeout = java.time.Duration.ofHours(1)      // Default graph execution timeout
+        warningThreshold = java.time.Duration.ofMinutes(4)  // 80% of task timeout (4 min of 5 min)
+        enabled = false  // Opt-in by default
+    }
+    
+    // Common timeout presets
+    presets {
+        quick {
+            taskTimeout = java.time.Duration.ofSeconds(5)
+            warningThreshold = java.time.Duration.ofSeconds(4)
+        }
+        
+        standard {
+            taskTimeout = java.time.Duration.ofSeconds(30)
+            warningThreshold = java.time.Duration.ofSeconds(25)
+        }
+        
+        long {
+            taskTimeout = java.time.Duration.ofMinutes(5)
+            warningThreshold = java.time.Duration.ofMinutes(4)
+        }
+        
+        'very-long' {
+            taskTimeout = java.time.Duration.ofMinutes(30)
+            warningThreshold = java.time.Duration.ofMinutes(25)
+        }
+    }
+}
+
 // Profile-specific overrides
 environments {
     dev {

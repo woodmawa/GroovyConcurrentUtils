@@ -391,8 +391,9 @@ class DataTransformTaskTest {
             promise.get()
         }
         
-        // Verify it's wrapped in "exceeded retry attempts"
-        assertTrue(exception.message.contains("exceeded retry attempts"))
+        // Verify it's the TransformException wrapping the original error
+        // Note: No retry wrapping since maxAttempts defaults to 0
+        assertTrue(exception.message.contains("Transform step") || exception.message.contains("Transform failed!"))
     }
 
     @Test

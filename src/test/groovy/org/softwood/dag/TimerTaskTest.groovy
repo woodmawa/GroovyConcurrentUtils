@@ -36,7 +36,7 @@ class TimerTaskTest {
         def timer = new TimerTask("timer", "Timer", ctx)
         timer.interval = Duration.ofMillis(100)
         timer.maxExecutions = 3
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << System.currentTimeMillis()
             return executions.size()
         }
@@ -58,7 +58,7 @@ class TimerTaskTest {
         def timer = new TimerTask("timer", "Timer", ctx)
         timer.interval = Duration.ofMillis(50)
         timer.timeout = Duration.ofMillis(200)
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << System.currentTimeMillis()
         }
         
@@ -78,7 +78,7 @@ class TimerTaskTest {
         timer.interval = Duration.ofMillis(50)
         timer.maxExecutions = 100  // Safety limit
         timer.stopWhenCondition = { c, executionCount -> executionCount >= 5 }
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << executions.size() + 1
             return executions.size()
         }
@@ -98,7 +98,7 @@ class TimerTaskTest {
         def timer = new TimerTask("timer", "Timer", ctx)
         timer.interval = Duration.ofMillis(50)
         timer.maxExecutions = 100  // Safety limit
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << executions.size() + 1
             if (executions.size() == 3) {
                 return TimerControl.stop("early exit")
@@ -120,7 +120,7 @@ class TimerTaskTest {
         def timer = new TimerTask("timer", "Timer", ctx)
         timer.interval = Duration.ofMillis(50)
         timer.maxExecutions = 5
-        timer.timerAction = { c ->
+        timer.action = { c ->
             return Math.random() * 100
         }
         timer.accumulatorFn = { c, acc, result ->
@@ -227,7 +227,7 @@ class TimerTaskTest {
         def timer = new TimerTask("timer", "Timer", ctx)
         timer.interval = Duration.ofMillis(50)
         timer.maxExecutions = 1000  // Would run a long time
-        timer.timerAction = { c -> "tick" }
+        timer.action = { c -> "tick" }
         
         def promise = timer.execute(ctx.promiseFactory.createPromise(null))
         
@@ -253,7 +253,7 @@ class TimerTaskTest {
         timer.interval = Duration.ofMillis(50)
         timer.initialDelay = Duration.ofMillis(200)
         timer.maxExecutions = 2
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << System.currentTimeMillis() - startTime
         }
         
@@ -273,7 +273,7 @@ class TimerTaskTest {
         timer.interval = Duration.ofMillis(50)
         timer.maxExecutions = 10
         timer.stopOnError = true
-        timer.timerAction = { c ->
+        timer.action = { c ->
             executions << executions.size() + 1
             if (executions.size() == 3) {
                 throw new RuntimeException("Intentional error")

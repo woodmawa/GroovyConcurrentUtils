@@ -41,7 +41,7 @@ class BusinessRuleTaskTest {
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
         rule.triggerSignal = "test-signal"
         rule.evaluationRule = { c, data -> data.value > 10 }
-        rule.trueAction = { c, data -> "approved: ${data.value}" }
+        rule.action = { c, data -> "approved: ${data.value}" }
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         
@@ -65,7 +65,7 @@ class BusinessRuleTaskTest {
             c.globals.counter++
             c.globals.counter >= 3
         }
-        rule.trueAction = { c, data ->
+        rule.action = { c, data ->
             "triggered after ${c.globals.counter} polls"
         }
         
@@ -83,7 +83,7 @@ class BusinessRuleTaskTest {
         rule.evaluationRule = { c, data ->
             data.amount < 1000
         }
-        rule.trueAction = { c, data ->
+        rule.action = { c, data ->
             "approved: ${data.amount}"
         }
         rule.falseAction = { c, data ->
@@ -109,7 +109,7 @@ class BusinessRuleTaskTest {
         rule.evaluationRule = { c, data ->
             data.amount < 1000
         }
-        rule.trueAction = { c, data ->
+        rule.action = { c, data ->
             "approved"
         }
         rule.falseAction = { c, data ->
@@ -134,7 +134,7 @@ class BusinessRuleTaskTest {
         
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
         rule.triggerSignal = "early-signal"
-        rule.trueAction = { c, data -> "received: ${data.data}" }
+        rule.action = { c, data -> "received: ${data.data}" }
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         def result = awaitPromise(promise)
@@ -151,7 +151,7 @@ class BusinessRuleTaskTest {
         rule.triggerSignal = "manual-trigger"
         rule.pollingInterval = Duration.ofMillis(50)
         rule.triggerCondition = { c -> c.globals.ready }
-        rule.trueAction = { c, data -> "triggered" }
+        rule.action = { c, data -> "triggered" }
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         
@@ -172,7 +172,7 @@ class BusinessRuleTaskTest {
         def rule = new BusinessRuleTask("rule", "High Priority", ctx)
         rule.priority = 10
         rule.triggerSignal = "test"
-        rule.trueAction = { c, data -> "done" }
+        rule.action = { c, data -> "done" }
         
         assertEquals(10, rule.priority)
     }
@@ -182,7 +182,7 @@ class BusinessRuleTaskTest {
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
         rule.triggerSignal = "never-sent"
         rule.timeout = Duration.ofMillis(200)
-        rule.trueAction = { c, data -> "done" }
+        rule.action = { c, data -> "done" }
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         
@@ -241,7 +241,7 @@ class BusinessRuleTaskTest {
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
         rule.triggerSignal = "retry-test"
         rule.retryOnFailure = true
-        rule.trueAction = { c, data ->
+        rule.action = { c, data ->
             attempts << System.currentTimeMillis()
             if (attempts.size() < 2) {
                 throw new RuntimeException("Fail on first try")
@@ -272,7 +272,7 @@ class BusinessRuleTaskTest {
         // Rule without evaluation - just execute action
         def rule = new BusinessRuleTask("rule", "Rule", ctx)
         rule.triggerSignal = "simple-test"
-        rule.trueAction = { c, data -> "executed: ${data.value}" }
+        rule.action = { c, data -> "executed: ${data.value}" }
         
         def promise = rule.execute(ctx.promiseFactory.createPromise(null))
         

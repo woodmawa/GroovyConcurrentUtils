@@ -149,7 +149,7 @@ class TaskGraphFactoryTest {
     void testGraphCannotBeReusedEvenAfterCompletion() {
         // Given: A simple graph
         def graph = TaskGraph.build {
-            serviceTask("task") {
+            serviceTask("simple-task") {
                 action { ctx, prevVal ->
                     Promises.newPromise("result")
                 }
@@ -302,7 +302,7 @@ class TaskGraphFactoryTest {
         def globalCounter = new java.util.concurrent.atomic.AtomicInteger(0)
 
         def factory = TaskGraph.factory {
-            serviceTask("task") {
+            serviceTask("worker-task") {
                 action { ctx, prevVal ->
                     // Each graph increments the global counter
                     def count = globalCounter.incrementAndGet()

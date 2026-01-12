@@ -260,7 +260,7 @@ class NewRouterIntegrationTest {
         def results = []
 
         def graph = TaskGraph.build {
-            serviceTask("input") {
+            serviceTask("input-data") {
                 action { ctx, _ ->
                     ctx.promiseFactory.executeAsync { [score: 45] }
                 }
@@ -277,7 +277,7 @@ class NewRouterIntegrationTest {
 
             // ✨ XOR Gateway for grading
             fork("grading") {
-                from "input"
+                from "input-data"
                 exclusiveGateway {
                     when { it.score >= 90 } route "grade-a"
                     when { it.score >= 80 } route "grade-b"

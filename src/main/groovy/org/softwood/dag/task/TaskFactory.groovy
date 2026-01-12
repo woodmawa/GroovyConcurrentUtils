@@ -1,6 +1,10 @@
 package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
+import org.softwood.dag.task.spi.ITaskProvider
+import org.softwood.dag.task.spi.TaskProviderRegistry
+import static org.softwood.dag.task.TaskFactoryValidation.validateTaskId
+import static org.softwood.dag.task.TaskFactoryValidation.validateTaskName
 
 /**
  * Factory for creating task instances.
@@ -38,6 +42,8 @@ class TaskFactory {
      * @return new ServiceTask instance
      */
     static ServiceTask createServiceTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ServiceTask: id=$id, name=$name")
         return new ServiceTask(id, name, ctx)
     }
@@ -51,6 +57,8 @@ class TaskFactory {
      * @return new ManualTask instance
      */
     static ManualTask createManualTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ManualTask: id=$id, name=$name")
         return new ManualTask(id, name, ctx)
     }
@@ -64,6 +72,8 @@ class TaskFactory {
      * @return new SignalTask instance
      */
     static SignalTask createSignalTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SignalTask: id=$id, name=$name")
         return new SignalTask(id, name, ctx)
     }
@@ -77,6 +87,8 @@ class TaskFactory {
      * @return new SubGraphTask instance
      */
     static SubGraphTask createSubGraphTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SubGraphTask: id=$id, name=$name")
         return new SubGraphTask(id, name, ctx)
     }
@@ -90,6 +102,8 @@ class TaskFactory {
      * @return new ScriptTask instance
      */
     static ScriptTask createScriptTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ScriptTask: id=$id, name=$name")
         return new ScriptTask(id, name, ctx)
     }
@@ -103,6 +117,8 @@ class TaskFactory {
      * @return new SendTask instance
      */
     static SendTask createSendTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SendTask: id=$id, name=$name")
         return new SendTask(id, name, ctx)
     }
@@ -116,6 +132,8 @@ class TaskFactory {
      * @return new ReceiveTask instance
      */
     static ReceiveTask createReceiveTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ReceiveTask: id=$id, name=$name")
         return new ReceiveTask(id, name, ctx)
     }
@@ -129,6 +147,8 @@ class TaskFactory {
      * @return new TimerTask instance
      */
     static TimerTask createTimerTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating TimerTask: id=$id, name=$name")
         return new TimerTask(id, name, ctx)
     }
@@ -142,6 +162,8 @@ class TaskFactory {
      * @return new BusinessRuleTask instance
      */
     static BusinessRuleTask createBusinessRuleTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating BusinessRuleTask: id=$id, name=$name")
         return new BusinessRuleTask(id, name, ctx)
     }
@@ -155,6 +177,8 @@ class TaskFactory {
      * @return new DataTransformTask instance
      */
     static DataTransformTask createDataTransformTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating DataTransformTask: id=$id, name=$name")
         return new DataTransformTask(id, name, ctx)
     }
@@ -168,6 +192,8 @@ class TaskFactory {
      * @return new SubprocessTask instance
      */
     static SubprocessTask createSubprocessTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SubprocessTask: id=$id, name=$name")
         return new SubprocessTask(id, name, ctx)
     }
@@ -181,6 +207,8 @@ class TaskFactory {
      * @return new AggregatorTask instance
      */
     static AggregatorTask createAggregatorTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating AggregatorTask: id=$id, name=$name")
         return new AggregatorTask(id, name, ctx)
     }
@@ -194,6 +222,8 @@ class TaskFactory {
      * @return new EventGatewayTask instance
      */
     static EventGatewayTask createEventGatewayTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating EventGatewayTask: id=$id, name=$name")
         return new EventGatewayTask(id, name, ctx)
     }
@@ -207,6 +237,8 @@ class TaskFactory {
      * @return new LoopTask instance
      */
     static LoopTask createLoopTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating LoopTask: id=$id, name=$name")
         return new LoopTask(id, name, ctx)
     }
@@ -224,6 +256,8 @@ class TaskFactory {
      * @return new ConditionalForkTask instance
      */
     static ConditionalForkTask createConditionalFork(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ConditionalForkTask: id=$id, name=$name")
         return new ConditionalForkTask(id, name, ctx)
     }
@@ -237,6 +271,8 @@ class TaskFactory {
      * @return new DynamicRouterTask instance
      */
     static DynamicRouterTask createDynamicRouter(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating DynamicRouterTask: id=$id, name=$name")
         return new DynamicRouterTask(id, name, ctx)
     }
@@ -250,6 +286,8 @@ class TaskFactory {
      * @return new ShardingRouterTask instance
      */
     static ShardingRouterTask createShardingRouter(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ShardingRouterTask: id=$id, name=$name")
         return new ShardingRouterTask(id, name, ctx)
     }
@@ -263,6 +301,8 @@ class TaskFactory {
      * @return new ExclusiveGatewayTask instance
      */
     static ExclusiveGatewayTask createExclusiveGateway(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ExclusiveGatewayTask: id=$id, name=$name")
         return new ExclusiveGatewayTask(id, name, ctx)
     }
@@ -276,6 +316,8 @@ class TaskFactory {
      * @return new SwitchRouterTask instance
      */
     static SwitchRouterTask createSwitchRouter(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SwitchRouterTask: id=$id, name=$name")
         return new SwitchRouterTask(id, name, ctx)
     }
@@ -289,6 +331,8 @@ class TaskFactory {
      * @return new ParallelGatewayTask instance
      */
     static ParallelGatewayTask createParallelGateway(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating ParallelGatewayTask: id=$id, name=$name")
         return new ParallelGatewayTask(id, name, ctx)
     }
@@ -302,6 +346,8 @@ class TaskFactory {
      * @return new InclusiveRouterTask instance
      */
     static InclusiveRouterTask createInclusiveGateway(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating InclusiveRouterTask: id=$id, name=$name")
         return new InclusiveRouterTask(id, name, ctx)
     }
@@ -315,6 +361,8 @@ class TaskFactory {
      * @return new HttpTask instance
      */
     static HttpTask createHttpTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating HttpTask: id=$id, name=$name")
         return new HttpTask(id, name, ctx)
     }
@@ -328,6 +376,8 @@ class TaskFactory {
      * @return new FileTask instance
      */
     static FileTask createFileTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating FileTask: id=$id, name=$name")
         return new FileTask(id, name, ctx)
     }
@@ -341,6 +391,8 @@ class TaskFactory {
      * @return new MessagingTask instance
      */
     static MessagingTask createMessagingTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating MessagingTask: id=$id, name=$name")
         return new MessagingTask(id, name, ctx)
     }
@@ -354,8 +406,25 @@ class TaskFactory {
      * @return new SqlTask instance
      */
     static SqlTask createSqlTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
         log.debug("Creating SqlTask: id=$id, name=$name")
         return new SqlTask(id, name, ctx)
+    }
+
+    /**
+     * Create a CircuitBreakerTask - resilience wrapper with circuit breaker pattern.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new CircuitBreakerTask instance
+     */
+    static CircuitBreakerTask createCircuitBreakerTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating CircuitBreakerTask: id=$id, name=$name")
+        return new CircuitBreakerTask(id, name, ctx)
     }
 
     // =========================================================================
@@ -460,6 +529,13 @@ class TaskFactory {
     /**
      * Create a task using string type (for DSL/configuration).
      * Less type-safe but useful for DSLs and configuration files.
+     * 
+     * <p>Attempts to create task in this order:</p>
+     * <ol>
+     *   <li>Try built-in TaskType enum</li>
+     *   <li>Try registered custom providers via TaskProviderRegistry</li>
+     *   <li>Fail with helpful error message</li>
+     * </ol>
      *
      * @param typeString task type as string (case-insensitive)
      * @param id unique task identifier
@@ -469,8 +545,29 @@ class TaskFactory {
      * @throws IllegalArgumentException if type string is invalid
      */
     static ITask createTask(String typeString, String id, String name, TaskContext ctx) {
-        TaskType type = TaskType.fromString(typeString)
-        return createTask(type, id, name, ctx)
+        // Try built-in task types first
+        try {
+            TaskType type = TaskType.fromString(typeString)
+            return createTask(type, id, name, ctx)
+        } catch (IllegalArgumentException e) {
+            // Built-in type not found, try custom providers
+            log.debug("Task type '{}' not found in built-in types, checking custom providers", typeString)
+        }
+        
+        // Try custom task providers
+        ITaskProvider provider = TaskProviderRegistry.findProvider(typeString)
+        if (provider) {
+            log.debug("Creating custom task: type='{}', provider='{}', id='{}', name='{}'", 
+                     typeString, provider.class.simpleName, id, name)
+            return provider.createTask(id, name, ctx)
+        }
+        
+        // Neither built-in nor custom provider found
+        throw new IllegalArgumentException(
+            "Unknown task type: '$typeString'. " +
+            "Built-in types: ${TaskType.values()*.name().join(', ')}. " +
+            "Custom types: ${TaskProviderRegistry.getRegisteredTypes().join(', ') ?: 'none registered'}"
+        )
     }
 
     // =========================================================================

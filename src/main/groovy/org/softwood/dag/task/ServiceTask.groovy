@@ -10,7 +10,7 @@ import org.softwood.promise.Promise
 @Slf4j
 class ServiceTask extends TaskBase<Object> {
 
-    Closure serviceAction
+    Closure action
 
     ServiceTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
@@ -20,7 +20,7 @@ class ServiceTask extends TaskBase<Object> {
      * DSL method to set the task's action.
      */
     void action(Closure action) {
-        this.serviceAction = action
+        this.action = action
     }
 
     @Override
@@ -28,7 +28,7 @@ class ServiceTask extends TaskBase<Object> {
 
         log.debug "Task ${id}: calling runTask() with prevValue"
 
-        if (!serviceAction) {
+        if (!action) {
             throw new IllegalStateException("ServiceTask ${id}: no action defined")
         }
 
@@ -42,14 +42,25 @@ class ServiceTask extends TaskBase<Object> {
             println "ServiceTask.runTask: prevVal = $prevVal"
 
             // Call the user's action with context and previous value
-            Promise result = serviceAction.call(ctx, prevVal)
+            Promise result = action.call(ctx, prevVal)
 
             println "ServiceTask.runTask: serviceAction returned: $result"
 
             log.debug "Task ${id}: runTask() returned promise, waiting for result"
 
             // The action should return a Promise, so we wait for it
-            return result.get()
+            // Handle DataflowPromise race condition where error state is set before error value
+            try {
+                return result.get()
+            } catch (java.lang.IllegalStateException raceErr) {
+                // DataflowPromise race condition: error state detected but error value not yet set
+                if (raceErr.message?.contains("Error state detected but error value is null")) {
+                    Thread.sleep(10)  // Brief delay to let error propagate
+                    return result.get()  // Retry to get actual error
+                } else {
+                    throw raceErr
+                }
+            }
         }
     }
 }

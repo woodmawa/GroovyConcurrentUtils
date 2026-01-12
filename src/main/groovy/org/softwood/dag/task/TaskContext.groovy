@@ -8,6 +8,8 @@ import org.softwood.pool.ExecutorPoolFactory
 import org.softwood.promise.core.dataflow.DataflowPromiseFactory
 import org.softwood.dag.IBinding
 import org.softwood.dag.TaskBinding
+import org.softwood.dag.resilience.RateLimiter
+import org.softwood.dag.resilience.RateLimiterRegistry
 
 @Slf4j
 class TaskContext {
@@ -17,6 +19,12 @@ class TaskContext {
     final Map config
     final ExecutorPool pool
     final PromiseFactory promiseFactory
+    
+    // Resilience service registries
+    final RateLimiterRegistry rateLimiters = new RateLimiterRegistry()
+    
+    // Resource monitoring (set by TaskGraph if configured)
+    def resourceMonitor = null
 
     //default empty constructor  - wont have a graph set, create a real ConcurrentPool
     TaskContext() {
@@ -101,5 +109,25 @@ class TaskContext {
 
     void set(String key, Object value) {
         globals.set(key, value)
+    }
+    
+    /**
+     * Create or get a rate limiter using DSL configuration.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * ctx.rateLimiter("api-limiter") {
+     *     maxRequests 100
+     *     timeWindow Duration.ofMinutes(1)
+     *     strategy "sliding-window"
+     * }
+     * </pre>
+     * 
+     * @param name unique name for the rate limiter
+     * @param config DSL configuration closure
+     * @return the rate limiter
+     */
+    RateLimiter rateLimiter(String name, @DelegatesTo(org.softwood.dag.resilience.RateLimiterConfigDsl) Closure config) {
+        return rateLimiters.create(name, config)
     }
 }

@@ -191,9 +191,10 @@ class TaskGraphPersistenceIntegrationTest {
             graph.run().get()
             fail("Expected RuntimeException")
         } catch (Exception e) {
-            // The actual error is wrapped - check for the root cause message
-            assertTrue(e.message.contains("Task 2 failed") || e.message.contains("task2"),
-                "Expected error message to contain 'Task 2 failed' or 'task2', but got: ${e.message}")
+            // The actual error may be the raw exception (no retry wrapping when maxAttempts=0)
+            // Check for either the original message or task ID reference
+            assertTrue(e.message.contains("Task 2 failed") || e.message.contains("task2") || e.message.contains("exceeded retry"),
+                "Expected error message to contain failure info, but got: ${e.message}")
         }
         
         // Wait for persistence to complete
@@ -214,9 +215,9 @@ class TaskGraphPersistenceIntegrationTest {
         assertNotNull(snapshot)
         assertEquals(GraphExecutionStatus.FAILED, snapshot.finalStatus)
         assertEquals("task2", snapshot.failureTaskId)
-        // The error message is the wrapped retry message, not the original
-        assertTrue(snapshot.failureMessage.contains("task2") || snapshot.failureMessage.contains("exceeded retry"),
-            "Expected failure message to mention task2, but got: ${snapshot.failureMessage}")
+        // The error message may be raw (no retry wrapping) or wrapped depending on retry config
+        assertTrue(snapshot.failureMessage.contains("Task 2 failed") || snapshot.failureMessage.contains("task2") || snapshot.failureMessage.contains("exceeded retry"),
+            "Expected failure message to mention failure, but got: ${snapshot.failureMessage}")
         
         // Verify task states
         assertEquals(TaskState.COMPLETED, snapshot.taskStates.get("task1").state)

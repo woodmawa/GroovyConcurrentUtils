@@ -445,6 +445,81 @@ class TaskGraphDsl {
     }
     
     // ----------------------------------------------------
+    // Graph timeout → set maximum graph execution time
+    // ----------------------------------------------------
+    
+    /**
+     * Set the maximum execution time for the entire graph.
+     * If the graph doesn't complete within this duration, remaining tasks are cancelled.
+     * 
+     * Usage:
+     *   graphTimeout Duration.ofMinutes(5)
+     *   graphTimeout "2 minutes"  // Human-readable format
+     */
+    void graphTimeout(java.time.Duration timeout) {
+        graph.graphTimeout = timeout
+    }
+    
+    /**
+     * Set graph timeout using human-readable string format.
+     * 
+     * Examples:
+     *   graphTimeout "30 seconds"
+     *   graphTimeout "5 minutes"
+     *   graphTimeout "1 hour"
+     */
+    void graphTimeout(String timeoutStr) {
+        graph.graphTimeout = parseDuration(timeoutStr)
+    }
+    
+    // ----------------------------------------------------
+    // Resource limits → configure resource consumption limits
+    // ----------------------------------------------------
+    
+    /**
+     * Configure resource limits for the graph.
+     * 
+     * Usage:
+     *   resourceLimits {
+     *       maxConcurrentTasks 5
+     *       maxMemoryMB 512
+     *       onLimitExceeded { type, current, limit ->
+     *           log.warn("Limit exceeded: $type")
+     *       }
+     *   }
+     */
+    void resourceLimits(@DelegatesTo(org.softwood.dag.resilience.ResourceLimitDsl) Closure config) {
+        def dsl = new org.softwood.dag.resilience.ResourceLimitDsl()
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+        graph.resourceLimitPolicy = dsl.build()
+    }
+    
+    /**
+     * Parse human-readable duration strings.
+     */
+    private static java.time.Duration parseDuration(String str) {
+        def trimmed = str.trim().toLowerCase()
+        
+        // Match patterns like "30 seconds", "5 minutes", "2 hours"
+        def matcher = (trimmed =~ /(\d+)\s*(second|minute|hour|day)s?/)
+        if (matcher.matches()) {
+            def value = matcher[0][1] as long
+            def unit = matcher[0][2]
+            
+            switch (unit) {
+                case 'second': return java.time.Duration.ofSeconds(value)
+                case 'minute': return java.time.Duration.ofMinutes(value)
+                case 'hour': return java.time.Duration.ofHours(value)
+                case 'day': return java.time.Duration.ofDays(value)
+            }
+        }
+        
+        throw new IllegalArgumentException("Invalid duration format: '$str'. Use format like '30 seconds', '5 minutes', etc.")
+    }
+    
+    // ----------------------------------------------------
     // Wire all deferred forks and joins
     // Called by TaskGraph.build() after DSL completes
     // ----------------------------------------------------

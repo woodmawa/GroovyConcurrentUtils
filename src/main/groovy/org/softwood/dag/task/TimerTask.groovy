@@ -103,7 +103,7 @@ class TimerTask extends TaskBase<Map> {
     String stopOnSignal
     
     /** Action to execute on each tick: (ctx) -> result */
-    Closure timerAction
+    Closure action
     
     /** Optional accumulator: (ctx, accumulator, lastResult) -> accumulator */
     Closure accumulatorFn
@@ -164,7 +164,7 @@ class TimerTask extends TaskBase<Map> {
     }
     
     void action(Closure action) {
-        this.timerAction = action
+        this.action = action
     }
     
     void accumulate(Closure accumulator) {
@@ -237,7 +237,7 @@ class TimerTask extends TaskBase<Map> {
             throw new IllegalStateException("TimerTask($id): cannot specify both interval and rate")
         }
         
-        if (!timerAction) {
+        if (!action) {
             throw new IllegalStateException("TimerTask($id): requires action")
         }
         
@@ -304,7 +304,7 @@ class TimerTask extends TaskBase<Map> {
         
         try {
             // Execute the action
-            def result = timerAction.call(ctx)
+            def result = action.call(ctx)
             
             // Handle TimerControl response
             if (result instanceof TimerControl) {

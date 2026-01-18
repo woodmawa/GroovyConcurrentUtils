@@ -1,6 +1,17 @@
+
+import org.asciidoctor.gradle.jvm.AsciidoctorTask
+import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
+import org.gradle.plugins.signing.Sign
+
 plugins {
     id 'groovy'
     id 'java-library'
+    id 'idea'
+    id "org.asciidoctor.jvm.convert" version "4.0.5"
+    id 'maven-publish'
+    id 'signing'
+    id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
+
 }
 
 group = 'org.softwood'
@@ -67,6 +78,37 @@ tasks.withType(JavaCompile).configureEach {
     options.release = 25
 }
 
+/**
+ * Asciidoctor docs
+ * Assumes docs live under src/docs/asciidoc (as in your project structure)
+ */
+tasks.named("asciidoctor", AsciidoctorTask).configure { t ->
+    t.sourceDir = layout.projectDirectory.dir("src/main/groovy/org/softwood/dag/docs/asciidoc").asFile
+
+    t.sources {
+        include("**/*.adoc")
+    }
+
+    t.outputDir = layout.buildDirectory.dir("docs/asciidoc").get().asFile
+    t.baseDirFollowsSourceDir()
+
+    t.resources {
+        from(t.sourceDir) {
+            include("images/**")
+            include("css/**")
+        }
+    }
+
+    t.attributes(
+            "stylesheet": "style.css",
+            "stylesdir": "css"
+    )
+}
+
+tasks.named("build").configure {
+    dependsOn(tasks.named("asciidoctor"))
+}
+
 test {
     useJUnitPlatform()
 
@@ -79,5 +121,127 @@ test {
             '--add-opens', 'java.management/sun.management=ALL-UNNAMED',
             '--add-opens', 'jdk.management/com.sun.management.internal=ALL-UNNAMED'
     ]
+}
+
+
+/**
+ * Publishing
+ */
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+
+            pom {
+                name.set(providers.gradleProperty('pomName').orElse('GroovyFX'))
+                description.set(providers.gradleProperty('pomDescription')
+                        .orElse('GroovyFX next-generation builder for JavaFX 25 + Groovy 5'))
+                url.set(providers.gradleProperty('pomUrl').orElse('https://github.com/woodmawa/groovyfx'))
+
+                licenses {
+                    license {
+                        name.set('The Apache License, Version 2.0')
+                        url.set('https://www.apache.org/licenses/LICENSE-2.0.txt')
+                    }
+                }
+
+                developers {
+                    developer {
+                        id.set(providers.gradleProperty('pomDeveloperId').orElse('woodmawa'))
+                        name.set(providers.gradleProperty('pomDeveloperName').orElse('woodmawa'))
+                        email.set(providers.gradleProperty('pomDeveloperEmail').orElse(''))
+                    }
+                }
+
+                scm {
+                    connection.set(providers.gradleProperty('pomScmConnection')
+                            .orElse('scm:git:https://github.com/woodmawa/groovyfx.git'))
+                    developerConnection.set(providers.gradleProperty('pomScmDeveloperConnection')
+                            .orElse('scm:git:ssh://git@github.com:woodmawa/groovyfx.git'))
+                    url.set(providers.gradleProperty('pomScmUrl')
+                            .orElse('https://github.com/woodmawa/groovyfx'))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Credentials / Signing
+ */
+def sonatypeUsername = (findProperty('sonatypeUsername') ?: System.getenv('SONATYPE_USERNAME'))?.toString()
+def sonatypePassword = (findProperty('sonatypePassword') ?: System.getenv('SONATYPE_PASSWORD'))?.toString()
+def signingKey       = (findProperty('signingKey')       ?: System.getenv('SIGNING_KEY'))?.toString()
+def signingPassword  = (findProperty('signingPassword')  ?: System.getenv('SIGNING_PASSWORD'))?.toString()
+
+signing {
+    if (signingKey && signingPassword) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    }
+    sign publishing.publications.mavenJava
+}
+
+/**
+ * Fail-fast checks for Sonatype publish actions
+ */
+def isMavenLocalInvocation = gradle.startParameter.taskNames.any { it.toLowerCase().contains('mavenlocal') }
+def isCentralInvocation = !isMavenLocalInvocation && gradle.startParameter.taskNames.any { t ->
+    def n = t.toLowerCase()
+    n.contains('sonatype') || n.contains('mavencentral') || n.contains('staging') ||
+            n == 'publish' || n.endsWith(':publish')
+}
+
+def requireCentralSecrets = { String action ->
+    def missing = []
+    if (!sonatypeUsername || !sonatypePassword) missing << "Sonatype credentials (sonatypeUsername/sonatypePassword or env)"
+    if (!signingKey || !signingPassword) missing << "Signing key (signingKey/signingPassword or env)"
+    if (!missing.isEmpty()) {
+        throw new GradleException("Cannot run '${action}' without: ${missing.join('; ')}")
+    }
+}
+
+def validateCentralSecrets = tasks.register('validateCentralSecrets') {
+    group = 'publishing'
+    description = 'Validates Sonatype + signing secrets for Maven Central publishing.'
+    onlyIf { isCentralInvocation }
+    doLast { requireCentralSecrets(path) }
+}
+
+tasks.withType(Sign).configureEach { t ->
+    onlyIf { isCentralInvocation }
+    dependsOn(validateCentralSecrets)
+}
+
+tasks.withType(PublishToMavenRepository).configureEach { t ->
+    if (t.repository?.name == 'sonatype') {
+        t.doFirst { requireCentralSecrets(t.path) }
+    }
+}
+
+/**
+ * Nexus publish plugin
+ */
+nexusPublishing {
+    repositories {
+        sonatype {
+            username = providers.gradleProperty('sonatypeUsername').orNull ?: sonatypeUsername
+            password = providers.gradleProperty('sonatypePassword').orNull ?: sonatypePassword
+        }
+    }
+}
+
+/**
+ * Convenience alias:
+ *   ./gradlew publishToMavenCentral
+ */
+tasks.register('publishToMavenCentral') {
+    group = 'publishing'
+    description = 'Publishes to Sonatype/Maven Central (snapshots go to snapshots repo; releases are staged then closed+released).'
+
+    dependsOn tasks.named('publish')
+
+    if (!version.toString().endsWith('-SNAPSHOT')) {
+        finalizedBy tasks.named('closeAndReleaseSonatypeStagingRepository')
+    }
 }
 

@@ -5,6 +5,7 @@ import groovy.util.logging.Slf4j
 import org.softwood.dag.task.sql.JdbcSqlProvider
 import org.softwood.dag.task.sql.SqlProvider
 import org.softwood.dag.task.sql.CriteriaBuilder
+import org.softwood.dag.task.sql.SqlMetadataDsl
 import org.softwood.promise.Promise
 
 /**
@@ -39,6 +40,29 @@ import org.softwood.promise.Promise
  *     
  *     update "INSERT INTO users (name, age) VALUES (?, ?)"
  *     params { prev -> [prev.name, prev.age] }
+ * }
+ * </pre>
+ * 
+ * <h3>Transaction Mode (Multi-Operation):</h3>
+ * <pre>
+ * sqlTask("create-order") {
+ *     provider myProvider
+ *     
+ *     withTransaction { conn ->
+ *         // Step 1: Insert order
+ *         def stmt1 = conn.prepareStatement("INSERT INTO orders (user_id, total) VALUES (?, ?)")
+ *         stmt1.setInt(1, userId)
+ *         stmt1.setBigDecimal(2, total)
+ *         stmt1.executeUpdate()
+ *         
+ *         // Step 2: Update inventory
+ *         def stmt2 = conn.prepareStatement("UPDATE inventory SET qty = qty - ? WHERE product_id = ?")
+ *         stmt2.setInt(1, quantity)
+ *         stmt2.setInt(2, productId)
+ *         stmt2.executeUpdate()
+ *         
+ *         return "Order created"
+ *     }
  * }
  * </pre>
  * 
@@ -93,6 +117,9 @@ class SqlTask extends TaskBase<Object> {
     
     /** Criteria builder (for type-safe queries) */
     private CriteriaBuilder criteriaBuilder
+    
+    /** Metadata DSL (for metadata queries) */
+    private SqlMetadataDsl metadataDsl
     
     /** Use transaction for execute mode */
     private boolean useTransaction = false
@@ -241,6 +268,48 @@ class SqlTask extends TaskBase<Object> {
     }
     
     /**
+     * Execute custom SQL within a transaction.
+     * 
+     * This is a clearer alternative to execute { } + transaction(true).
+     * The closure receives a JDBC Connection.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * sqlTask("create-order") {
+     *     provider myProvider
+     *     
+     *     withTransaction { conn ->
+     *         // Step 1: Insert order
+     *         def stmt1 = conn.prepareStatement("INSERT INTO orders (user_id, total) VALUES (?, ?)")
+     *         stmt1.setInt(1, userId)
+     *         stmt1.setBigDecimal(2, total)
+     *         stmt1.executeUpdate()
+     *         
+     *         // Step 2: Update inventory
+     *         def stmt2 = conn.prepareStatement("UPDATE inventory SET qty = qty - ? WHERE product_id = ?")
+     *         stmt2.setInt(1, quantity)
+     *         stmt2.setInt(2, productId)
+     *         stmt2.executeUpdate()
+     *         
+     *         // Step 3: Insert audit log
+     *         def stmt3 = conn.prepareStatement("INSERT INTO audit_log (action) VALUES (?)")
+     *         stmt3.setString(1, "order_created")
+     *         stmt3.executeUpdate()
+     *         
+     *         return "Order created successfully"
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param closure closure receiving JDBC Connection
+     */
+    void withTransaction(Closure closure) {
+        this.executeClosure = closure
+        this.mode = SqlMode.EXECUTE
+        this.useTransaction = true
+    }
+    
+    /**
      * Enable transaction for execute mode.
      */
     void transaction(boolean enabled = true) {
@@ -264,6 +333,45 @@ class SqlTask extends TaskBase<Object> {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.call()
         this.mode = SqlMode.CRITERIA
+    }
+    
+    /**
+     * Query database metadata.
+     * 
+     * <h3>Examples:</h3>
+     * <pre>
+     * // List all tables
+     * sqlTask("list-tables") {
+     *     provider myProvider
+     *     metadata {
+     *         tables()
+     *     }
+     * }
+     * 
+     * // Get columns for table
+     * sqlTask("describe-users") {
+     *     provider myProvider
+     *     metadata {
+     *         columns("users")
+     *     }
+     * }
+     * 
+     * // Get database info
+     * sqlTask("db-info") {
+     *     provider myProvider
+     *     metadata {
+     *         databaseInfo()
+     *     }
+     * }
+     * </pre>
+     */
+    void metadata(@DelegatesTo(SqlMetadataDsl) Closure config) {
+        this.metadataDsl = new SqlMetadataDsl(provider)
+        config.delegate = metadataDsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+        
+        this.mode = SqlMode.METADATA
     }
     
     // =========================================================================
@@ -292,6 +400,8 @@ class SqlTask extends TaskBase<Object> {
                     return executeUpdate(ctx, prevValue)
                 case SqlMode.CRITERIA:
                     return executeCriteria(ctx, prevValue)
+                case SqlMode.METADATA:
+                    return executeMetadata(ctx, prevValue)
                 case SqlMode.EXECUTE:
                     return executeCustom(ctx, prevValue)
                 default:
@@ -370,6 +480,15 @@ class SqlTask extends TaskBase<Object> {
         return results
     }
     
+    private Object executeMetadata(TaskContext ctx, Object prevValue) {
+        if (!metadataDsl) {
+            throw new IllegalStateException("SqlTask '${id}': metadata DSL not configured")
+        }
+        
+        log.info("SqlTask '{}': executing metadata query", id)
+        return metadataDsl.execute()
+    }
+    
     private Object executeCustom(TaskContext ctx, Object prevValue) {
         if (!executeClosure) {
             throw new IllegalStateException("SqlTask '${id}': execute closure not configured")
@@ -416,6 +535,7 @@ class SqlTask extends TaskBase<Object> {
         QUERY,      // SELECT
         UPDATE,     // INSERT/UPDATE/DELETE
         CRITERIA,   // Criteria-based query
+        METADATA,   // Metadata query
         EXECUTE     // Custom closure
     }
 }

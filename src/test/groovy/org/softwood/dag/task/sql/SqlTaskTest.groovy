@@ -302,6 +302,129 @@ class SqlTaskTest extends Specification {
         count == 5  // 3 original + 2 new
     }
     
+    def "should execute transaction with withTransaction method"() {
+        when:
+        def graph = TaskGraph.build {
+            sqlTask("batch-insert-new") {
+                provider this.provider
+                
+                withTransaction { conn ->
+                    def stmt = conn.prepareStatement("INSERT INTO users (id, name, age, email) VALUES (?, ?, ?, ?)")
+                    
+                    // Insert multiple users in transaction
+                    [[8, "Ivy", 29, "ivy@example.com"],
+                     [9, "Jack", 33, "jack@example.com"]].each { user ->
+                        stmt.setInt(1, user[0])
+                        stmt.setString(2, user[1])
+                        stmt.setInt(3, user[2])
+                        stmt.setString(4, user[3])
+                        stmt.executeUpdate()
+                    }
+                    
+                    stmt.close()
+                    return [inserted: 2]
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        
+        then:
+        result.inserted == 2
+        
+        when:
+        def count = provider.queryForObject("SELECT COUNT(*) FROM users", [])
+        
+        then:
+        count == 5  // 3 original + 2 new
+    }
+    
+    def "should rollback transaction on error with withTransaction"() {
+        when:
+        def graph = TaskGraph.build {
+            sqlTask("failing-transaction") {
+                provider this.provider
+                
+                withTransaction { conn ->
+                    def stmt = conn.prepareStatement("INSERT INTO users (id, name, age, email) VALUES (?, ?, ?, ?)")
+                    
+                    // First insert succeeds
+                    stmt.setInt(1, 10)
+                    stmt.setString(2, "Kate")
+                    stmt.setInt(3, 27)
+                    stmt.setString(4, "kate@example.com")
+                    stmt.executeUpdate()
+                    
+                    // Throw error - should rollback both inserts
+                    throw new RuntimeException("Simulated error")
+                }
+            }
+        }
+        
+        graph.run().get()
+        
+        then:
+        def ex = thrown(Exception)
+        ex.message.contains("Simulated error")
+        
+        when:
+        def count = provider.queryForObject("SELECT COUNT(*) FROM users", [])
+        
+        then:
+        count == 3  // Original 3, no new inserts due to rollback
+    }
+    
+    def "should commit multi-operation transaction with withTransaction"() {
+        when:
+        def graph = TaskGraph.build {
+            sqlTask("multi-op-transaction") {
+                provider this.provider
+                
+                withTransaction { conn ->
+                    // Step 1: Insert new user
+                    def insertStmt = conn.prepareStatement("INSERT INTO users (id, name, age, email) VALUES (?, ?, ?, ?)")
+                    insertStmt.setInt(1, 11)
+                    insertStmt.setString(2, "Leo")
+                    insertStmt.setInt(3, 31)
+                    insertStmt.setString(4, "leo@example.com")
+                    def inserted = insertStmt.executeUpdate()
+                    insertStmt.close()
+                    
+                    // Step 2: Update another user
+                    def updateStmt = conn.prepareStatement("UPDATE users SET age = age + 1 WHERE name = ?")
+                    updateStmt.setString(1, "Alice")
+                    def updated = updateStmt.executeUpdate()
+                    updateStmt.close()
+                    
+                    // Step 3: Delete a user
+                    def deleteStmt = conn.prepareStatement("DELETE FROM users WHERE name = ?")
+                    deleteStmt.setString(1, "Charlie")
+                    def deleted = deleteStmt.executeUpdate()
+                    deleteStmt.close()
+                    
+                    return [inserted: inserted, updated: updated, deleted: deleted]
+                }
+            }
+        }
+        
+        def result = graph.run().get()
+        
+        then:
+        result.inserted == 1
+        result.updated == 1
+        result.deleted == 1
+        
+        when:
+        def count = provider.queryForObject("SELECT COUNT(*) FROM users", [])
+        def alice = provider.queryForMap("SELECT * FROM users WHERE name = ?", ["Alice"])
+        def charlie = provider.queryForMap("SELECT * FROM users WHERE name = ?", ["Charlie"])
+        
+        then:
+        count == 3  // 3 original - 1 deleted + 1 inserted = 3
+        alice.age == 26  // Original 25 + 1
+        charlie == null  // Deleted
+    }
+    
     // =========================================================================
     // Integration Tests
     // =========================================================================

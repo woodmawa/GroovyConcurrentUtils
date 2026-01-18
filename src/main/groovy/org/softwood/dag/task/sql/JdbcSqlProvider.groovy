@@ -21,25 +21,8 @@ import java.sql.ResultSetMetaData
  *   <li>Connection pooling via external DataSource (optional)</li>
  *   <li>Transaction support</li>
  *   <li>Automatic resource cleanup</li>
+ *   <li>Database metadata introspection</li>
  * </ul>
- * 
- * <h3>Usage with Direct Connection:</h3>
- * <pre>
- * def provider = new JdbcSqlProvider(
- *     url: "jdbc:h2:mem:test",
- *     username: "sa",
- *     password: ""
- * )
- * 
- * def users = provider.query("SELECT * FROM users WHERE age > ?", [18])
- * provider.close()
- * </pre>
- * 
- * <h3>Usage with DataSource:</h3>
- * <pre>
- * def provider = new JdbcSqlProvider(dataSource: myDataSource)
- * def count = provider.queryForObject("SELECT COUNT(*) FROM orders", [])
- * </pre>
  * 
  * @since 2.1.0
  */
@@ -92,6 +75,10 @@ class JdbcSqlProvider implements SqlProvider {
         }
     }
     
+    // =========================================================================
+    // Query Operations
+    // =========================================================================
+    
     @Override
     List<Map<String, Object>> query(String sql, List<Object> params) {
         if (!connected) {
@@ -123,7 +110,7 @@ class JdbcSqlProvider implements SqlProvider {
         } finally {
             closeQuietly(rs)
             closeQuietly(stmt)
-            if (dataSource) closeQuietly(conn)  // Only close if from pool
+            if (dataSource) closeQuietly(conn)
         }
     }
     
@@ -156,6 +143,10 @@ class JdbcSqlProvider implements SqlProvider {
     Object queryForObject(String sql) {
         return queryForObject(sql, [])
     }
+    
+    // =========================================================================
+    // Update Operations
+    // =========================================================================
     
     @Override
     int executeUpdate(String sql, List<Object> params) {
@@ -192,6 +183,10 @@ class JdbcSqlProvider implements SqlProvider {
     int executeUpdate(String sql) {
         return executeUpdate(sql, [])
     }
+    
+    // =========================================================================
+    // Execute and Transaction Operations
+    // =========================================================================
     
     @Override
     Object execute(Closure work) {
@@ -253,6 +248,10 @@ class JdbcSqlProvider implements SqlProvider {
         }
     }
     
+    // =========================================================================
+    // Provider Management
+    // =========================================================================
+    
     @Override
     void close() {
         if (sharedConnection) {
@@ -271,6 +270,294 @@ class JdbcSqlProvider implements SqlProvider {
     @Override
     boolean isConnected() {
         return connected
+    }
+    
+    // =========================================================================
+    // Metadata Operations
+    // =========================================================================
+    
+    @Override
+    List<DatabaseMetadata.TableInfo> getTables(String catalog, String schema, String tableNamePattern, List<String> types) {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            def typeArray = types ? types as String[] : null
+            
+            rs = meta.getTables(catalog, schema, tableNamePattern, typeArray)
+            
+            List<DatabaseMetadata.TableInfo> tables = new ArrayList<>()
+            while (rs.next()) {
+                def table = new DatabaseMetadata.TableInfo(
+                    catalog: rs.getString("TABLE_CAT"),
+                    schema: rs.getString("TABLE_SCHEM"),
+                    tableName: rs.getString("TABLE_NAME"),
+                    type: rs.getString("TABLE_TYPE"),
+                    remarks: rs.getString("REMARKS")
+                )
+                tables << table
+            }
+            
+            return tables
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    List<DatabaseMetadata.ColumnInfo> getColumns(String catalog, String schema, String tableName, String columnNamePattern) {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getColumns(catalog, schema, tableName, columnNamePattern)
+            
+            List<DatabaseMetadata.ColumnInfo> columns = new ArrayList<>()
+            while (rs.next()) {
+                def column = new DatabaseMetadata.ColumnInfo(
+                    tableName: rs.getString("TABLE_NAME"),
+                    columnName: rs.getString("COLUMN_NAME"),
+                    dataType: rs.getString("TYPE_NAME"),
+                    sqlType: rs.getInt("DATA_TYPE"),
+                    columnSize: rs.getInt("COLUMN_SIZE"),
+                    decimalDigits: rs.getInt("DECIMAL_DIGITS"),
+                    nullable: rs.getInt("NULLABLE") == java.sql.DatabaseMetaData.columnNullable,
+                    defaultValue: rs.getString("COLUMN_DEF"),
+                    remarks: rs.getString("REMARKS"),
+                    ordinalPosition: rs.getInt("ORDINAL_POSITION")
+                )
+                columns << column
+            }
+            
+            return columns
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    List<DatabaseMetadata.IndexInfo> getIndexes(String catalog, String schema, String tableName, boolean unique) {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getIndexInfo(catalog, schema, tableName, unique, false)
+            
+            // Group columns by index name
+            Map<String, DatabaseMetadata.IndexInfo> indexMap = new HashMap<>()
+            while (rs.next()) {
+                def indexName = rs.getString("INDEX_NAME")
+                if (!indexName) continue  // Skip statistics
+                
+                if (!indexMap.containsKey(indexName)) {
+                    indexMap[indexName] = new DatabaseMetadata.IndexInfo(
+                        tableName: rs.getString("TABLE_NAME"),
+                        indexName: indexName,
+                        unique: !rs.getBoolean("NON_UNIQUE"),
+                        type: getIndexType(rs.getShort("TYPE")),
+                        columns: []
+                    )
+                }
+                
+                def columnName = rs.getString("COLUMN_NAME")
+                if (columnName) {
+                    DatabaseMetadata.IndexInfo indexInfo = indexMap.get(indexName)
+                    indexInfo.columns.add(columnName)
+                }
+            }
+            
+            return new ArrayList<DatabaseMetadata.IndexInfo>(indexMap.values())
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    DatabaseMetadata.PrimaryKeyInfo getPrimaryKeys(String catalog, String schema, String tableName) {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getPrimaryKeys(catalog, schema, tableName)
+            
+            DatabaseMetadata.PrimaryKeyInfo pkInfo = null
+            
+            while (rs.next()) {
+                if (!pkInfo) {
+                    pkInfo = new DatabaseMetadata.PrimaryKeyInfo(
+                        tableName: rs.getString("TABLE_NAME"),
+                        pkName: rs.getString("PK_NAME"),
+                        columns: []
+                    )
+                }
+                pkInfo.columns << rs.getString("COLUMN_NAME")
+            }
+            
+            return pkInfo
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    List<DatabaseMetadata.ForeignKeyInfo> getForeignKeys(String catalog, String schema, String tableName) {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getImportedKeys(catalog, schema, tableName)
+            
+            // Group by foreign key name
+            Map<String, DatabaseMetadata.ForeignKeyInfo> fkMap = new HashMap<>()
+            while (rs.next()) {
+                def fkName = rs.getString("FK_NAME")
+                
+                if (!fkMap.containsKey(fkName)) {
+                    fkMap[fkName] = new DatabaseMetadata.ForeignKeyInfo(
+                        fkName: fkName,
+                        tableName: rs.getString("FKTABLE_NAME"),
+                        pkTableName: rs.getString("PKTABLE_NAME"),
+                        updateRule: getForeignKeyRule(rs.getShort("UPDATE_RULE")),
+                        deleteRule: getForeignKeyRule(rs.getShort("DELETE_RULE")),
+                        columns: []
+                    )
+                }
+                
+                def mapping = new DatabaseMetadata.ForeignKeyInfo.ColumnMapping(
+                    fkColumn: rs.getString("FKCOLUMN_NAME"),
+                    pkColumn: rs.getString("PKCOLUMN_NAME")
+                )
+                DatabaseMetadata.ForeignKeyInfo fkInfo = fkMap.get(fkName)
+                fkInfo.columns.add(mapping)
+            }
+            
+            return new ArrayList<DatabaseMetadata.ForeignKeyInfo>(fkMap.values())
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    List<DatabaseMetadata.SchemaInfo> getSchemas() {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getSchemas()
+            
+            List<DatabaseMetadata.SchemaInfo> schemas = new ArrayList<>()
+            while (rs.next()) {
+                def schema = new DatabaseMetadata.SchemaInfo(
+                    catalog: rs.getString("TABLE_CATALOG"),
+                    schemaName: rs.getString("TABLE_SCHEM")
+                )
+                schemas << schema
+            }
+            
+            return schemas
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    List<DatabaseMetadata.CatalogInfo> getCatalogs() {
+        Connection conn = null
+        ResultSet rs = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            rs = meta.getCatalogs()
+            
+            List<DatabaseMetadata.CatalogInfo> catalogs = new ArrayList<>()
+            while (rs.next()) {
+                def catalog = new DatabaseMetadata.CatalogInfo(
+                    catalog: rs.getString("TABLE_CAT")
+                )
+                catalogs << catalog
+            }
+            
+            return catalogs
+            
+        } finally {
+            closeQuietly(rs)
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
+    }
+    
+    @Override
+    DatabaseMetadata.DatabaseInfo getDatabaseInfo() {
+        Connection conn = null
+        
+        try {
+            conn = getConnection()
+            def meta = conn.getMetaData()
+            
+            return new DatabaseMetadata.DatabaseInfo(
+                productName: meta.getDatabaseProductName(),
+                productVersion: meta.getDatabaseProductVersion(),
+                driverName: meta.getDriverName(),
+                driverVersion: meta.getDriverVersion(),
+                url: meta.getURL(),
+                userName: meta.getUserName(),
+                readOnly: meta.isReadOnly(),
+                maxConnections: meta.getMaxConnections(),
+                supportsBatchUpdates: meta.supportsBatchUpdates(),
+                supportsTransactions: meta.supportsTransactions(),
+                supportsStoredProcedures: meta.supportsStoredProcedures(),
+                defaultTransactionIsolation: meta.getDefaultTransactionIsolation()
+            )
+            
+        } finally {
+            if (!sharedConnection && dataSource) {
+                closeQuietly(conn)
+            }
+        }
     }
     
     // =========================================================================
@@ -329,14 +616,44 @@ class JdbcSqlProvider implements SqlProvider {
         return url.replaceAll(/password=[^&;]*/, 'password=***')
     }
     
+    private String getIndexType(short type) {
+        switch (type) {
+            case java.sql.DatabaseMetaData.tableIndexStatistic:
+                return "statistic"
+            case java.sql.DatabaseMetaData.tableIndexClustered:
+                return "clustered"
+            case java.sql.DatabaseMetaData.tableIndexHashed:
+                return "hashed"
+            case java.sql.DatabaseMetaData.tableIndexOther:
+                return "other"
+            default:
+                return "unknown"
+        }
+    }
+    
+    private String getForeignKeyRule(short rule) {
+        switch (rule) {
+            case java.sql.DatabaseMetaData.importedKeyCascade:
+                return "CASCADE"
+            case java.sql.DatabaseMetaData.importedKeySetNull:
+                return "SET NULL"
+            case java.sql.DatabaseMetaData.importedKeySetDefault:
+                return "SET DEFAULT"
+            case java.sql.DatabaseMetaData.importedKeyRestrict:
+                return "RESTRICT"
+            case java.sql.DatabaseMetaData.importedKeyNoAction:
+                return "NO ACTION"
+            default:
+                return "UNKNOWN"
+        }
+    }
+    
     /**
      * Extract the most informative error message from nested SQL exceptions.
-     * SQL exceptions are often nested, and the root cause has the actual DB error.
      */
     private static String extractRootCause(Throwable throwable) {
         if (!throwable) return "Unknown error"
         
-        // Walk down the exception chain to find the most specific message
         Throwable current = throwable
         Throwable root = throwable
         String bestMessage = throwable.message ?: "Unknown error"
@@ -344,7 +661,6 @@ class JdbcSqlProvider implements SqlProvider {
         while (current != null) {
             root = current
             
-            // Prefer SQLException messages as they're usually most specific
             if (current.class.name.contains("SQLException") && current.message) {
                 bestMessage = current.message
             }
@@ -352,7 +668,6 @@ class JdbcSqlProvider implements SqlProvider {
             current = current.cause
         }
         
-        // If we found a better message in the chain, use it
         if (root != throwable && root.message) {
             return root.message
         }

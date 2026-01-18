@@ -413,6 +413,21 @@ class TaskFactory {
     }
 
     /**
+     * Create a NoSqlTask - NoSQL database operations.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new NoSqlTask instance
+     */
+    static NoSqlTask createNoSqlTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating NoSqlTask: id=$id, name=$name")
+        return new NoSqlTask(id, name, ctx)
+    }
+
+    /**
      * Create a CircuitBreakerTask - resilience wrapper with circuit breaker pattern.
      *
      * @param id unique task identifier
@@ -425,6 +440,21 @@ class TaskFactory {
         validateTaskName(name)
         log.debug("Creating CircuitBreakerTask: id=$id, name=$name")
         return new CircuitBreakerTask(id, name, ctx)
+    }
+    
+    /**
+     * Create a SagaTask - distributed transaction with compensations.
+     *
+     * @param id unique task identifier
+     * @param name human-readable task name
+     * @param ctx task execution context
+     * @return new SagaTask instance
+     */
+    static org.softwood.dag.saga.SagaTask createSagaTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating SagaTask: id=$id, name=$name")
+        return new org.softwood.dag.saga.SagaTask(id, name, ctx)
     }
 
     // =========================================================================
@@ -520,6 +550,9 @@ class TaskFactory {
 
             case TaskType.SQL:
                 return createSqlTask(id, name, ctx)
+
+            case TaskType.NOSQL:
+                return createNoSqlTask(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

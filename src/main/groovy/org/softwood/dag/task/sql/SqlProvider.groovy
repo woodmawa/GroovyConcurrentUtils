@@ -142,4 +142,82 @@ interface SqlProvider {
      * @return true if ready to execute queries
      */
     boolean isConnected()
+    
+    // =========================================================================
+    // Metadata Operations
+    // =========================================================================
+    
+    /**
+     * Get information about all tables in the database.
+     * 
+     * @param catalog catalog name (null for current)
+     * @param schema schema pattern (null for all, % for wildcard)
+     * @param tableNamePattern table name pattern (null for all, % for wildcard)
+     * @param types table types to include (e.g., ["TABLE", "VIEW"])
+     * @return list of table information
+     */
+    List<DatabaseMetadata.TableInfo> getTables(String catalog, String schema, String tableNamePattern, List<String> types)
+    
+    /**
+     * Get information about columns in a table.
+     * 
+     * @param catalog catalog name (null for current)
+     * @param schema schema name (null for all)
+     * @param tableName table name
+     * @param columnNamePattern column name pattern (null for all, % for wildcard)
+     * @return list of column information
+     */
+    List<DatabaseMetadata.ColumnInfo> getColumns(String catalog, String schema, String tableName, String columnNamePattern)
+    
+    /**
+     * Get information about indexes on a table.
+     * 
+     * @param catalog catalog name (null for current)
+     * @param schema schema name (null for all)
+     * @param tableName table name
+     * @param unique if true, return only unique indexes
+     * @return list of index information
+     */
+    List<DatabaseMetadata.IndexInfo> getIndexes(String catalog, String schema, String tableName, boolean unique)
+    
+    /**
+     * Get primary key information for a table.
+     * 
+     * @param catalog catalog name (null for current)
+     * @param schema schema name (null for all)
+     * @param tableName table name
+     * @return primary key information, or null if none
+     */
+    DatabaseMetadata.PrimaryKeyInfo getPrimaryKeys(String catalog, String schema, String tableName)
+    
+    /**
+     * Get foreign key information for a table.
+     * 
+     * @param catalog catalog name (null for current)
+     * @param schema schema name (null for all)
+     * @param tableName table name
+     * @return list of foreign keys
+     */
+    List<DatabaseMetadata.ForeignKeyInfo> getForeignKeys(String catalog, String schema, String tableName)
+    
+    /**
+     * Get all schemas in the database.
+     * 
+     * @return list of schemas
+     */
+    List<DatabaseMetadata.SchemaInfo> getSchemas()
+    
+    /**
+     * Get all catalogs in the database.
+     * 
+     * @return list of catalogs
+     */
+    List<DatabaseMetadata.CatalogInfo> getCatalogs()
+    
+    /**
+     * Get database product information.
+     * 
+     * @return database information
+     */
+    DatabaseMetadata.DatabaseInfo getDatabaseInfo()
 }

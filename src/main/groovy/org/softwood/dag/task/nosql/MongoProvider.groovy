@@ -1,6 +1,7 @@
 package org.softwood.dag.task.nosql
 
 import groovy.transform.CompileStatic
+import groovy.transform.TypeCheckingMode
 import groovy.util.logging.Slf4j
 
 /**
@@ -392,6 +393,187 @@ class MongoProvider implements NoSqlProvider {
         } catch (Exception e) {
             log.error("Error executing MongoDB transaction", e)
             throw new RuntimeException("MongoDB transaction failed: ${e.message}", e)
+        }
+    }
+    
+    // =========================================================================
+    // Metadata Operations
+    // =========================================================================
+    
+    @CompileStatic(TypeCheckingMode.SKIP)
+    @Override
+    List<NoSqlMetadata.CollectionInfo> listCollections() {
+        ensureInitialized()
+        
+        if (!mongoAvailable) {
+            log.warn("MongoProvider running in stub mode: listCollections()")
+            return []
+        }
+        
+        try {
+            def listCollectionsMethod = database.getClass().getMethod("listCollections")
+            def collections = listCollectionsMethod.invoke(database)
+            
+            List<NoSqlMetadata.CollectionInfo> result = new ArrayList<>()
+            def iteratorMethod = collections.getClass().getMethod("iterator")
+            def iterator = iteratorMethod.invoke(collections)
+            
+            while (iterator.hasNext()) {
+                def doc = iterator.next()
+                result << new NoSqlMetadata.CollectionInfo(
+                    name: doc.getString("name"),
+                    type: doc.getString("type") ?: "collection",
+                    options: doc.get("options") as Map<String, Object> ?: [:]
+                )
+            }
+            
+            return result
+        } catch (Exception e) {
+            log.error("Error listing collections", e)
+            throw new RuntimeException("Failed to list collections: ${e.message}", e)
+        }
+    }
+    
+    @CompileStatic(TypeCheckingMode.SKIP)
+    @Override
+    NoSqlMetadata.CollectionStats getCollectionStats(String collection) {
+        ensureInitialized()
+        
+        if (!mongoAvailable) {
+            log.warn("MongoProvider running in stub mode: collectionStats({})", collection)
+            return null
+        }
+        
+        try {
+            def documentClass = Class.forName("org.bson.Document")
+            def command = documentClass.getDeclaredConstructor(Map).newInstance([collStats: collection])
+            
+            def runCommandMethod = database.getClass().getMethod("runCommand", documentClass)
+            def stats = runCommandMethod.invoke(database, command)
+            
+            return new NoSqlMetadata.CollectionStats(
+                name: collection,
+                count: stats.getLong("count") ?: 0L,
+                size: stats.getLong("size") ?: 0L,
+                storageSize: stats.getLong("storageSize") ?: 0L,
+                nindexes: stats.getInteger("nindexes") ?: 0,
+                totalIndexSize: stats.getLong("totalIndexSize") ?: 0L,
+                avgObjSize: stats.getDouble("avgObjSize") ?: 0.0,
+                wiredTiger: stats.get("wiredTiger") as Map<String, Object> ?: [:]
+            )
+        } catch (Exception e) {
+            log.error("Error getting collection stats for {}", collection, e)
+            throw new RuntimeException("Failed to get collection stats: ${e.message}", e)
+        }
+    }
+    
+    @CompileStatic(TypeCheckingMode.SKIP)
+    @Override
+    List<NoSqlMetadata.IndexInfo> listIndexes(String collection) {
+        ensureInitialized()
+        
+        if (!mongoAvailable) {
+            log.warn("MongoProvider running in stub mode: listIndexes({})", collection)
+            return []
+        }
+        
+        try {
+            def coll = getCollection(collection)
+            def listIndexesMethod = coll.getClass().getMethod("listIndexes")
+            def indexes = listIndexesMethod.invoke(coll)
+            
+            List<NoSqlMetadata.IndexInfo> result = new ArrayList<>()
+            def iteratorMethod = indexes.getClass().getMethod("iterator")
+            def iterator = iteratorMethod.invoke(indexes)
+            
+            while (iterator.hasNext()) {
+                def doc = iterator.next()
+                result << new NoSqlMetadata.IndexInfo(
+                    name: doc.getString("name"),
+                    key: doc.get("key") as Map<String, Object>,
+                    unique: doc.getBoolean("unique") ?: false,
+                    sparse: doc.getBoolean("sparse") ?: false,
+                    background: doc.get("background")?.toString(),
+                    options: [:]
+                )
+            }
+            
+            return result
+        } catch (Exception e) {
+            log.error("Error listing indexes for {}", collection, e)
+            throw new RuntimeException("Failed to list indexes: ${e.message}", e)
+        }
+    }
+    
+    @CompileStatic(TypeCheckingMode.SKIP)
+    @Override
+    NoSqlMetadata.DatabaseStats getDatabaseStats() {
+        ensureInitialized()
+        
+        if (!mongoAvailable) {
+            log.warn("MongoProvider running in stub mode: databaseStats()")
+            return null
+        }
+        
+        try {
+            def documentClass = Class.forName("org.bson.Document")
+            def command = documentClass.getDeclaredConstructor(Map).newInstance([dbStats: 1])
+            
+            def runCommandMethod = database.getClass().getMethod("runCommand", documentClass)
+            def stats = runCommandMethod.invoke(database, command)
+            
+            return new NoSqlMetadata.DatabaseStats(
+                db: stats.getString("db"),
+                collections: stats.getLong("collections") ?: 0L,
+                views: stats.getLong("views") ?: 0L,
+                objects: stats.getLong("objects") ?: 0L,
+                avgObjSize: stats.getDouble("avgObjSize") ?: 0.0,
+                dataSize: stats.getLong("dataSize") ?: 0L,
+                storageSize: stats.getLong("storageSize") ?: 0L,
+                indexes: stats.getLong("indexes") ?: 0L,
+                indexSize: stats.getLong("indexSize") ?: 0L,
+                fsUsedSize: stats.getDouble("fsUsedSize") ?: 0.0,
+                fsTotalSize: stats.getDouble("fsTotalSize") ?: 0.0
+            )
+        } catch (Exception e) {
+            log.error("Error getting database stats", e)
+            throw new RuntimeException("Failed to get database stats: ${e.message}", e)
+        }
+    }
+    
+    @CompileStatic(TypeCheckingMode.SKIP)
+    @Override
+    NoSqlMetadata.ServerInfo getServerInfo() {
+        ensureInitialized()
+        
+        if (!mongoAvailable) {
+            log.warn("MongoProvider running in stub mode: serverInfo()")
+            return null
+        }
+        
+        try {
+            // Get admin database
+            def getDatabaseMethod = client.getClass().getMethod("getDatabase", String)
+            def adminDb = getDatabaseMethod.invoke(client, "admin")
+            
+            def documentClass = Class.forName("org.bson.Document")
+            def command = documentClass.getDeclaredConstructor(Map).newInstance([buildInfo: 1])
+            
+            def runCommandMethod = adminDb.getClass().getMethod("runCommand", documentClass)
+            def info = runCommandMethod.invoke(adminDb, command)
+            
+            return new NoSqlMetadata.ServerInfo(
+                version: info.getString("version"),
+                gitVersion: info.getString("gitVersion"),
+                sysInfo: info.get("sysInfo") as Map<String, Object> ?: [:],
+                maxBsonObjectSize: info.getLong("maxBsonObjectSize") ?: 16777216L,
+                storageEngines: info.get("storageEngines") as Map<String, Object> ?: [:],
+                modules: info.get("modules") as List<String> ?: [],
+                ok: info.getDouble("ok") == 1.0
+            )
+        } catch (Exception e) {
+            log.error("Error getting server info", e)
+            throw new RuntimeException("Failed to get server info: ${e.message}", e)
         }
     }
     

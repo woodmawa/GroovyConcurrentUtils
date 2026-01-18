@@ -10,6 +10,8 @@ import org.softwood.dag.IBinding
 import org.softwood.dag.TaskBinding
 import org.softwood.dag.resilience.RateLimiter
 import org.softwood.dag.resilience.RateLimiterRegistry
+import org.softwood.dag.resilience.DeadLetterQueue
+import org.softwood.dag.resilience.IdempotencyCache
 
 @Slf4j
 class TaskContext {
@@ -22,6 +24,12 @@ class TaskContext {
     
     // Resilience service registries
     final RateLimiterRegistry rateLimiters = new RateLimiterRegistry()
+    
+    // Dead Letter Queue (optional - set by TaskGraph or manually)
+    DeadLetterQueue deadLetterQueue = null
+    
+    // Idempotency Cache (optional - set by TaskGraph or manually)
+    IdempotencyCache idempotencyCache = null
     
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
@@ -129,5 +137,31 @@ class TaskContext {
      */
     RateLimiter rateLimiter(String name, @DelegatesTo(org.softwood.dag.resilience.RateLimiterConfigDsl) Closure config) {
         return rateLimiters.create(name, config)
+    }
+    
+    /**
+     * Get or create the Dead Letter Queue for this context.
+     * Creates a default DLQ if one doesn't exist.
+     * 
+     * @return the dead letter queue
+     */
+    DeadLetterQueue getDeadLetterQueue() {
+        if (deadLetterQueue == null) {
+            deadLetterQueue = new DeadLetterQueue()
+        }
+        return deadLetterQueue
+    }
+    
+    /**
+     * Get or create the Idempotency Cache for this context.
+     * Creates a default cache if one doesn't exist.
+     * 
+     * @return the idempotency cache
+     */
+    IdempotencyCache getIdempotencyCache() {
+        if (idempotencyCache == null) {
+            idempotencyCache = new IdempotencyCache()
+        }
+        return idempotencyCache
     }
 }

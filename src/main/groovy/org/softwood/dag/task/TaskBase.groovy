@@ -11,6 +11,11 @@ import org.softwood.dag.resilience.RateLimiter
 import org.softwood.dag.resilience.RateLimitExceededException
 import org.softwood.dag.resilience.TimeoutPolicy
 import org.softwood.dag.resilience.TaskTimeoutException
+import org.softwood.dag.resilience.DeadLetterQueuePolicy
+import org.softwood.dag.resilience.DeadLetterQueue
+import org.softwood.dag.resilience.IdempotencyPolicy
+import org.softwood.dag.resilience.IdempotencyKey
+import org.softwood.dag.resilience.IdempotencyCacheEntry
 
 /**
  * Abstract base class for all DAG tasks.
@@ -46,6 +51,8 @@ abstract class TaskBase<T> implements ITask<T> {
     protected RetryPolicy retryPolicy = new RetryPolicy()
     protected RateLimitPolicy rateLimitPolicy = new RateLimitPolicy()
     protected TimeoutPolicy timeoutPolicy = new TimeoutPolicy()
+    protected DeadLetterQueuePolicy dlqPolicy = new DeadLetterQueuePolicy()
+    protected IdempotencyPolicy idempotencyPolicy = new IdempotencyPolicy()
     private Long taskTimeoutMillis = null  // Legacy - kept for backwards compatibility
     protected Throwable lastError = null
 
@@ -492,6 +499,122 @@ abstract class TaskBase<T> implements ITask<T> {
         def dsl = new org.softwood.dag.resilience.TimeoutDsl(this.timeoutPolicy)
         dsl.preset(preset)
     }
+    
+    // ----------------------------------------------------
+    // Dead Letter Queue DSL Configuration
+    // ----------------------------------------------------
+    
+    /**
+     * Configure Dead Letter Queue behavior using a DSL block.
+     * 
+     * Enables automatic capture of task failures to the DLQ for
+     * post-mortem analysis, retry, and debugging.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     deadLetterQueue {
+     *         maxSize 1000
+     *         maxAge 24.hours
+     *         alwaysCapture IOException
+     *         neverCapture IllegalArgumentException
+     *         onEntryAdded { entry ->
+     *             log.warn "Task failed: \${entry.taskId}"
+     *         }
+     *     }
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param config DSL configuration closure
+     */
+    void deadLetterQueue(@DelegatesTo(org.softwood.dag.resilience.DeadLetterQueueDsl) Closure config) {
+        def dsl = new org.softwood.dag.resilience.DeadLetterQueueDsl(this.dlqPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Configure Dead Letter Queue with a preset.
+     * 
+     * Available presets:
+     * - "permissive": unlimited size, no expiration (for debugging)
+     * - "strict": limited size (100), short retention (1 hour)
+     * - "autoretry": enables automatic retry with sensible defaults
+     * - "debugging": large storage (unlimited) for long-term analysis
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     deadLetterQueue "strict"
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param preset preset name
+     */
+    void deadLetterQueue(String preset) {
+        def dsl = new org.softwood.dag.resilience.DeadLetterQueueDsl(this.dlqPolicy)
+        dsl.preset(preset)
+    }
+    
+    // ----------------------------------------------------
+    // Idempotency DSL Configuration
+    // ----------------------------------------------------
+    
+    /**
+     * Configure idempotency behavior using a DSL block.
+     * 
+     * Enables caching of task results to prevent duplicate execution
+     * with the same input.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     idempotent {
+     *         ttl Duration.ofMinutes(30)
+     *         keyFrom { input -> input.requestId }
+     *         onCacheHit { key, result ->
+     *             log.info "Returning cached result for \${key}"
+     *         }
+     *     }
+     *     action { ctx, prev -> callApi() }
+     * }
+     * </pre>
+     * 
+     * @param config DSL configuration closure
+     */
+    void idempotent(@DelegatesTo(org.softwood.dag.resilience.IdempotencyDsl) Closure config) {
+        def dsl = new org.softwood.dag.resilience.IdempotencyDsl(this.idempotencyPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+    
+    /**
+     * Configure idempotency with a preset.
+     * 
+     * Available presets:
+     * - "short": 5 minutes TTL
+     * - "standard": 30 minutes TTL (default)
+     * - "long": 2 hours TTL
+     * - "permanent": No expiration
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * serviceTask("api-call") {
+     *     idempotent "standard"
+     *     action { ctx, prev -> ... }
+     * }
+     * </pre>
+     * 
+     * @param preset preset name
+     */
+    void idempotent(String preset) {
+        def dsl = new org.softwood.dag.resilience.IdempotencyDsl(this.idempotencyPolicy)
+        dsl.preset(preset)
+    }
 
 
     // ------------
@@ -632,6 +755,7 @@ abstract class TaskBase<T> implements ITask<T> {
 
             int attempt = 1
             long delay = retryPolicy.initialDelay.toMillis()
+            Object prevValue = null  // Declare outside try block so it's accessible in catch
 
             while (true) {
                 try {
@@ -639,7 +763,6 @@ abstract class TaskBase<T> implements ITask<T> {
                     emitEvent(TaskState.RUNNING)
 
                     // Unwrap the promise to get the actual value
-                    Object prevValue = null
                     if (previousPromise != null) {
                         log.debug "Task ${id}: unwrapping predecessor promise"
                         prevValue = previousPromise.get()  // Block and get the value
@@ -697,6 +820,18 @@ abstract class TaskBase<T> implements ITask<T> {
                         }
                         
                         log.debug "Task ${id}: rate limit check passed (${limiter.getCurrentCount()}/${limiter.maxRequests})"
+                    }
+                    
+                    // Check idempotency cache BEFORE calling runTask()
+                    if (idempotencyPolicy.enabled) {
+                        def cacheResult = checkIdempotencyCache(prevValue)
+                        if (cacheResult != null) {
+                            // Cache hit - return cached result
+                            log.debug "Task ${id}: returning cached result"
+                            state = TaskState.COMPLETED
+                            emitEvent(TaskState.COMPLETED)
+                            return (T) cacheResult
+                        }
                     }
 
                     log.debug "Task ${id}: calling runTask() with prevValue"
@@ -768,6 +903,11 @@ abstract class TaskBase<T> implements ITask<T> {
                     }
 
                     log.debug "Task ${id}: got result: $result"
+                    
+                    // Store result in idempotency cache if enabled
+                    if (idempotencyPolicy.enabled) {
+                        storeInIdempotencyCache(prevValue, result)
+                    }
 
                     state = TaskState.COMPLETED
                     emitEvent(TaskState.COMPLETED)
@@ -776,6 +916,9 @@ abstract class TaskBase<T> implements ITask<T> {
                 } catch (Throwable err) {
                     lastError = err
                     log.error "Task ${id}: attempt $attempt failed: ${err.message}"
+                    
+                    // Capture to Dead Letter Queue if configured and policy allows
+                    captureToDeadLetterQueue(err, prevValue, attempt)
 
                     // Check if this error should be retried
                     if (!isRetriable(err)) {
@@ -827,6 +970,177 @@ abstract class TaskBase<T> implements ITask<T> {
         state = TaskState.FAILED
         if (eventDispatcher) {
             eventDispatcher.emit(new TaskEvent(id, TaskState.FAILED, err))
+        }
+    }
+    
+    // ----------------------------------------------------
+    // Dead Letter Queue Capture
+    // ----------------------------------------------------
+    
+    /**
+     * Capture task failure to Dead Letter Queue if configured.
+     * 
+     * Only captures if:
+     * 1. DLQ is available in context
+     * 2. DLQ policy is enabled (configured via DSL)
+     * 3. Policy allows capture for this task/exception combination
+     * 
+     * @param error the exception that caused the failure
+     * @param inputValue the input value passed to this task
+     * @param attemptCount the number of attempts made before failure
+     */
+    protected void captureToDeadLetterQueue(Throwable error, Object inputValue, int attemptCount) {
+        try {
+            // Check if DLQ is available in context
+            def dlq = ctx?.deadLetterQueue
+            if (dlq == null) {
+                // No DLQ configured - skip capture
+                return
+            }
+            
+            // Check if DLQ policy is enabled (i.e., was explicitly configured)
+            if (!dlqPolicy.enabled) {
+                log.debug "Task ${id}: DLQ not enabled, skipping capture"
+                return
+            }
+            
+            // Check if policy allows capture for this task/exception
+            if (!dlqPolicy.shouldCapture(id, error)) {
+                log.debug "Task ${id}: DLQ policy rejected capture for ${error.class.simpleName}"
+                return
+            }
+            
+            // Transfer policy callbacks to DLQ (only if not already set)
+            if (dlqPolicy.onEntryAdded && !dlq.onEntryAdded) {
+                dlq.onEntryAdded = dlqPolicy.onEntryAdded
+            }
+            if (dlqPolicy.onQueueFull && !dlq.onQueueFull) {
+                dlq.onQueueFull = dlqPolicy.onQueueFull
+            }
+            
+            // Get run ID if available (from TaskGraph context)
+            String runId = ctx.globals?.get('runId')
+            
+            // Build metadata
+            Map<String, Object> metadata = [:]
+            metadata.taskType = this.class.simpleName
+            metadata.hasRetryPolicy = retryPolicy.maxAttempts > 1
+            metadata.hasTimeout = timeoutPolicy.isActive()
+            metadata.hasRateLimit = rateLimitPolicy.isActive()
+            
+            // Capture to DLQ
+            def entryId = dlq.add(
+                this,
+                inputValue,
+                error,
+                attemptCount,
+                runId,
+                metadata
+            )
+            
+            log.debug "Task ${id}: captured failure to DLQ as entry ${entryId}"
+            
+        } catch (Exception dlqErr) {
+            // Never let DLQ capture failures break the task execution flow
+            log.error "Task ${id}: failed to capture to DLQ: ${dlqErr.message}", dlqErr
+        }
+    }
+    
+    // ----------------------------------------------------
+    // Idempotency Cache Operations
+    // ----------------------------------------------------
+    
+    /**
+     * Check idempotency cache for a cached result.
+     * 
+     * @param inputValue the task input
+     * @return the cached result, or null if not found
+     */
+    protected Object checkIdempotencyCache(Object inputValue) {
+        try {
+            // Check if cache is available
+            def cache = ctx?.idempotencyCache
+            if (cache == null) {
+                log.debug "Task ${id}: no idempotency cache available"
+                return null
+            }
+            
+            // Generate idempotency key
+            IdempotencyKey key = idempotencyPolicy.generateKey(id, inputValue)
+            
+            // Check cache
+            IdempotencyCacheEntry entry = cache.get(key)
+            if (entry != null) {
+                log.debug "Task ${id}: cache hit for key ${key}"
+                
+                // Invoke callback if provided
+                if (idempotencyPolicy.onCacheHit) {
+                    try {
+                        idempotencyPolicy.onCacheHit.call(key, entry.result)
+                    } catch (Exception cbErr) {
+                        log.warn "Task ${id}: error in onCacheHit callback: ${cbErr.message}"
+                    }
+                }
+                
+                return entry.result
+            }
+            
+            // Cache miss
+            log.debug "Task ${id}: cache miss for key ${key}"
+            
+            // Invoke callback if provided
+            if (idempotencyPolicy.onCacheMiss) {
+                try {
+                    idempotencyPolicy.onCacheMiss.call(key)
+                } catch (Exception cbErr) {
+                    log.warn "Task ${id}: error in onCacheMiss callback: ${cbErr.message}"
+                }
+            }
+            
+            return null
+            
+        } catch (Exception cacheErr) {
+            // Never let cache errors break task execution
+            log.error "Task ${id}: error checking idempotency cache: ${cacheErr.message}", cacheErr
+            return null
+        }
+    }
+    
+    /**
+     * Store result in idempotency cache.
+     * 
+     * @param inputValue the task input
+     * @param result the task result
+     */
+    protected void storeInIdempotencyCache(Object inputValue, Object result) {
+        try {
+            // Check if cache is available
+            def cache = ctx?.idempotencyCache
+            if (cache == null) {
+                log.debug "Task ${id}: no idempotency cache available"
+                return
+            }
+            
+            // Generate idempotency key
+            IdempotencyKey key = idempotencyPolicy.generateKey(id, inputValue)
+            
+            // Store in cache
+            cache.put(key, result, idempotencyPolicy.ttl)
+            
+            log.debug "Task ${id}: cached result for key ${key}"
+            
+            // Invoke callback if provided
+            if (idempotencyPolicy.onResultCached) {
+                try {
+                    idempotencyPolicy.onResultCached.call(key, result)
+                } catch (Exception cbErr) {
+                    log.warn "Task ${id}: error in onResultCached callback: ${cbErr.message}"
+                }
+            }
+            
+        } catch (Exception cacheErr) {
+            // Never let cache errors break task execution
+            log.error "Task ${id}: failed to store in idempotency cache: ${cacheErr.message}", cacheErr
         }
     }
 }

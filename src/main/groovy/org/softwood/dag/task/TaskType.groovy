@@ -110,6 +110,13 @@ enum TaskType {
     SQL(SqlTask, false),
 
     /**
+     * NoSQL database task for document stores and key-value databases.
+     * Supports MongoDB, Couchbase, DynamoDB, and other NoSQL databases.
+     * ZERO DEPENDENCIES: Uses reflection to avoid compile-time MongoDB dependency.
+     */
+    NOSQL(NoSqlTask, false),
+
+    /**
      * Subprocess task for invoking subprocesses/subgraphs.
      * Supports input/output mapping and subprocess composition.
      * Renamed from CALL_ACTIVITY for clarity.
@@ -377,6 +384,17 @@ enum TaskType {
             case 'jdbc':
             case 'query':
                 return SQL
+            case 'nosql':
+            case 'nosqltask':
+            case 'mongo':
+            case 'mongodb':
+            case 'document':
+            case 'documentdb':
+            case 'dynamo':
+            case 'dynamodb':
+            case 'couchbase':
+            case 'keyvalue':
+                return NOSQL
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

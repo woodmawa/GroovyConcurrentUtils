@@ -262,6 +262,260 @@ class GroovySqlProvider implements SqlProvider {
         }
     }
     
+    // =========================================================================
+    // Metadata Operations - Delegate to JDBC
+    // =========================================================================
+    
+    @Override
+    List<DatabaseMetadata.TableInfo> getTables(String catalog, String schema, String tableNamePattern, List<String> types) {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def typeArray = types ? types as String[] : null
+        def rs = meta.getTables(catalog, schema, tableNamePattern, typeArray)
+        
+        List<DatabaseMetadata.TableInfo> tables = new ArrayList<>()
+        try {
+            while (rs.next()) {
+                tables << new DatabaseMetadata.TableInfo(
+                    catalog: rs.getString("TABLE_CAT"),
+                    schema: rs.getString("TABLE_SCHEM"),
+                    tableName: rs.getString("TABLE_NAME"),
+                    type: rs.getString("TABLE_TYPE"),
+                    remarks: rs.getString("REMARKS")
+                )
+            }
+        } finally {
+            rs.close()
+        }
+        return tables
+    }
+    
+    @Override
+    List<DatabaseMetadata.ColumnInfo> getColumns(String catalog, String schema, String tableName, String columnNamePattern) {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getColumns(catalog, schema, tableName, columnNamePattern)
+        
+        List<DatabaseMetadata.ColumnInfo> columns = new ArrayList<>()
+        try {
+            while (rs.next()) {
+                columns << new DatabaseMetadata.ColumnInfo(
+                    tableName: rs.getString("TABLE_NAME"),
+                    columnName: rs.getString("COLUMN_NAME"),
+                    dataType: rs.getString("TYPE_NAME"),
+                    sqlType: rs.getInt("DATA_TYPE"),
+                    columnSize: rs.getInt("COLUMN_SIZE"),
+                    decimalDigits: rs.getInt("DECIMAL_DIGITS"),
+                    nullable: rs.getInt("NULLABLE") == java.sql.DatabaseMetaData.columnNullable,
+                    defaultValue: rs.getString("COLUMN_DEF"),
+                    remarks: rs.getString("REMARKS"),
+                    ordinalPosition: rs.getInt("ORDINAL_POSITION")
+                )
+            }
+        } finally {
+            rs.close()
+        }
+        return columns
+    }
+    
+    @Override
+    List<DatabaseMetadata.IndexInfo> getIndexes(String catalog, String schema, String tableName, boolean unique) {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getIndexInfo(catalog, schema, tableName, unique, false)
+        
+        Map<String, DatabaseMetadata.IndexInfo> indexMap = new HashMap<>()
+        try {
+            while (rs.next()) {
+                def indexName = rs.getString("INDEX_NAME")
+                if (!indexName) continue
+                
+                if (!indexMap.containsKey(indexName)) {
+                    indexMap[indexName] = new DatabaseMetadata.IndexInfo(
+                        tableName: rs.getString("TABLE_NAME"),
+                        indexName: indexName,
+                        unique: !rs.getBoolean("NON_UNIQUE"),
+                        type: getIndexType(rs.getShort("TYPE")),
+                        columns: []
+                    )
+                }
+                
+                def columnName = rs.getString("COLUMN_NAME")
+                if (columnName) {
+                    indexMap[indexName].columns << columnName
+                }
+            }
+        } finally {
+            rs.close()
+        }
+        return new ArrayList<DatabaseMetadata.IndexInfo>(indexMap.values())
+    }
+    
+    @Override
+    DatabaseMetadata.PrimaryKeyInfo getPrimaryKeys(String catalog, String schema, String tableName) {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getPrimaryKeys(catalog, schema, tableName)
+        
+        DatabaseMetadata.PrimaryKeyInfo pkInfo = null
+        try {
+            while (rs.next()) {
+                if (!pkInfo) {
+                    pkInfo = new DatabaseMetadata.PrimaryKeyInfo(
+                        tableName: rs.getString("TABLE_NAME"),
+                        pkName: rs.getString("PK_NAME"),
+                        columns: []
+                    )
+                }
+                pkInfo.columns << rs.getString("COLUMN_NAME")
+            }
+        } finally {
+            rs.close()
+        }
+        return pkInfo
+    }
+    
+    @Override
+    List<DatabaseMetadata.ForeignKeyInfo> getForeignKeys(String catalog, String schema, String tableName) {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getImportedKeys(catalog, schema, tableName)
+        
+        Map<String, DatabaseMetadata.ForeignKeyInfo> fkMap = new HashMap<>()
+        try {
+            while (rs.next()) {
+                def fkName = rs.getString("FK_NAME")
+                
+                if (!fkMap.containsKey(fkName)) {
+                    fkMap[fkName] = new DatabaseMetadata.ForeignKeyInfo(
+                        fkName: fkName,
+                        tableName: rs.getString("FKTABLE_NAME"),
+                        pkTableName: rs.getString("PKTABLE_NAME"),
+                        updateRule: getForeignKeyRule(rs.getShort("UPDATE_RULE")),
+                        deleteRule: getForeignKeyRule(rs.getShort("DELETE_RULE")),
+                        columns: []
+                    )
+                }
+                
+                fkMap[fkName].columns << new DatabaseMetadata.ForeignKeyInfo.ColumnMapping(
+                    fkColumn: rs.getString("FKCOLUMN_NAME"),
+                    pkColumn: rs.getString("PKCOLUMN_NAME")
+                )
+            }
+        } finally {
+            rs.close()
+        }
+        return new ArrayList<DatabaseMetadata.ForeignKeyInfo>(fkMap.values())
+    }
+    
+    @Override
+    List<DatabaseMetadata.SchemaInfo> getSchemas() {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getSchemas()
+        
+        List<DatabaseMetadata.SchemaInfo> schemas = new ArrayList<>()
+        try {
+            while (rs.next()) {
+                schemas << new DatabaseMetadata.SchemaInfo(
+                    catalog: rs.getString("TABLE_CATALOG"),
+                    schemaName: rs.getString("TABLE_SCHEM")
+                )
+            }
+        } finally {
+            rs.close()
+        }
+        return schemas
+    }
+    
+    @Override
+    List<DatabaseMetadata.CatalogInfo> getCatalogs() {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        def rs = meta.getCatalogs()
+        
+        List<DatabaseMetadata.CatalogInfo> catalogs = new ArrayList<>()
+        try {
+            while (rs.next()) {
+                catalogs << new DatabaseMetadata.CatalogInfo(
+                    catalog: rs.getString("TABLE_CAT")
+                )
+            }
+        } finally {
+            rs.close()
+        }
+        return catalogs
+    }
+    
+    @Override
+    DatabaseMetadata.DatabaseInfo getDatabaseInfo() {
+        ensureConnected()
+        
+        def conn = sql.connection
+        def meta = conn.getMetaData()
+        
+        return new DatabaseMetadata.DatabaseInfo(
+            productName: meta.getDatabaseProductName(),
+            productVersion: meta.getDatabaseProductVersion(),
+            driverName: meta.getDriverName(),
+            driverVersion: meta.getDriverVersion(),
+            url: meta.getURL(),
+            userName: meta.getUserName(),
+            readOnly: meta.isReadOnly(),
+            maxConnections: meta.getMaxConnections(),
+            supportsBatchUpdates: meta.supportsBatchUpdates(),
+            supportsTransactions: meta.supportsTransactions(),
+            supportsStoredProcedures: meta.supportsStoredProcedures(),
+            defaultTransactionIsolation: meta.getDefaultTransactionIsolation()
+        )
+    }
+    
+    private String getIndexType(short type) {
+        switch (type) {
+            case java.sql.DatabaseMetaData.tableIndexStatistic:
+                return "statistic"
+            case java.sql.DatabaseMetaData.tableIndexClustered:
+                return "clustered"
+            case java.sql.DatabaseMetaData.tableIndexHashed:
+                return "hashed"
+            case java.sql.DatabaseMetaData.tableIndexOther:
+                return "other"
+            default:
+                return "unknown"
+        }
+    }
+    
+    private String getForeignKeyRule(short rule) {
+        switch (rule) {
+            case java.sql.DatabaseMetaData.importedKeyCascade:
+                return "CASCADE"
+            case java.sql.DatabaseMetaData.importedKeySetNull:
+                return "SET NULL"
+            case java.sql.DatabaseMetaData.importedKeySetDefault:
+                return "SET DEFAULT"
+            case java.sql.DatabaseMetaData.importedKeyRestrict:
+                return "RESTRICT"
+            case java.sql.DatabaseMetaData.importedKeyNoAction:
+                return "NO ACTION"
+            default:
+                return "UNKNOWN"
+        }
+    }
+    
     private Map<String, Object> rowToMap(Object row) {
         def map = [:] as Map<String, Object>
         if (row instanceof groovy.sql.GroovyRowResult) {

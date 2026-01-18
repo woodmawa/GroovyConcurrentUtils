@@ -26,6 +26,9 @@ class TaskGraphDsl {
     // Store fork/join DSL instances for deferred wiring
     private final List<ForkDsl> deferredForks = []
     private final List<JoinDsl> deferredJoins = []
+    
+    // Track when we're building saga steps (don't add them to graph)
+    private boolean insideSagaBuild = false
 
     TaskGraphDsl(TaskGraph graph) {
         this.graph = graph
@@ -45,7 +48,10 @@ class TaskGraphDsl {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        graph.addTask(t)
+        // Don't add saga steps to the outer graph
+        if (!insideSagaBuild) {
+            graph.addTask(t)
+        }
         return t
     }
 
@@ -63,7 +69,10 @@ class TaskGraphDsl {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        graph.addTask(t)
+        // Don't add saga steps to the outer graph
+        if (!insideSagaBuild) {
+            graph.addTask(t)
+        }
         return t
     }
 
@@ -80,7 +89,10 @@ class TaskGraphDsl {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        graph.addTask(t)
+        // Don't add saga steps to the outer graph
+        if (!insideSagaBuild) {
+            graph.addTask(t)
+        }
         return t
     }
 
@@ -313,6 +325,86 @@ class TaskGraphDsl {
      */
     ITask sqlTask(String id, @DelegatesTo(ITask) Closure config) {
         return task(id, TaskType.SQL, config)
+    }
+    
+    /**
+     * Create a NoSQL database task for document stores and key-value databases.
+     * 
+     * <h3>Find Mode:</h3>
+     * <pre>
+     * noSqlTask("fetch-users") {
+     *     provider new MongoProvider(
+     *         connectionString: "mongodb://localhost:27017",
+     *         databaseName: "mydb"
+     *     )
+     *     find "users"
+     *     filter age: [$gt: 18], status: "active"
+     *     select "name", "email", "age"
+     *     orderBy age: "DESC"
+     *     limit 10
+     * }
+     * </pre>
+     * 
+     * <h3>Metadata Mode:</h3>
+     * <pre>
+     * noSqlTask("list-collections") {
+     *     provider myMongoProvider
+     *     metadata {
+     *         collections()
+     *     }
+     * }
+     * </pre>
+     */
+    ITask noSqlTask(String id, @DelegatesTo(ITask) Closure config) {
+        return task(id, TaskType.NOSQL, config)
+    }
+    
+    /**
+     * Create a saga task for distributed transactions with compensations.
+     * 
+     * Usage:
+     * <pre>
+     * saga("checkout-process") {
+     *     compensatable(sqlTask("reserve-inventory") {
+     *         withTransaction { conn -&gt; }
+     *     }) {
+     *         compensate { ctx, result -&gt; }
+     *     }
+     *     
+     *     compensatable(httpTask("charge-payment") {
+     *         url "https://payment.api/charge"
+     *     }) {
+     *         compensate { result -&gt; }
+     *     }
+     *     
+     *     nonCompensatable(serviceTask("send-email") {
+     *         action { ctx, prev -&gt; sendEmail() }
+     *     })
+     *     
+     *     strategy "retry-then-backward"
+     *     onSagaComplete { results -&gt; log.info "Success!" }
+     * }
+     * </pre>
+     */
+    org.softwood.dag.saga.SagaTask saga(String id, @DelegatesTo(org.softwood.dag.saga.SagaDsl) Closure config) {
+        def sagaTask = TaskFactory.createSagaTask(id, id, graph.ctx)
+        sagaTask.eventDispatcher = new DefaultTaskEventDispatcher(graph)
+        
+        // Mark that we're building a saga - don't add saga steps to graph
+        def oldInsideSaga = insideSagaBuild
+        insideSagaBuild = true
+        
+        try {
+            def dsl = new org.softwood.dag.saga.SagaDsl(sagaTask)
+            config.delegate = dsl
+            config.resolveStrategy = Closure.DELEGATE_FIRST
+            config.call()
+        } finally {
+            insideSagaBuild = oldInsideSaga
+        }
+        
+        graph.addTask(sagaTask)
+        return sagaTask
     }
 
     // ============================================================================

@@ -119,4 +119,40 @@ interface NoSqlProvider {
      * @return Result from closure
      */
     Object withTransaction(Closure closure)
+    
+    // =========================================================================
+    // Metadata Operations
+    // =========================================================================
+    
+    /**
+     * List all collections in the database.
+     * @return List of collection information
+     */
+    List<NoSqlMetadata.CollectionInfo> listCollections()
+    
+    /**
+     * Get statistics for a collection.
+     * @param collection Collection name
+     * @return Collection statistics
+     */
+    NoSqlMetadata.CollectionStats getCollectionStats(String collection)
+    
+    /**
+     * List indexes on a collection.
+     * @param collection Collection name
+     * @return List of index information
+     */
+    List<NoSqlMetadata.IndexInfo> listIndexes(String collection)
+    
+    /**
+     * Get database statistics.
+     * @return Database statistics
+     */
+    NoSqlMetadata.DatabaseStats getDatabaseStats()
+    
+    /**
+     * Get server information.
+     * @return Server information
+     */
+    NoSqlMetadata.ServerInfo getServerInfo()
 }

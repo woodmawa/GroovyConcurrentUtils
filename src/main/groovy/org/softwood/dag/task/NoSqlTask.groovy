@@ -7,6 +7,7 @@ import org.softwood.dag.task.nosql.MongoProvider
 import org.softwood.dag.task.nosql.DocumentCriteriaBuilder
 import org.softwood.dag.task.nosql.QueryOptions
 import org.softwood.dag.task.nosql.UpdateOptions
+import org.softwood.dag.task.nosql.NoSqlMetadataDsl
 import org.softwood.promise.Promise
 
 /**
@@ -29,6 +30,32 @@ import org.softwood.promise.Promise
  *     select "name", "email", "age"
  *     orderBy age: "DESC"
  *     limit 10
+ * }
+ * </pre>
+ * 
+ * <h3>Transaction Mode (Multi-Operation):</h3>
+ * <pre>
+ * noSqlTask("create-order") {
+ *     provider myMongoProvider
+ *     
+ *     withTransaction { session ->
+ *         // Step 1: Insert order
+ *         def ordersCollection = session.getDatabase("mydb").getCollection("orders")
+ *         def orderId = ordersCollection.insertOne(
+ *             session,
+ *             [userId: userId, total: total, status: "pending"]
+ *         ).insertedId
+ *         
+ *         // Step 2: Update inventory
+ *         def inventoryCollection = session.getDatabase("mydb").getCollection("inventory")
+ *         inventoryCollection.updateOne(
+ *             session,
+ *             [productId: productId],
+ *             [$inc: [qty: -quantity]]
+ *         )
+ *         
+ *         return [orderId: orderId, success: true]
+ *     }
  * }
  * </pre>
  * 
@@ -114,6 +141,9 @@ class NoSqlTask extends TaskBase<Object> {
     
     // Criteria mode
     private DocumentCriteriaBuilder criteriaBuilder
+    
+    // Metadata mode
+    private NoSqlMetadataDsl metadataDsl
     
     // Execute mode
     private Closure executeClosure
@@ -309,6 +339,54 @@ class NoSqlTask extends TaskBase<Object> {
         this.mode = NoSqlMode.CRITERIA
     }
     
+    /**
+     * Query database metadata.
+     * 
+     * <h3>Examples:</h3>
+     * <pre>
+     * // List all collections
+     * noSqlTask("list-collections") {
+     *     provider myProvider
+     *     metadata {
+     *         collections()
+     *     }
+     * }
+     * 
+     * // Get collection statistics
+     * noSqlTask("analyze-users") {
+     *     provider myProvider
+     *     metadata {
+     *         collectionStats("users")
+     *     }
+     * }
+     * 
+     * // List indexes
+     * noSqlTask("check-indexes") {
+     *     provider myProvider
+     *     metadata {
+     *         indexes("users")
+     *     }
+     * }
+     * 
+     * // Get database stats
+     * noSqlTask("db-health") {
+     *     provider myProvider
+     *     metadata {
+     *         databaseStats()
+     *     }
+     * }
+     * </pre>
+     */
+    void metadata(@DelegatesTo(NoSqlMetadataDsl) Closure config) {
+        def dsl = new NoSqlMetadataDsl(provider)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+        
+        this.metadataDsl = dsl
+        this.mode = NoSqlMode.METADATA
+    }
+    
     // =========================================================================
     // Custom Execution
     // =========================================================================
@@ -319,6 +397,53 @@ class NoSqlTask extends TaskBase<Object> {
     void execute(Closure closure) {
         this.executeClosure = closure
         this.mode = NoSqlMode.EXECUTE
+    }
+    
+    /**
+     * Execute custom code within a transaction.
+     * 
+     * This is a clearer alternative to execute { } + transaction(true).
+     * The closure receives the native NoSQL client (MongoDB client, etc.).
+     * 
+     * <h3>MongoDB Example:</h3>
+     * <pre>
+     * noSqlTask("create-order") {
+     *     provider myMongoProvider
+     *     
+     *     withTransaction { session ->
+     *         // Step 1: Insert order
+     *         def ordersCollection = session.getDatabase("mydb").getCollection("orders")
+     *         def orderId = ordersCollection.insertOne(
+     *             session,
+     *             [userId: userId, total: total, status: "pending"]
+     *         ).insertedId
+     *         
+     *         // Step 2: Update inventory
+     *         def inventoryCollection = session.getDatabase("mydb").getCollection("inventory")
+     *         inventoryCollection.updateOne(
+     *             session,
+     *             [productId: productId],
+     *             [\$inc: [qty: -quantity]]
+     *         )
+     *         
+     *         // Step 3: Insert audit log
+     *         def auditCollection = session.getDatabase("mydb").getCollection("audit_log")
+     *         auditCollection.insertOne(
+     *             session,
+     *             [action: "order_created", orderId: orderId, timestamp: new Date()]
+     *         )
+     *         
+     *         return [orderId: orderId, success: true]
+     *     }
+     * }
+     * </pre>
+     * 
+     * @param closure closure receiving native client/session
+     */
+    void withTransaction(Closure closure) {
+        this.executeClosure = closure
+        this.mode = NoSqlMode.EXECUTE
+        this.useTransaction = true
     }
     
     /**
@@ -361,6 +486,8 @@ class NoSqlTask extends TaskBase<Object> {
                     return executeAggregate()
                 case NoSqlMode.CRITERIA:
                     return executeCriteria()
+                case NoSqlMode.METADATA:
+                    return executeMetadata()
                 case NoSqlMode.EXECUTE:
                     return executeCustom()
                 default:
@@ -513,6 +640,16 @@ class NoSqlTask extends TaskBase<Object> {
         }
     }
     
+    private Object executeMetadata() {
+        if (!metadataDsl) {
+            throw new IllegalStateException("NoSqlTask: metadata not configured")
+        }
+        
+        log.info("NoSqlTask '{}': executing metadata query", id)
+        
+        return metadataDsl.execute()
+    }
+    
     private Object executeCustom() {
         if (!executeClosure) {
             throw new IllegalStateException("NoSqlTask: execute closure not configured")
@@ -546,6 +683,7 @@ class NoSqlTask extends TaskBase<Object> {
         DELETE,         // Delete documents
         AGGREGATE,      // Aggregation pipeline
         CRITERIA,       // Criteria DSL
+        METADATA,       // Metadata query
         EXECUTE         // Custom code
     }
 }

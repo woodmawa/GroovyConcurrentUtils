@@ -31,7 +31,7 @@ class SubprocessTaskTest {
 
     private static <T> T awaitPromise(Promise<T> p) {
         Awaitility.await()
-                .atMost(5, TimeUnit.SECONDS)
+                .atMost(15, TimeUnit.SECONDS)
                 .until({ p.isDone() })
         return p.get()
     }

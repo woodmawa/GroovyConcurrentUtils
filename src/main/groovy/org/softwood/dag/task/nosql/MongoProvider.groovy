@@ -3,6 +3,7 @@ package org.softwood.dag.task.nosql
 import groovy.transform.CompileStatic
 import groovy.transform.TypeCheckingMode
 import groovy.util.logging.Slf4j
+import org.softwood.config.ConfigLoader
 
 /**
  * MongoDB implementation of NoSqlProvider.
@@ -35,6 +36,60 @@ class MongoProvider implements NoSqlProvider {
     
     /** Database name to use */
     String databaseName
+    
+    // =========================================================================
+    // Static Factory Methods
+    // =========================================================================
+    
+    /**
+     * Create MongoProvider from config file.
+     * Reads from database.mongodb section.
+     * 
+     * <h3>Config Example (config.yml):</h3>
+     * <pre>
+     * database:
+     *   mongodb:
+     *     connectionString: "mongodb://localhost:27017"
+     *     database: mydb
+     *     username: user
+     *     password: secret
+     * </pre>
+     * 
+     * <h3>Usage:</h3>
+     * <pre>
+     * def provider = MongoProvider.fromConfig()
+     * provider.initialize()
+     * </pre>
+     */
+    static MongoProvider fromConfig(Map configOverrides = [:]) {
+        def config = ConfigLoader.loadConfig()
+        
+        def provider = new MongoProvider()
+        
+        // Apply config values (config.yml or config.groovy)
+        provider.connectionString = getConfigValue(config, configOverrides, 
+            'database.mongodb.connectionString', 'mongodb://localhost:27017')
+        provider.databaseName = getConfigValue(config, configOverrides, 
+            'database.mongodb.database', 'test')
+        
+        // Auto-initialize for convenience
+        provider.initialize()
+        
+        return provider
+    }
+    
+    private static Object getConfigValue(Map config, Map overrides, String key, Object defaultValue) {
+        // Check overrides first
+        if (overrides.containsKey(key)) {
+            return overrides[key]
+        }
+        // Then config
+        if (config.containsKey(key)) {
+            return config[key]
+        }
+        // Finally default
+        return defaultValue
+    }
     
     // =========================================================================
     // Runtime - Using Object types to avoid compile-time dependency on MongoDB

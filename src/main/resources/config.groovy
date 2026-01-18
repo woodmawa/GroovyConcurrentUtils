@@ -93,6 +93,31 @@ database {
     url = 'jdbc:h2:mem:testdb'
     username = 'sa'
     password = ''
+    
+    // PostgreSQL defaults
+    postgres {
+        host = 'localhost'
+        port = 5432
+        database = 'postgres'
+        username = 'postgres'
+        password = 'postgres'
+        schema = 'public'
+    }
+    
+    // MongoDB defaults
+    mongodb {
+        connectionString = 'mongodb://localhost:27017'
+        database = 'test'
+    }
+    
+    // ArangoDB defaults
+    arangodb {
+        host = 'localhost'
+        port = 8529
+        database = '_system'
+        username = 'root'
+        password = ''
+    }
 }
 
 //one of "DATAFLOW" | "VERTX" | "COMPLETABLE_FUTURE"

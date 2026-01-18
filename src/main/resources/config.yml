@@ -37,6 +37,49 @@ database:
     max: 20
     timeout: 30
 
+  # PostgreSQL Provider Defaults
+  postgres:
+    host: localhost
+    port: 5432
+    database: postgres
+    username: postgres
+    password: postgres
+    schema: public
+    poolSize: 1
+    maxPoolSize: 10
+    connectionTimeout: 30
+    idleTimeout: 600
+    logQueries: false
+  
+  # MongoDB Provider Defaults
+  mongodb:
+    host: localhost
+    port: 27017
+    database: test
+    username: ""
+    password: ""
+    replicaSet: ""
+    connectionString: "mongodb://localhost:27017"
+    poolSize: 1
+    maxPoolSize: 10
+    minPoolSize: 1
+    maxConnectionIdleTime: 60000
+    maxConnectionLifeTime: 0
+    serverSelectionTimeout: 30000
+  
+  # ArangoDB Provider Defaults
+  arangodb:
+    host: localhost
+    port: 8529
+    database: _system
+    username: root
+    password: ""
+    useSsl: false
+    timeout: 10000
+    maxConnections: 1
+    acquireHostList: false
+    loadBalancing: NONE
+
 # Security (defaults)
 security:
   jwt:

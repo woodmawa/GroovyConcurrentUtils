@@ -3,6 +3,7 @@ package org.softwood.dag.task.sql
 import groovy.transform.CompileStatic
 import groovy.transform.TypeCheckingMode
 import groovy.util.logging.Slf4j
+import org.softwood.config.ConfigLoader
 
 /**
  * PostgreSQL database provider with ZERO compile-time dependencies.
@@ -76,6 +77,15 @@ class PostgreSqlProvider implements SqlProvider {
     /** JDBC URL (e.g., jdbc:postgresql://localhost:5432/mydb) */
     String url
     
+    /** PostgreSQL host (default: localhost) - used if url not provided */
+    String host = "localhost"
+    
+    /** PostgreSQL port (default: 5432) - used if url not provided */
+    int port = 5432
+    
+    /** Database name - used if url not provided */
+    String database
+    
     /** Database username */
     String username
     
@@ -105,6 +115,76 @@ class PostgreSqlProvider implements SqlProvider {
     
     /** Enable query logging (default: false) */
     boolean logQueries = false
+    
+    // =========================================================================
+    // Static Factory Methods
+    // =========================================================================
+    
+    /**
+     * Create PostgreSqlProvider from config file.
+     * Reads from database.postgres section.
+     * 
+     * <h3>Config Example (config.yml):</h3>
+     * <pre>
+     * database:
+     *   postgres:
+     *     host: localhost
+     *     port: 5432
+     *     database: mydb
+     *     username: postgres
+     *     password: secret
+     *     schema: public
+     *     poolSize: 5
+     *     maxPoolSize: 20
+     * </pre>
+     * 
+     * <h3>Usage:</h3>
+     * <pre>
+     * def provider = PostgreSqlProvider.fromConfig()
+     * provider.initialize()
+     * </pre>
+     */
+    static PostgreSqlProvider fromConfig(Map configOverrides = [:]) {
+        def config = ConfigLoader.loadConfig()
+        
+        def provider = new PostgreSqlProvider()
+        
+        // Apply config values (config.yml or config.groovy)
+        provider.host = getConfigValue(config, configOverrides, 'database.postgres.host', 'localhost')
+        provider.port = getConfigValue(config, configOverrides, 'database.postgres.port', 5432) as int
+        provider.database = getConfigValue(config, configOverrides, 'database.postgres.database', 'postgres')
+        provider.username = getConfigValue(config, configOverrides, 'database.postgres.username', 'postgres')
+        provider.password = getConfigValue(config, configOverrides, 'database.postgres.password', '')
+        provider.schema = getConfigValue(config, configOverrides, 'database.postgres.schema', 'public')
+        provider.poolSize = getConfigValue(config, configOverrides, 'database.postgres.poolSize', 1) as int
+        provider.maxPoolSize = getConfigValue(config, configOverrides, 'database.postgres.maxPoolSize', 10) as int
+        provider.connectionTimeout = getConfigValue(config, configOverrides, 'database.postgres.connectionTimeout', 30) as int
+        provider.idleTimeout = getConfigValue(config, configOverrides, 'database.postgres.idleTimeout', 600) as int
+        provider.logQueries = getConfigValue(config, configOverrides, 'database.postgres.logQueries', false) as boolean
+        
+        // Build URL from host/port/database
+        if (!provider.url) {
+            provider.url = "jdbc:postgresql://${provider.host}:${provider.port}/${provider.database}"
+        }
+        
+        // Auto-initialize for convenience
+        provider.initialize()
+        
+        return provider
+    }
+    
+    private static Object getConfigValue(Map config, Map overrides, String key, Object defaultValue) {
+        // Check overrides first
+        if (overrides.containsKey(key)) {
+            return overrides[key]
+        }
+        // Then config
+        if (config.containsKey(key)) {
+            return config[key]
+        }
+        // Finally default
+        return defaultValue
+    }
     
     // =========================================================================
     // Internal State

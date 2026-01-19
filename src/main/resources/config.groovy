@@ -261,6 +261,67 @@ messaging {
 //one of "DATAFLOW" | "VERTX" | "COMPLETABLE_FUTURE"
 promises.defaultImplementation = "DATAFLOW"
 
+// Object Storage Configuration
+objectstorage {
+    // AWS S3
+    'aws-s3' {
+        region = 'us-east-1'
+        accessKeyId = ''  // Optional - uses default credential chain
+        secretAccessKey = ''
+        endpoint = ''  // Optional - for S3-compatible services
+        pathStyleAccess = false
+        connectionTimeout = 10000
+        requestTimeout = 30000
+        maxConnections = 50
+        enableAcceleration = false
+    }
+    
+    // Azure Blob Storage
+    'azure-blob' {
+        accountName = ''
+        accountKey = ''
+        connectionString = ''  // Alternative to accountName/accountKey
+        endpoint = ''  // Optional - for custom endpoints
+        sasToken = ''  // Optional - for SAS token authentication
+        connectionTimeout = 30000
+        requestTimeout = 60000
+        maxRetryAttempts = 3
+    }
+    
+    // Google Cloud Storage
+    gcs {
+        projectId = ''  // GCP Project ID (required)
+        credentialsPath = ''  // Path to service account JSON
+        endpoint = ''  // Optional - for emulator or custom endpoint
+        connectionTimeout = 30000
+        requestTimeout = 60000
+    }
+    
+    // MinIO (S3-compatible)
+    minio {
+        endpoint = 'http://localhost:9000'
+        accessKey = 'minioadmin'
+        secretKey = 'minioadmin'
+        region = 'us-east-1'
+        pathStyleAccess = true
+        connectionTimeout = 10000
+        requestTimeout = 30000
+        maxConnections = 50
+    }
+    
+    // Garage (S3-compatible)
+    garage {
+        endpoint = 'http://localhost:3900'
+        accessKey = ''
+        secretKey = ''
+        region = 'garage'
+        pathStyleAccess = true
+        connectionTimeout = 10000
+        requestTimeout = 30000
+        maxConnections = 50
+    }
+}
+
 // TaskGraph Persistence Configuration
 taskgraph {
     persistence {

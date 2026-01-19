@@ -108,7 +108,7 @@ class MessagingTaskTest extends Specification {
         given:
         def producer = new InMemoryProducer()
         5.times { i ->
-            producer.send("multi-topic", [index: i, data: "message-$i"])
+            producer.send([destination: "multi-topic", message: [index: i, data: "message-$i"]])
         }
         
         when:
@@ -158,9 +158,9 @@ class MessagingTaskTest extends Specification {
     def "should subscribe to multiple topics"() {
         given:
         def producer = new InMemoryProducer()
-        producer.send("topic-a", [source: "A", data: "from-A"])
-        producer.send("topic-b", [source: "B", data: "from-B"])
-        producer.send("topic-c", [source: "C", data: "from-C"])
+        producer.send([destination: "topic-a", message: [source: "A", data: "from-A"]])
+        producer.send([destination: "topic-b", message: [source: "B", data: "from-B"]])
+        producer.send([destination: "topic-c", message: [source: "C", data: "from-C"]])
         
         when:
         def graph = TaskGraph.build {
@@ -359,7 +359,7 @@ class MessagingTaskTest extends Specification {
     def "should handle message processing errors"() {
         given:
         def producer = new InMemoryProducer()
-        producer.send("error-topic", [shouldFail: true])
+        producer.send([destination: "error-topic", message: [shouldFail: true]])
         
         when:
         def graph = TaskGraph.build {
@@ -434,9 +434,9 @@ class MessagingTaskTest extends Specification {
     def "should clear all topics"() {
         given:
         def producer = new InMemoryProducer()
-        producer.send("topic1", [data: "test1"])
-        producer.send("topic2", [data: "test2"])
-        producer.send("topic3", [data: "test3"])
+        producer.send([destination: "topic1", message: [data: "test1"]])
+        producer.send([destination: "topic2", message: [data: "test2"]])
+        producer.send([destination: "topic3", message: [data: "test3"]])
         
         expect:
         InMemoryProducer.getTopics().size() == 3
@@ -451,8 +451,8 @@ class MessagingTaskTest extends Specification {
     def "should clear specific topic"() {
         given:
         def producer = new InMemoryProducer()
-        producer.send("keep-topic", [data: "keep"])
-        producer.send("clear-topic", [data: "clear"])
+        producer.send([destination: "keep-topic", message: [data: "keep"]])
+        producer.send([destination: "clear-topic", message: [data: "clear"]])
         
         expect:
         InMemoryProducer.getTopics().size() == 2
@@ -468,9 +468,9 @@ class MessagingTaskTest extends Specification {
     def "should get message count"() {
         given:
         def producer = new InMemoryProducer()
-        producer.send("count-topic", [index: 1])
-        producer.send("count-topic", [index: 2])
-        producer.send("count-topic", [index: 3])
+        producer.send([destination: "count-topic", message: [index: 1]])
+        producer.send([destination: "count-topic", message: [index: 2]])
+        producer.send([destination: "count-topic", message: [index: 3]])
         
         expect:
         InMemoryProducer.getMessageCount("count-topic") == 3

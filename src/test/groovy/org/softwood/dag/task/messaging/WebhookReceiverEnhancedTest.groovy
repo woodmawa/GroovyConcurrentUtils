@@ -26,11 +26,13 @@ class WebhookReceiverEnhancedTest extends Specification {
         
         // Clear static registry
         WebhookReceiver.clearAllPendingStatic()
+        InMemoryProducer.clearAll()
     }
     
     def cleanup() {
         receiver.shutdown()
         storage.close()
+        InMemoryProducer.clearAll()
     }
     
     // =========================================================================
@@ -39,7 +41,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should send timeout to DLQ when configured"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             timeout: Duration.ofMillis(100),
             deadLetterQueue: "failed-receives"
@@ -50,15 +52,17 @@ class WebhookReceiverEnhancedTest extends Specification {
         Thread.sleep(200)  // Wait for timeout
         
         then:
-        def messages = dlqProducer.getMessages("failed-receives")
-        messages.size() == 1
-        messages[0].reason == "TIMEOUT"
-        messages[0].correlationId == "test-123"
+        def queue = InMemoryProducer.getTopicQueue("failed-receives")
+        queue != null
+        queue.size() == 1
+        def msg = queue.peek()
+        msg.payload.reason == "TIMEOUT"
+        msg.payload.correlationId == "test-123"
     }
     
     def "should send auth failure to DLQ"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             authenticator: { msg -> false },  // Always reject
             deadLetterQueue: "failed-receives"
@@ -70,15 +74,17 @@ class WebhookReceiverEnhancedTest extends Specification {
         
         then:
         !delivered
-        def messages = dlqProducer.getMessages("failed-receives")
-        messages.size() == 1
-        messages[0].reason == "AUTH_FAILED"
-        messages[0].correlationId == "test-456"
+        def queue = InMemoryProducer.getTopicQueue("failed-receives")
+        queue != null
+        queue.size() == 1
+        def msg = queue.peek()
+        msg.payload.reason == "AUTH_FAILED"
+        msg.payload.correlationId == "test-456"
     }
     
     def "should send extractor failure to DLQ after retries"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def attemptCount = 0
         def config = new ReceiveConfig(
             extractor: { msg ->
@@ -96,15 +102,17 @@ class WebhookReceiverEnhancedTest extends Specification {
         
         then:
         attemptCount == 3  // Initial + 2 retries
-        def messages = dlqProducer.getMessages("failed-receives")
-        messages.size() == 1
-        messages[0].reason == "DELIVERY_FAILED"
-        messages[0].retryCount == 2
+        def queue = InMemoryProducer.getTopicQueue("failed-receives")
+        queue != null
+        queue.size() == 1
+        def msg = queue.peek()
+        msg.payload.reason == "DELIVERY_FAILED"
+        msg.payload.retryCount == 2
     }
     
     def "should not send to DLQ when not configured"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             timeout: Duration.ofMillis(100)
             // No deadLetterQueue configured
@@ -115,7 +123,7 @@ class WebhookReceiverEnhancedTest extends Specification {
         Thread.sleep(200)
         
         then:
-        dlqProducer.getAllMessages().isEmpty()
+        InMemoryProducer.getMessageCount("failed-receives") == 0
     }
     
     // =========================================================================
@@ -124,7 +132,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should retry extractor on transient failure"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def attemptCount = 0
         def config = new ReceiveConfig(
             extractor: { msg ->
@@ -151,7 +159,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should apply exponential backoff on retry"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def retryTimes = []
         def lastTime = System.currentTimeMillis()
         
@@ -185,7 +193,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should exhaust retries and fail"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def attemptCount = 0
         def config = new ReceiveConfig(
             extractor: { msg ->
@@ -208,7 +216,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should not retry filter rejection"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def attemptCount = 0
         def config = new ReceiveConfig(
             filter: { msg ->
@@ -233,7 +241,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should persist receive entry when configured"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             persist: true,
             timeout: Duration.ofMinutes(5)
@@ -250,7 +258,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should delete persisted entry on successful delivery"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             persist: true
         )
@@ -265,7 +273,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should delete persisted entry on timeout"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             persist: true,
             timeout: Duration.ofMillis(100)
@@ -281,7 +289,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should use custom storage key"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             persist: true,
             storageKey: "custom:my-receive"
@@ -301,7 +309,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should handle complete workflow with DLQ and retry"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def attemptCount = 0
         def config = new ReceiveConfig(
             filter: { msg -> msg.valid == true },
@@ -336,7 +344,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "should track retry count in DLQ message"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             extractor: { msg -> throw new RuntimeException("Fail") },
             maxRetries: 3,
@@ -349,8 +357,11 @@ class WebhookReceiverEnhancedTest extends Specification {
         receiver.deliverMessage("dlq-retry-count", [data: "test"])
         
         then:
-        def messages = dlqProducer.getMessages("failed-receives")
-        messages[0].retryCount == 3
+        def queue = InMemoryProducer.getTopicQueue("failed-receives")
+        queue != null
+        queue.size() == 1
+        def msg = queue.peek()
+        msg.payload.retryCount == 3
     }
     
     // =========================================================================
@@ -362,7 +373,7 @@ class WebhookReceiverEnhancedTest extends Specification {
         def receiverNoDlq = new WebhookReceiver()
         receiverNoDlq.initialize()
         
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             timeout: Duration.ofMillis(100),
             deadLetterQueue: "failed-receives"  // Configured but no producer
@@ -384,7 +395,7 @@ class WebhookReceiverEnhancedTest extends Specification {
         def receiverNoStorage = new WebhookReceiver()
         receiverNoStorage.initialize()
         
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig(
             persist: true  // Configured but no storage
         )
@@ -401,7 +412,7 @@ class WebhookReceiverEnhancedTest extends Specification {
     
     def "static API should still work"() {
         given:
-        def promise = Promises.createPromise()
+        def promise = Promises.newPromise()
         def config = new ReceiveConfig()
         
         when:

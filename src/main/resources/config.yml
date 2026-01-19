@@ -79,6 +79,136 @@ database:
     maxConnections: 1
     acquireHostList: false
     loadBalancing: NONE
+  
+  # H2 Database Provider Defaults (In-Memory for Testing)
+  h2:
+    databaseName: test
+    inMemory: true
+    username: sa
+    password: ""
+  
+  # AWS DynamoDB Provider Defaults
+  dynamodb:
+    region: us-east-1
+    accessKeyId: ""
+    secretAccessKey: ""
+    endpointUrl: ""  # For local DynamoDB testing
+    connectionTimeout: 10000
+    requestTimeout: 30000
+  
+  # Azure CosmosDB Provider Defaults
+  cosmosdb:
+    endpoint: ""
+    key: ""
+    database: ""
+    consistencyLevel: SESSION  # STRONG, BOUNDED_STALENESS, SESSION, CONSISTENT_PREFIX, EVENTUAL
+    connectionMode: DIRECT  # DIRECT or GATEWAY
+    maxRetryAttempts: 3
+    requestTimeout: 60
+
+  # Google Cloud Firestore Provider Defaults
+  firestore:
+    projectId: ""  # GCP Project ID (required)
+    databaseId: "(default)"  # Firestore database ID
+    credentialsPath: ""  # Path to service account JSON (optional - uses default credentials if not provided)
+    emulatorHost: ""  # e.g., localhost:8080 for local Firestore emulator
+    connectionTimeout: 30000
+    requestTimeout: 60000
+
+  # Google Cloud SQL Provider Defaults
+  googlecloudsql:
+    instanceConnectionName: ""  # Format: project:region:instance (e.g., "my-project:us-central1:my-instance")
+    databaseType: postgresql  # Options: postgresql, mysql, sqlserver
+    database: postgres  # Database name
+    username: postgres  # Database user
+    password: ""  # Database password
+    schema: public  # Schema name (PostgreSQL/SQL Server only)
+    enableIamAuth: false  # Use IAM database authentication
+    credentialsPath: ""  # Path to service account JSON (optional - uses default credentials if not provided)
+    poolSize: 1  # Connection pool minimum size (1 = no pooling)
+    maxPoolSize: 10  # Connection pool maximum size
+    connectionTimeout: 30  # Connection timeout in seconds
+    idleTimeout: 600  # Idle connection timeout in seconds (10 minutes)
+    logQueries: false  # Enable query logging for debugging
+    # Optional: Direct TCP/IP connection (not recommended for production)
+    host: ""  # Direct IP address (leave empty to use Cloud SQL Socket)
+    port: null  # Direct port (leave null to use Cloud SQL Socket)
+
+
+
+
+
+
+# Messaging (defaults)
+messaging:
+  # RabbitMQ (AMQP)
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    virtualHost: /
+    exchange: ""
+    exchangeType: direct  # direct, fanout, topic, headers
+    durable: true
+    autoAck: false
+  
+  # Apache Kafka
+  kafka:
+    bootstrapServers: localhost:9092
+    clientId: kafka-producer
+    compression: none  # none, gzip, snappy, lz4, zstd
+    idempotence: true
+    acks: -1  # all replicas must acknowledge
+    retries: 2147483647
+    batchSize: 16384
+    lingerMs: 0
+    bufferMemory: 33554432
+  
+  # AWS SQS
+  aws-sqs:
+    region: us-east-1
+    accessKeyId: ""  # Optional - uses default credential chain if not provided
+    secretAccessKey: ""
+    queueUrl: ""
+    fifo: false
+    delaySeconds: 0  # 0-900 seconds
+    messageRetentionPeriod: 345600  # 4 days (in seconds)
+    visibilityTimeout: 30
+  
+  # AWS SNS
+  aws-sns:
+    region: us-east-1
+    accessKeyId: ""  # Optional - uses default credential chain if not provided
+    secretAccessKey: ""
+    topicArn: ""
+  
+  # Azure Service Bus
+  azure-servicebus:
+    connectionString: ""
+    queueName: ""
+    topicName: ""
+    maxConcurrentCalls: 1
+    prefetchCount: 0
+    autoComplete: true
+  
+  # Apache ActiveMQ Artemis
+  activemq:
+    brokerUrl: tcp://localhost:61616
+    username: admin
+    password: admin
+    queueName: ""
+    topicName: ""
+    persistent: true
+    priority: 4  # 0-9
+    sessionTransacted: false
+    acknowledgeMode: AUTO_ACKNOWLEDGE
+  
+  # Vert.x Event Bus (uses existing Vert.x dependency)
+  vertx-eventbus:
+    publishMode: false  # false = send (point-to-point), true = publish (broadcast)
+    clustered: false
+    localOnly: true
 
 # Security (defaults)
 security:

@@ -16,7 +16,7 @@ import org.softwood.config.ConfigLoader
  * <pre>
  * def provider = new MongoProvider(
  *     connectionString: "mongodb://localhost:27017",
- *     databaseName: "mydb"
+ *     database: "mydb"
  * )
  * provider.initialize()
  * </pre>
@@ -32,10 +32,10 @@ class MongoProvider implements NoSqlProvider {
     // =========================================================================
     
     /** MongoDB connection string (e.g., "mongodb://localhost:27017") */
-    String connectionString
+    String connectionString = "mongodb://localhost:27017"
     
     /** Database name to use */
-    String databaseName
+    String database
     
     // =========================================================================
     // Static Factory Methods
@@ -69,7 +69,7 @@ class MongoProvider implements NoSqlProvider {
         // Apply config values (config.yml or config.groovy)
         provider.connectionString = getConfigValue(config, configOverrides, 
             'database.mongodb.connectionString', 'mongodb://localhost:27017')
-        provider.databaseName = getConfigValue(config, configOverrides, 
+        provider.database = getConfigValue(config, configOverrides, 
             'database.mongodb.database', 'test')
         
         // Auto-initialize for convenience
@@ -96,7 +96,7 @@ class MongoProvider implements NoSqlProvider {
     // =========================================================================
     
     private Object client          // MongoClient
-    private Object database        // MongoDatabase
+    private Object db              // MongoDatabase
     private boolean initialized = false
     private boolean mongoAvailable = false
     
@@ -114,8 +114,8 @@ class MongoProvider implements NoSqlProvider {
         if (!connectionString) {
             throw new IllegalStateException("MongoDB connectionString not configured")
         }
-        if (!databaseName) {
-            throw new IllegalStateException("MongoDB databaseName not configured")
+        if (!database) {
+            throw new IllegalStateException("MongoDB database not configured")
         }
         
         try {
@@ -129,10 +129,10 @@ class MongoProvider implements NoSqlProvider {
             client = createMethod.invoke(null, connectionString)
             
             def getDatabaseMethod = client.getClass().getMethod("getDatabase", String)
-            database = getDatabaseMethod.invoke(client, databaseName)
+            db = getDatabaseMethod.invoke(client, database)
             
             initialized = true
-            log.info("MongoProvider initialized: {}/{}", connectionString, databaseName)
+            log.info("MongoProvider initialized: {}/{}", connectionString, database)
             
         } catch (ClassNotFoundException e) {
             log.warn("MongoDB driver not found. Provider will run in stub mode. " +
@@ -466,8 +466,8 @@ class MongoProvider implements NoSqlProvider {
         }
         
         try {
-            def listCollectionsMethod = database.getClass().getMethod("listCollections")
-            def collections = listCollectionsMethod.invoke(database)
+            def listCollectionsMethod = db.getClass().getMethod("listCollections")
+            def collections = listCollectionsMethod.invoke(db)
             
             List<NoSqlMetadata.CollectionInfo> result = new ArrayList<>()
             def iteratorMethod = collections.getClass().getMethod("iterator")
@@ -503,8 +503,8 @@ class MongoProvider implements NoSqlProvider {
             def documentClass = Class.forName("org.bson.Document")
             def command = documentClass.getDeclaredConstructor(Map).newInstance([collStats: collection])
             
-            def runCommandMethod = database.getClass().getMethod("runCommand", documentClass)
-            def stats = runCommandMethod.invoke(database, command)
+            def runCommandMethod = db.getClass().getMethod("runCommand", documentClass)
+            def stats = runCommandMethod.invoke(db, command)
             
             return new NoSqlMetadata.CollectionStats(
                 name: collection,
@@ -574,8 +574,8 @@ class MongoProvider implements NoSqlProvider {
             def documentClass = Class.forName("org.bson.Document")
             def command = documentClass.getDeclaredConstructor(Map).newInstance([dbStats: 1])
             
-            def runCommandMethod = database.getClass().getMethod("runCommand", documentClass)
-            def stats = runCommandMethod.invoke(database, command)
+            def runCommandMethod = db.getClass().getMethod("runCommand", documentClass)
+            def stats = runCommandMethod.invoke(db, command)
             
             return new NoSqlMetadata.DatabaseStats(
                 db: stats.getString("db"),
@@ -644,8 +644,8 @@ class MongoProvider implements NoSqlProvider {
     
     private Object getCollection(String collectionName) {
         try {
-            def getCollectionMethod = database.getClass().getMethod("getCollection", String)
-            return getCollectionMethod.invoke(database, collectionName)
+            def getCollectionMethod = db.getClass().getMethod("getCollection", String)
+            return getCollectionMethod.invoke(db, collectionName)
         } catch (Exception e) {
             throw new RuntimeException("Failed to get collection: ${collectionName}", e)
         }
@@ -673,13 +673,12 @@ class MongoProvider implements NoSqlProvider {
     
     private Object stubInsertOne(String collection, Map<String, Object> document) {
         log.warn("MongoProvider running in stub mode: insertOne({}, document={})", collection, document)
-        return UUID.randomUUID().toString()
+        return null
     }
     
     private List<Object> stubInsertMany(String collection, List<Map<String, Object>> documents) {
         log.warn("MongoProvider running in stub mode: insertMany({}, {} documents)", collection, documents.size())
-        List<Object> ids = documents.collect { UUID.randomUUID().toString() as Object }
-        return ids
+        return []
     }
     
     private long stubUpdate(

@@ -2,6 +2,7 @@ package org.softwood.dag.task.sql
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
+import org.softwood.config.ConfigLoader
 
 /**
  * H2 in-memory database provider for testing.
@@ -69,6 +70,61 @@ class H2SqlProvider extends JdbcSqlProvider {
             this.inMemory = options.inMemory as boolean
         }
         configureH2()
+    }
+    
+    // =========================================================================
+    // Static Factory Methods
+    // =========================================================================
+    
+    /**
+     * Create H2SqlProvider from config file.
+     * Reads from database.h2 section.
+     * 
+     * <h3>Config Example (config.yml):</h3>
+     * <pre>
+     * database:
+     *   h2:
+     *     databaseName: test
+     *     inMemory: true
+     *     username: sa
+     *     password: ""
+     * </pre>
+     * 
+     * <h3>Usage:</h3>
+     * <pre>
+     * def provider = H2SqlProvider.fromConfig()
+     * provider.initialize()
+     * </pre>
+     */
+    static H2SqlProvider fromConfig(Map configOverrides = [:]) {
+        def config = ConfigLoader.loadConfig()
+        
+        def provider = new H2SqlProvider()
+        
+        // Apply config values (config.yml or config.groovy)
+        provider.databaseName = getConfigValue(config, configOverrides, 'database.h2.databaseName', 'test')
+        provider.inMemory = getConfigValue(config, configOverrides, 'database.h2.inMemory', true) as boolean
+        
+        // Reconfigure with new values
+        provider.configureH2()
+        
+        // Auto-initialize for convenience
+        provider.initialize()
+        
+        return provider
+    }
+    
+    private static Object getConfigValue(Map config, Map overrides, String key, Object defaultValue) {
+        // Check overrides first
+        if (overrides.containsKey(key)) {
+            return overrides[key]
+        }
+        // Then config
+        if (config.containsKey(key)) {
+            return config[key]
+        }
+        // Finally default
+        return defaultValue
     }
     
     private void configureH2() {

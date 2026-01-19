@@ -24,43 +24,38 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 @Slf4j
 @CompileStatic
-class InMemoryProducer implements MessageProducer {
+class InMemoryProducer implements IMessageProducer {
     
     // Global message store - shared across all InMemory producers/consumers
-    private static final Map<String, Queue<MessageConsumer.Message>> TOPIC_STORE = new ConcurrentHashMap<>()
+    private static final Map<String, Queue<IMessageConsumer.Message>> TOPIC_STORE = new ConcurrentHashMap<>()
     
     private volatile boolean connected = true
     
     @Override
-    Map<String, Object> send(String destination, Object message) {
-        return send(destination, null, message, [:])
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, Object message, Map<String, String> headers) {
-        return send(destination, null, message, headers)
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, String key, Object message) {
-        return send(destination, key, message, [:])
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, String key, Object message, Map<String, String> headers) {
+    Map<String, Object> send(Map<String, Object> params) {
         if (!connected) {
             throw new IllegalStateException("Producer is closed")
         }
         
+        // Extract and validate parameters
+        String destination = params.destination ?: params.topic
         if (!destination) {
-            throw new IllegalArgumentException("Destination cannot be null")
+            throw new IllegalArgumentException("Either 'destination' or 'topic' parameter is required")
         }
         
-        Queue<MessageConsumer.Message> queue = TOPIC_STORE.computeIfAbsent(destination, { k ->
-            new ConcurrentLinkedQueue<MessageConsumer.Message>()
+        Object message = params.message
+        if (message == null) {
+            throw new IllegalArgumentException("'message' parameter is required")
+        }
+        
+        String key = params.key
+        Map<String, String> headers = (params.headers ?: [:]) as Map<String, String>
+        
+        Queue<IMessageConsumer.Message> queue = TOPIC_STORE.computeIfAbsent(destination, { k ->
+            new ConcurrentLinkedQueue<IMessageConsumer.Message>()
         })
         
-        def msg = new MessageConsumer.Message(destination, key, message)
+        def msg = new IMessageConsumer.Message(destination, key, message)
         msg.headers.putAll(headers ?: [:])
         msg.timestamp = System.currentTimeMillis()
         msg.offset = queue.size()
@@ -99,7 +94,7 @@ class InMemoryProducer implements MessageProducer {
         return connected
     }
     
-    static Queue<MessageConsumer.Message> getTopicQueue(String topic) {
+    static Queue<IMessageConsumer.Message> getTopicQueue(String topic) {
         return TOPIC_STORE.get(topic)
     }
     

@@ -2,11 +2,11 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.messaging.IMessageReceiver
+import org.softwood.dag.task.messaging.WebhookReceiver
+import org.softwood.dag.task.messaging.ReceiveConfig
 
 import java.time.Duration
-import java.util.concurrent.ConcurrentHashMap
-import java.util.Timer
-import java.util.TimerTask as JTimerTask
 
 /**
  * ReceiveTask - Wait for External Messages/Events
@@ -17,11 +17,13 @@ import java.util.TimerTask as JTimerTask
  * <h3>Key Features:</h3>
  * <ul>
  *   <li>Webhook reception (via correlation ID)</li>
- *   <li>Message queue consumption (extensible)</li>
+ *   <li>Message queue consumption (extensible via receivers)</li>
  *   <li>Async API response handling</li>
  *   <li>Correlation-based message matching</li>
  *   <li>Timeout with auto-action</li>
  *   <li>Message filtering</li>
+ *   <li>Data extraction/transformation</li>
+ *   <li>Authentication/authorization</li>
  * </ul>
  *
  * <h3>DSL Example - Basic:</h3>
@@ -35,21 +37,32 @@ import java.util.TimerTask as JTimerTask
  * }
  * </pre>
  *
- * <h3>DSL Example - With Filter:</h3>
+ * <h3>DSL Example - Advanced:</h3>
  * <pre>
- * task("wait-approval", TaskType.RECEIVE) {
+ * receiveTask("wait-approval") {
+ *     // Optional: specify receiver (defaults to WebhookReceiver)
+ *     receiver new WebhookReceiver()
+ *     
  *     correlationKey { prev -> prev.requestId }
  *     
+ *     // Filter messages
  *     filter { message ->
- *         message.status == "APPROVED"
+ *         message.status == "APPROVED" && message.amount > 0
  *     }
  *     
+ *     // Transform received data
  *     extract { message ->
  *         [
  *             approved: true,
  *             approvedBy: message.approver,
- *             approvedAt: message.timestamp
+ *             approvedAt: message.timestamp,
+ *             processed: true
  *         ]
+ *     }
+ *     
+ *     // Verify webhook signature
+ *     authenticate { message ->
+ *         verifySignature(message.headers['X-Signature'])
  *     }
  *     
  *     timeout Duration.ofHours(24)
@@ -58,12 +71,17 @@ import java.util.TimerTask as JTimerTask
  *
  * <h3>Programmatic Message Delivery:</h3>
  * <pre>
- * // External system delivers message
+ * // External system delivers message (backward compatible)
  * ReceiveTask.deliverMessage("correlation-123", [
  *     status: "SUCCESS",
  *     data: [...]
  * ])
+ * 
+ * // Or via receiver directly
+ * WebhookReceiver.deliverMessageStatic("correlation-123", data)
  * </pre>
+ * 
+ * @since 1.0.0 (enhanced with provider pattern in 2.0.0)
  */
 @Slf4j
 class ReceiveTask extends TaskBase<Map> {
@@ -71,6 +89,9 @@ class ReceiveTask extends TaskBase<Map> {
     // =========================================================================
     // Configuration
     // =========================================================================
+    
+    /** Message receiver (defaults to WebhookReceiver for backward compatibility) */
+    private IMessageReceiver receiver = new WebhookReceiver()
     
     /** Correlation key provider - extracts correlation ID from previous value */
     Closure correlationKeyProvider
@@ -80,6 +101,9 @@ class ReceiveTask extends TaskBase<Map> {
     
     /** Data extractor - transforms received message */
     Closure dataExtractor
+    
+    /** Authentication/authorization check */
+    Closure authenticator
     
     /** Receive timeout */
     Duration receiveTimeout
@@ -91,11 +115,12 @@ class ReceiveTask extends TaskBase<Map> {
     // Internal State
     // =========================================================================
     
-    /** Global registry of waiting receivers */
-    private static final Map<String, Promise> PENDING_RECEIVES = new ConcurrentHashMap<>()
+    /** Default receiver instance for static API backward compatibility */
+    private static final WebhookReceiver DEFAULT_RECEIVER = new WebhookReceiver()
     
-    /** Promise to resolve when message received */
-    private Promise<Map> receivePromise
+    static {
+        DEFAULT_RECEIVER.initialize()
+    }
 
     ReceiveTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
@@ -104,6 +129,17 @@ class ReceiveTask extends TaskBase<Map> {
     // =========================================================================
     // DSL Methods
     // =========================================================================
+    
+    /**
+     * Set the message receiver.
+     * Defaults to WebhookReceiver if not specified.
+     * 
+     * @param receiver the receiver implementation
+     */
+    void receiver(IMessageReceiver receiver) {
+        this.receiver = receiver
+        this.receiver.initialize()
+    }
     
     /**
      * Set correlation key provider.
@@ -116,6 +152,8 @@ class ReceiveTask extends TaskBase<Map> {
     /**
      * Set message filter.
      * Only messages passing this filter will be accepted.
+     * 
+     * @param filterClosure closure that returns true to accept, false to reject
      */
     void filter(Closure filterClosure) {
         this.messageFilter = filterClosure
@@ -124,9 +162,21 @@ class ReceiveTask extends TaskBase<Map> {
     /**
      * Set data extractor.
      * Transforms the received message before returning.
+     * 
+     * @param extractor closure that transforms message data
      */
     void extract(Closure extractor) {
         this.dataExtractor = extractor
+    }
+    
+    /**
+     * Set authentication check.
+     * Verifies message authenticity (e.g., webhook signature).
+     * 
+     * @param authenticator closure that returns true if authenticated
+     */
+    void authenticate(Closure authenticator) {
+        this.authenticator = authenticator
     }
     
     /**
@@ -165,140 +215,69 @@ class ReceiveTask extends TaskBase<Map> {
         log.debug("ReceiveTask($id): waiting for message with correlation ID: $correlationId")
         
         // Create promise for message reception
-        receivePromise = ctx.promiseFactory.createPromise()
+        def receivePromise = ctx.promiseFactory.createPromise()
         
-        // Register this receiver
-        PENDING_RECEIVES.put(correlationId, receivePromise)
+        // Build receive configuration
+        def config = new ReceiveConfig(
+            timeout: receiveTimeout,
+            filter: messageFilter,
+            extractor: dataExtractor,
+            authenticator: authenticator,
+            autoAction: autoAction
+        )
         
-        // Schedule timeout if configured
-        if (receiveTimeout) {
-            scheduleTimeout(correlationId)
-        }
+        // Register with receiver
+        receiver.register(correlationId, receivePromise, config)
         
         log.info("ReceiveTask($id): registered for correlation ID '$correlationId' " +
-                 "(timeout: ${receiveTimeout ?: 'none'})")
+                 "(receiver: ${receiver.receiverType}, timeout: ${receiveTimeout ?: 'none'})")
         
         return receivePromise
     }
 
     // =========================================================================
-    // Message Delivery (Static API)
+    // Static API (Backward Compatibility)
     // =========================================================================
     
     /**
      * Deliver a message to a waiting ReceiveTask.
      * Called by external systems (webhooks, message handlers, etc.)
+     * 
+     * <p>This static method delegates to the default WebhookReceiver
+     * for backward compatibility.</p>
      *
      * @param correlationId the correlation ID to match
      * @param message the message payload
      * @return true if a receiver was found and notified
      */
     static boolean deliverMessage(String correlationId, Object message) {
-        
-        log.debug("ReceiveTask: attempting to deliver message for correlation ID: $correlationId")
-        
-        Promise promise = PENDING_RECEIVES.get(correlationId)
-        
-        if (promise) {
-            try {
-                // Wrap message in standard format
-                def messageData = message instanceof Map ? message : [data: message]
-                messageData.receivedAt = System.currentTimeMillis()
-                messageData.correlationId = correlationId
-                
-                log.info("ReceiveTask: delivering message for correlation ID: $correlationId")
-                
-                promise.accept(messageData)
-                PENDING_RECEIVES.remove(correlationId)
-                
-                return true
-                
-            } catch (Exception e) {
-                log.error("ReceiveTask: error delivering message for $correlationId", e)
-                return false
-            }
-        } else {
-            log.warn("ReceiveTask: no receiver found for correlation ID: $correlationId")
-            return false
-        }
+        return WebhookReceiver.deliverMessageStatic(correlationId, message)
     }
     
     /**
      * Cancel a pending receive operation.
+     * 
+     * @param correlationId correlation ID to cancel
+     * @return true if receiver was found and cancelled
      */
     static boolean cancelReceive(String correlationId) {
-        Promise promise = PENDING_RECEIVES.remove(correlationId)
-        if (promise) {
-            log.info("ReceiveTask: cancelled receive for correlation ID: $correlationId")
-            return true
-        }
-        return false
+        return WebhookReceiver.cancelReceiveStatic(correlationId)
     }
     
     /**
      * Get count of pending receives (for monitoring).
+     * 
+     * @return number of pending receivers
      */
     static int getPendingCount() {
-        return PENDING_RECEIVES.size()
+        return WebhookReceiver.getPendingCountStatic()
     }
     
     /**
      * Clear all pending receives (for testing/cleanup).
      */
     static void clearAllPending() {
-        log.warn("ReceiveTask: clearing ${PENDING_RECEIVES.size()} pending receives")
-        PENDING_RECEIVES.clear()
-    }
-
-    // =========================================================================
-    // Timeout Handling
-    // =========================================================================
-    
-    private void scheduleTimeout(String correlationId) {
-        
-        log.debug("ReceiveTask($id): scheduling timeout for ${receiveTimeout.toMillis()}ms")
-        
-        def timer = new Timer("ReceiveTask-${id}-Timeout", true)
-        timer.schedule(new JTimerTask() {
-            @Override
-            void run() {
-                handleTimeout(correlationId)
-            }
-        }, receiveTimeout.toMillis())
-    }
-    
-    private void handleTimeout(String correlationId) {
-        
-        log.warn("ReceiveTask($id): timeout reached for correlation ID: $correlationId")
-        
-        Promise promise = PENDING_RECEIVES.remove(correlationId)
-        
-        if (promise) {
-            if (autoAction) {
-                try {
-                    def timeoutResult = autoAction.call()
-                    def result = timeoutResult instanceof Map ? timeoutResult : [data: timeoutResult]
-                    result.timeout = true
-                    result.correlationId = correlationId
-                    
-                    log.info("ReceiveTask($id): applying auto-action on timeout")
-                    promise.accept(result)
-                    
-                } catch (Exception e) {
-                    log.error("ReceiveTask($id): error in auto-action", e)
-                    promise.reject(new ReceiveTimeoutException(
-                        "ReceiveTask timeout and auto-action failed: ${e.message}", 
-                        correlationId
-                    ))
-                }
-            } else {
-                // No auto-action - reject with timeout exception
-                promise.reject(new ReceiveTimeoutException(
-                    "ReceiveTask($id): timeout waiting for message", 
-                    correlationId
-                ))
-            }
-        }
+        WebhookReceiver.clearAllPendingStatic()
     }
 
     // =========================================================================

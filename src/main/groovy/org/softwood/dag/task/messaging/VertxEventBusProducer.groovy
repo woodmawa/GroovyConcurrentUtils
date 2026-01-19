@@ -41,7 +41,7 @@ import io.vertx.core.eventbus.DeliveryOptions
  */
 @Slf4j
 @CompileStatic
-class VertxEventBusProducer implements MessageProducer {
+class VertxEventBusProducer implements IMessageProducer {
     
     private final Vertx vertx
     private volatile boolean connected = true
@@ -72,29 +72,24 @@ class VertxEventBusProducer implements MessageProducer {
     }
     
     @Override
-    Map<String, Object> send(String destination, Object message) {
-        return send(destination, null, message, [:])
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, Object message, Map<String, String> headers) {
-        return send(destination, null, message, headers)
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, String key, Object message) {
-        return send(destination, key, message, [:])
-    }
-    
-    @Override
-    Map<String, Object> send(String destination, String key, Object message, Map<String, String> headers) {
+    Map<String, Object> send(Map<String, Object> params) {
         if (!connected) {
             throw new IllegalStateException("Producer is closed")
         }
         
+        // Extract and validate parameters
+        String destination = params.destination ?: params.topic
         if (!destination) {
-            throw new IllegalArgumentException("Destination (address) cannot be null")
+            throw new IllegalArgumentException("Either 'destination' or 'topic' parameter is required")
         }
+        
+        Object message = params.message
+        if (message == null) {
+            throw new IllegalArgumentException("'message' parameter is required")
+        }
+        
+        String key = params.key
+        Map<String, String> headers = (params.headers ?: [:]) as Map<String, String>
         
         try {
             def options = new DeliveryOptions()

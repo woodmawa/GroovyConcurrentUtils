@@ -8,6 +8,34 @@ import java.time.Duration
 /**
  * SendTask - Send Messages/Events to External Systems
  *
+ * @deprecated Use {@link HttpTask} for HTTP/REST API calls instead.
+ * SendTask only implements HTTP operations and is redundant with HttpTask which provides
+ * superior functionality. Will be removed in version 2.0.0.
+ * 
+ * <p><strong>Migration Guide:</strong></p>
+ * <pre>
+ * // Before (SendTask)
+ * task("notify", TaskType.SEND) {
+ *     url "https://api.example.com/notify"
+ *     method "POST"
+ *     payload { prev -> prev }
+ * }
+ * 
+ * // After (HttpTask)
+ * httpTask("notify") {
+ *     url "https://api.example.com/notify"
+ *     method POST
+ *     body { prev -> prev }
+ * }
+ * </pre>
+ * 
+ * <p><strong>For other protocols:</strong></p>
+ * <ul>
+ *   <li>Email: Use {@link MailTask}</li>
+ *   <li>Messaging (Kafka, AMQP, EventBus): Use {@link MessagingTask}</li>
+ *   <li>SMS/RCS: Coming soon - SmsTask</li>
+ * </ul>
+ *
  * Sends messages to external systems via various protocols (HTTP, messaging, etc.).
  * Does not wait for responses - use ReceiveTask to handle async responses.
  *
@@ -54,6 +82,7 @@ import java.time.Duration
  * }
  * </pre>
  */
+@Deprecated
 @Slf4j
 class SendTask extends TaskBase<Map> {
 

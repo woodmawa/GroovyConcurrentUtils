@@ -1,4 +1,4 @@
-package examples
+package org.softwood.dag.task.sql.examples
 
 import org.softwood.dag.TaskGraph
 import org.softwood.dag.task.sql.JdbcSqlProvider

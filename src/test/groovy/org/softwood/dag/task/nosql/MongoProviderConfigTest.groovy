@@ -14,7 +14,7 @@ class MongoProviderConfigTest extends Specification {
         then:
         provider != null
         provider.connectionString == 'mongodb://localhost:27017'
-        provider.databaseName == 'test'
+        provider.database == 'test'
     }
     
     def "should allow config overrides"() {
@@ -27,6 +27,6 @@ class MongoProviderConfigTest extends Specification {
         then:
         provider != null
         provider.connectionString == 'mongodb://prodserver:27017'
-        provider.databaseName == 'production'
+        provider.database == 'production'
     }
 }

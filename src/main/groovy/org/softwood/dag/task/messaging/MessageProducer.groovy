@@ -3,6 +3,18 @@ package org.softwood.dag.task.messaging
 /**
  * Interface for message producers - enables pluggable messaging systems.
  * 
+ * @deprecated Use {@link IMessageProducer} instead. This interface has been renamed
+ * to follow project naming conventions (I prefix for interfaces). Will be removed in v2.0.0.
+ * 
+ * <p><strong>Migration:</strong></p>
+ * <pre>
+ * // Before
+ * MessageProducer producer = new InMemoryProducer()
+ * 
+ * // After  
+ * IMessageProducer producer = new InMemoryProducer()
+ * </pre>
+ * 
  * <p><strong>ZERO DEPENDENCIES:</strong> This interface is always available.
  * Concrete implementations (Kafka, AMQP, Vert.x) require their respective libraries.</p>
  * 
@@ -35,6 +47,7 @@ package org.softwood.dag.task.messaging
  * 
  * @since 2.1.0
  */
+@Deprecated
 interface MessageProducer {
     
     /**

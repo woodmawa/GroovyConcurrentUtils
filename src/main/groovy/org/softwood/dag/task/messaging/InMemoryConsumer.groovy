@@ -16,7 +16,7 @@ import java.util.Arrays
  */
 @Slf4j
 @CompileStatic
-class InMemoryConsumer implements MessageConsumer {
+class InMemoryConsumer implements IMessageConsumer {
     
     private final Set<String> subscriptions = Collections.synchronizedSet(new HashSet<>())
     private volatile boolean connected = true

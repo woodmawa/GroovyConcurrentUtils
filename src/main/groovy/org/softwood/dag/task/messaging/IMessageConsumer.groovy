@@ -3,18 +3,6 @@ package org.softwood.dag.task.messaging
 /**
  * Interface for message consumers - enables pluggable messaging systems.
  * 
- * @deprecated Use {@link IMessageConsumer} instead. This interface has been renamed
- * to follow project naming conventions (I prefix for interfaces). Will be removed in v2.0.0.
- * 
- * <p><strong>Migration:</strong></p>
- * <pre>
- * // Before
- * MessageConsumer consumer = new InMemoryConsumer()
- * 
- * // After  
- * IMessageConsumer consumer = new InMemoryConsumer()
- * </pre>
- * 
  * <p><strong>ZERO DEPENDENCIES:</strong> This interface is always available.
  * Concrete implementations (Kafka, AMQP, Vert.x) require their respective libraries.</p>
  * 
@@ -28,8 +16,7 @@ package org.softwood.dag.task.messaging
  * 
  * @since 2.1.0
  */
-@Deprecated
-interface MessageConsumer {
+interface IMessageConsumer {
     
     /**
      * Subscribe to one or more topics/queues.

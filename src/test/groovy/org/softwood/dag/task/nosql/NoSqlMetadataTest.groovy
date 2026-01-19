@@ -20,7 +20,7 @@ class NoSqlMetadataTest extends Specification {
     def setup() {
         provider = new MongoProvider(
             connectionString: "mongodb://localhost:27017",
-            databaseName: "testdb"
+            database: "testdb"
         )
         provider.initialize()
     }

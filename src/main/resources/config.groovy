@@ -118,6 +118,144 @@ database {
         username = 'root'
         password = ''
     }
+    
+    // H2 defaults (in-memory for testing)
+    h2 {
+        databaseName = 'test'
+        inMemory = true
+        username = 'sa'
+        password = ''
+    }
+    
+    // AWS DynamoDB defaults
+    dynamodb {
+        region = 'us-east-1'
+        accessKeyId = ''
+        secretAccessKey = ''
+        endpointUrl = ''  // For local testing
+        connectionTimeout = 10000
+        requestTimeout = 30000
+    }
+    
+    // Azure CosmosDB defaults
+    cosmosdb {
+        endpoint = ''
+        key = ''
+        database = ''
+        consistencyLevel = 'SESSION'
+        connectionMode = 'DIRECT'
+        maxRetryAttempts = 3
+        requestTimeout = 60
+    }
+
+    firestore {
+        projectId = '' //# GCP Project ID (required)
+        key = ''
+        databaseId = "(default)"  //# Firestore database ID
+        credentialsPath = '' // Path to service account JSON (optional - uses default credentials if not provided)
+        emulatorHost = '' // e.g., localhost:8080 for local Firestore emulator
+        connectionTimeout  = 30000
+        requestTimeout = 60000
+    }
+
+    // Google Cloud SQL defaults
+    googlecloudsql {
+        instanceConnectionName = ''  // Format: project:region:instance
+        databaseType = 'postgresql'  // Options: postgresql, mysql, sqlserver
+        database = 'postgres'
+        username = 'postgres'
+        password = ''
+        schema = 'public'  // PostgreSQL/SQL Server only
+        enableIamAuth = false  // Use IAM database authentication
+        credentialsPath = ''  // Path to service account JSON
+        poolSize = 1  // 1 = no pooling
+        maxPoolSize = 10
+        connectionTimeout = 30  // seconds
+        idleTimeout = 600  // seconds (10 minutes)
+        logQueries = false
+        // Optional: Direct TCP/IP (not recommended for production)
+        host = ''
+        port = null
+    }
+}
+
+// Messaging Configuration
+messaging {
+    // RabbitMQ (AMQP)
+    rabbitmq {
+        host = 'localhost'
+        port = 5672
+        username = 'guest'
+        password = 'guest'
+        virtualHost = '/'
+        exchange = ''
+        exchangeType = 'direct'  // direct, fanout, topic, headers
+        durable = true
+        autoAck = false
+    }
+    
+    // Apache Kafka
+    kafka {
+        bootstrapServers = 'localhost:9092'
+        clientId = 'kafka-producer'
+        compression = 'none'  // none, gzip, snappy, lz4, zstd
+        idempotence = true
+        acks = -1  // all replicas must acknowledge
+        retries = Integer.MAX_VALUE
+        batchSize = 16384
+        lingerMs = 0
+        bufferMemory = 33554432
+    }
+    
+    // AWS SQS
+    'aws-sqs' {
+        region = 'us-east-1'
+        accessKeyId = ''  // Optional - uses default credential chain if not provided
+        secretAccessKey = ''
+        queueUrl = ''
+        fifo = false
+        delaySeconds = 0  // 0-900 seconds
+        messageRetentionPeriod = 345600  // 4 days (in seconds)
+        visibilityTimeout = 30
+    }
+    
+    // AWS SNS
+    'aws-sns' {
+        region = 'us-east-1'
+        accessKeyId = ''  // Optional - uses default credential chain if not provided
+        secretAccessKey = ''
+        topicArn = ''
+    }
+    
+    // Azure Service Bus
+    'azure-servicebus' {
+        connectionString = ''
+        queueName = ''
+        topicName = ''
+        maxConcurrentCalls = 1
+        prefetchCount = 0
+        autoComplete = true
+    }
+    
+    // Apache ActiveMQ Artemis
+    activemq {
+        brokerUrl = 'tcp://localhost:61616'
+        username = 'admin'
+        password = 'admin'
+        queueName = ''
+        topicName = ''
+        persistent = true
+        priority = 4  // 0-9
+        sessionTransacted = false
+        acknowledgeMode = 'AUTO_ACKNOWLEDGE'
+    }
+    
+    // Vert.x Event Bus (uses existing Vert.x dependency)
+    'vertx-eventbus' {
+        publishMode = false  // false = send (point-to-point), true = publish (broadcast)
+        clustered = false
+        localOnly = true
+    }
 }
 
 //one of "DATAFLOW" | "VERTX" | "COMPLETABLE_FUTURE"

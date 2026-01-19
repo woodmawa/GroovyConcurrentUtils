@@ -3,8 +3,8 @@ package org.softwood.dag.task
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import org.softwood.dag.task.messaging.InMemoryProducer
-import org.softwood.dag.task.messaging.MessageConsumer
-import org.softwood.dag.task.messaging.MessageProducer
+import org.softwood.dag.task.messaging.IMessageConsumer
+import org.softwood.dag.task.messaging.IMessageProducer
 import org.softwood.promise.Promise
 
 import java.time.Duration
@@ -55,8 +55,8 @@ import java.util.Arrays
 class MessagingTask extends TaskBase<Object> {
     
     private MessagingMode mode = MessagingMode.SEND
-    private MessageProducer producer = new InMemoryProducer()
-    private MessageConsumer consumer
+    private IMessageProducer producer = new InMemoryProducer()
+    private IMessageConsumer consumer
     private String destination
     private String key
     private Closure messageBuilder
@@ -74,7 +74,7 @@ class MessagingTask extends TaskBase<Object> {
     // DSL Configuration Methods - Send Mode
     // =========================================================================
     
-    void producer(MessageProducer producer) {
+    void producer(IMessageProducer producer) {
         this.producer = producer
         this.mode = MessagingMode.SEND
     }
@@ -103,7 +103,7 @@ class MessagingTask extends TaskBase<Object> {
     // DSL Configuration Methods - Receive Mode
     // =========================================================================
     
-    void consumer(MessageConsumer consumer) {
+    void consumer(IMessageConsumer consumer) {
         this.consumer = consumer
         this.mode = MessagingMode.RECEIVE
     }
@@ -147,9 +147,17 @@ class MessagingTask extends TaskBase<Object> {
             
             def message = messageBuilder ? messageBuilder.call(prevValue) : prevValue
             
-            def result = key 
-                ? ((MessageProducer)producer).send(destination, key, message, messageHeaders)
-                : ((MessageProducer)producer).send(destination, message, messageHeaders)
+            // Build parameters for send(Map) call
+            def sendParams = [
+                destination: destination,
+                message: message,
+                headers: messageHeaders
+            ]
+            if (key) {
+                sendParams.key = key
+            }
+            
+            def result = ((IMessageProducer)producer).send(sendParams)
             
             log.info("MessagingTask '{}': sent message to '{}' ({})", 
                 id, destination, producer.producerType)
@@ -170,7 +178,7 @@ class MessagingTask extends TaskBase<Object> {
             
             consumer.subscribe(subscriptions as String[])
             
-            List<MessageConsumer.Message> messages = maxMessages == 1
+            List<IMessageConsumer.Message> messages = maxMessages == 1
                 ? [consumer.poll(pollTimeout)].findAll { it != null }
                 : consumer.poll(maxMessages, pollTimeout)
             

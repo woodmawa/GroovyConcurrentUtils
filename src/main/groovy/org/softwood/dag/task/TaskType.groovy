@@ -48,7 +48,11 @@ enum TaskType {
     /**
      * Send task for sending messages/events to external systems.
      * Supports HTTP, webhooks, message queues, and other protocols.
+     * 
+     * @deprecated Use HTTP task for HTTP/REST, MailTask for email, MessagingTask for queues.
+     * SendTask only implements HTTP and is redundant with HttpTask. Will be removed in 2.0.0.
      */
+    @Deprecated
     SEND(SendTask, false),
 
     /**

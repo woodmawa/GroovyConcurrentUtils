@@ -1,0 +1,655 @@
+= Architecture & Design Philosophy
+
+[abstract]
+--
+This chapter explores the fundamental architecture and design principles behind TaskGraph. Understanding these concepts will help you make the most of the framework and extend it effectively.
+--
+
+== Overview
+
+TaskGraph is a workflow orchestration framework built on three core pillars:
+
+. **Type-safe DSL** - Groovy-based declarative workflow definition
+. **Asynchronous execution** - Non-blocking, promise-based execution model
+. **Composability** - Build complex workflows from simple, reusable components
+
+== Design Philosophy
+
+=== Secure by Default
+
+TaskGraph follows a "secure by default" philosophy where security controls are enabled automatically:
+
+* Script sandboxing enabled by default
+* File access restricted to approved directories
+* HTTP requests validate URLs and block SSRF attacks
+* Credentials never hardcoded, always from secure sources
+
+[source,groovy]
+----
+scriptTask("process-data") {
+    sandboxed true  // ✅ Default - secure mode
+    script '''
+        // Safe operations allowed
+        def result = data.sum()
+        return result
+
+        // Blocked operations (throw SecurityException)
+        // "rm -rf /".execute()  // ❌ Blocked
+    '''
+}
+----
+
+=== Fail-Fast Validation
+
+Configuration errors are caught at build time, not runtime:
+
+* Type checking in DSL
+* Validation during graph construction
+* Circular dependency detection before execution
+* Missing dependency detection upfront
+
+=== Explicit Over Implicit
+
+TaskGraph favors explicitness over magic:
+
+* Dependencies explicitly declared
+* Error handling explicitly configured
+* Retry policies explicitly specified
+* No hidden auto-wiring or conventions
+
+[source,groovy]
+----
+task("validate-input") { /* ... */ }
+task("process") {
+    dependsOn "validate-input"  // ✅ Explicit dependency
+    retryPolicy {
+        maxAttempts 3              // ✅ Explicit retry config
+        delay 1000
+    }
+}
+----
+
+=== Composability First
+
+Workflows are composed from reusable building blocks:
+
+* Tasks are composable units
+* TaskCollections group related tasks
+* SubGraphs enable workflow reuse
+* Gateways enable conditional logic
+
+== Architectural Layers
+
+TaskGraph is organized in distinct layers, each with clear responsibilities:
+
+[plantuml, taskgraph-architecture, svg]
+....
+@startuml
+!define RECTANGLE class
+
+package "Application Layer" {
+    [Workflow Definition] as WD
+    [Business Logic] as BL
+}
+
+package "DSL Layer" {
+    [TaskGraph DSL] as DSL
+    [Task Builders] as TB
+    [Gateway DSL] as GD
+}
+
+package "Orchestration Layer" {
+    [TaskGraph] as TG
+    [TaskCollection] as TC
+    [Task Scheduler] as TS
+}
+
+package "Execution Layer" {
+    [TaskBase] as Base
+    [Concrete Tasks] as CT
+    [Task Context] as Ctx
+}
+
+package "Foundation Layer" {
+    [Promise/Future] as Promise
+    [ExecutorPool] as Pool
+    [Dataflow] as DF
+}
+
+WD --> DSL
+BL --> TB
+DSL --> TG
+TB --> Base
+GD --> TG
+TG --> TC
+TC --> TS
+TS --> Base
+Base --> CT
+CT --> Ctx
+Base --> Promise
+Promise --> Pool
+Promise --> DF
+@enduml
+....
+
+=== Layer 1: Foundation
+
+The foundation layer provides core concurrency primitives:
+
+**ExecutorPool** (`org.softwood.pool`)::
+Managed thread pools with configurable concurrency limits.
+
+**Promise/Future** (`org.softwood.promise`)::
+Non-blocking asynchronous execution with composable operations.
+
+**Dataflow** (`org.softwood.dataflow`)::
+Single-assignment variables for coordinating concurrent tasks.
+
+[source,groovy]
+----
+// Foundation primitives used internally
+def pool = ExecutorPoolFactory.defaultPool()
+def promise = Promises.task(pool) {
+    // Async work
+}
+promise.then { result ->
+    // Handle result
+}
+----
+
+=== Layer 2: Execution
+
+The execution layer implements task lifecycle and execution:
+
+**TaskBase**::
+Abstract base class providing cross-cutting concerns:
++
+* Retry logic
+* Circuit breaker
+* Timeout handling
+* Idempotency
+* Event emission
+* Error handling
+
+**Concrete Task Types**::
+Specific implementations for common operations:
++
+* `ScriptTask` - Execute scripts (sandboxed)
+* `HttpTask` - HTTP/REST calls
+* `SqlTask` - Database operations
+* `FileTask` - File operations
+* ... and 15+ more
+
+**TaskContext**::
+Execution context providing:
++
+* Variable bindings
+* Configuration access
+* Credential resolution
+* Event dispatcher
+* Shared state
+
+=== Layer 3: Orchestration
+
+The orchestration layer manages workflow execution:
+
+**TaskGraph**::
+The main workflow container:
++
+* Builds directed acyclic graph (DAG)
+* Resolves dependencies
+* Schedules task execution
+* Manages lifecycle
+* Emits graph-level events
+
+**TaskCollection**::
+Groups related tasks:
++
+* Logical grouping
+* Shared configuration
+* Collective operations
+
+**Task Scheduler**::
+Coordinates task execution:
++
+* Dependency resolution
+* Parallel execution
+* Resource management
+* Failure handling
+
+=== Layer 4: DSL
+
+The DSL layer provides declarative workflow definition:
+
+**TaskGraph DSL**::
+Fluent builder for workflow definition:
++
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("step1") { /* ... */ }
+    task("step2") {
+        dependsOn "step1"
+    }
+}
+----
+
+**Task Builders**::
+Type-safe builders for each task type:
++
+[source,groovy]
+----
+httpTask("fetch-data") {
+    url "https://api.example.com/data"
+    method POST
+    json { /* request body */ }
+}
+----
+
+**Gateway DSL**::
+Decision and routing logic:
++
+[source,groovy]
+----
+exclusiveGateway("route-by-status") {
+    condition { ctx -> ctx.status == "active" }
+    whenTrue { task("process-active") }
+    whenFalse { task("process-inactive") }
+}
+----
+
+=== Layer 5: Application
+
+The application layer is your workflow logic:
+
+* Business rules
+* Data transformations
+* Integration points
+* Custom task implementations
+
+== Core Concepts
+
+=== Directed Acyclic Graph (DAG)
+
+TaskGraph workflows are represented as DAGs:
+
+* **Nodes** are tasks
+* **Edges** are dependencies
+* **No cycles** ensures termination
+* **Multiple roots** supported (parallel entry points)
+
+[ditaa, dag-example]
+....
+    +--------+     +--------+
+    | Task A |     | Task B |
+    +--------+     +--------+
+         |             |
+         v             v
+    +--------------------+
+    |     Task C         |
+    +--------------------+
+              |
+              v
+         +--------+
+         | Task D |
+         +--------+
+....
+
+=== Task Dependencies
+
+Dependencies are explicitly declared:
+
+[source,groovy]
+----
+task("A") { /* ... */ }
+task("B") { /* ... */ }
+task("C") {
+    dependsOn "A", "B"  // C runs after A and B complete
+}
+----
+
+**Dependency types:**
+
+* **Sequential** - `dependsOn` creates ordering
+* **Parallel** - Tasks without dependencies run concurrently
+* **Conditional** - Gateways enable dynamic dependencies
+
+=== Promise-Based Execution
+
+Tasks return promises for asynchronous execution:
+
+[source,groovy]
+----
+def taskPromise = task.start()  // Returns Promise<Result>
+
+taskPromise.then { result ->
+    // Handle success
+}.onError { error ->
+    // Handle failure
+}
+
+def finalResult = taskPromise.get()  // Block until complete
+----
+
+Benefits:
+
+* **Non-blocking** - Efficient resource utilization
+* **Composable** - Chain operations with `then`, `map`, etc.
+* **Error propagation** - Automatic error handling
+* **Cancellation** - Support for cancelling work
+
+=== Event-Driven Observability
+
+TaskGraph emits events at every lifecycle stage:
+
+[source,groovy]
+----
+workflow.addListener(new GraphEventListener() {
+    void onEvent(GraphEvent event) {
+        switch (event.type) {
+            case TASK_STARTED:
+                log.info("Task started: ${event.taskEvent.taskName}")
+                break
+            case TASK_COMPLETED:
+                log.info("Task completed in ${event.taskEvent.executionTimeMs}ms")
+                break
+        }
+    }
+})
+----
+
+**Event types:**
+
+* Graph lifecycle (started, completed, failed)
+* Task lifecycle (scheduled, started, completed, failed)
+* Resilience events (circuit opened, rate limited, retrying)
+* Resource events (warnings, exhaustion)
+
+== Execution Model
+
+=== Task Lifecycle
+
+Each task progresses through defined states:
+
+....
+    NOT_STARTED
+         |
+         v
+    SCHEDULED -----> SKIPPED (if condition false)
+         |
+         v
+    RUNNING --------> RETRYING (if retry configured)
+         |               |
+         v               v
+    COMPLETED      RUNNING (retry attempt)
+         |               |
+         |               v
+         |          COMPLETED/FAILED
+         v
+    (propagate to successors)
+....
+
+=== Concurrency Control
+
+TaskGraph provides multiple levels of concurrency control:
+
+**Graph-level:**
+[source,groovy]
+----
+def graph = TaskGraph.build {
+    maxConcurrency 10  // Limit total concurrent tasks
+}
+----
+
+**Task-level:**
+[source,groovy]
+----
+task("intensive-work") {
+    concurrencyLimit 2  // Max 2 instances concurrently
+}
+----
+
+**Resource-based:**
+[source,groovy]
+----
+task("db-query") {
+    resource "database-pool", max: 5  // Semaphore on shared resource
+}
+----
+
+=== Error Handling
+
+Multi-layered error handling approach:
+
+**1. Task-level retry:**
+[source,groovy]
+----
+task("flaky-operation") {
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+        exponentialBackoff true
+    }
+}
+----
+
+**2. Circuit breaker:**
+[source,groovy]
+----
+task("external-api") {
+    circuitBreaker {
+        failureThreshold 5
+        timeout 30000
+        halfOpenAfter 60000
+    }
+}
+----
+
+**3. Fallback tasks:**
+[source,groovy]
+----
+task("primary") { /* ... */ }
+task("fallback") { /* ... */ }
+
+exclusiveGateway("try-primary") {
+    try { task("primary") }
+    onError { task("fallback") }
+}
+----
+
+**4. Graph-level handling:**
+[source,groovy]
+----
+def result = workflow.start()
+    .onError { error ->
+        // Handle graph-level failure
+        notifyOps(error)
+        rollback()
+    }
+    .get()
+----
+
+== Design Patterns
+
+=== Fork-Join Pattern
+
+Execute tasks in parallel and join results:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("fetch-users") { /* ... */ }
+    task("fetch-orders") { /* ... */ }
+    task("fetch-products") { /* ... */ }
+
+    task("aggregate") {
+        dependsOn "fetch-users", "fetch-orders", "fetch-products"
+        action { ctx ->
+            def users = ctx.taskResult("fetch-users")
+            def orders = ctx.taskResult("fetch-orders")
+            def products = ctx.taskResult("fetch-products")
+            return merge(users, orders, products)
+        }
+    }
+}
+----
+
+=== Pipeline Pattern
+
+Chain transformations sequentially:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("extract") { /* read data */ }
+    task("transform") {
+        dependsOn "extract"
+        action { ctx -> transform(ctx.prev) }
+    }
+    task("load") {
+        dependsOn "transform"
+        action { ctx -> load(ctx.prev) }
+    }
+}
+----
+
+=== Saga Pattern
+
+Distributed transaction with compensating actions:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    saga("booking-saga") {
+        step("reserve-flight") {
+            action { /* reserve */ }
+            compensate { /* cancel reservation */ }
+        }
+        step("charge-card") {
+            action { /* charge */ }
+            compensate { /* refund */ }
+        }
+        step("confirm-booking") {
+            action { /* confirm */ }
+            compensate { /* cancel */ }
+        }
+    }
+}
+----
+
+=== Conditional Routing
+
+Route based on runtime conditions:
+
+[source,groovy]
+----
+exclusiveGateway("check-priority") {
+    condition { ctx -> ctx.global("priority") == "high" }
+    whenTrue {
+        task("fast-path")
+    }
+    whenFalse {
+        task("normal-path")
+    }
+}
+----
+
+== Performance Considerations
+
+=== Graph Construction
+
+* **Lightweight** - Graph construction is fast, O(n) where n = tasks
+* **Cached** - Task instances reused across executions
+* **Immutable** - Graph structure immutable after build
+
+=== Task Execution
+
+* **Parallel by default** - Tasks run concurrently when possible
+* **Resource-aware** - Respects concurrency limits and semaphores
+* **Lazy evaluation** - Tasks only execute when dependencies met
+
+=== Memory Management
+
+* **Streaming** - Large datasets processed in chunks
+* **Cleanup** - Task results cleared after downstream tasks complete
+* **Configurable** - Result retention policy customizable
+
+[source,groovy]
+----
+task("process-large-file") {
+    streaming true  // Process in chunks
+    cleanupResults true  // Clear results after use
+}
+----
+
+== Extensibility Points
+
+TaskGraph provides multiple extension mechanisms:
+
+=== Custom Task Types
+
+Extend `TaskBase` for custom behavior:
+
+[source,groovy]
+----
+class MyCustomTask extends TaskBase<MyResult> {
+    @Override
+    protected MyResult performTask(Object previousValue) {
+        // Custom logic
+    }
+}
+----
+
+=== Custom Security Models
+
+Provide custom script base classes:
+
+[source,groovy]
+----
+scriptTask("secure-script") {
+    customScriptBaseClass MyCompanyScriptBase
+    // Your security model enforced
+}
+----
+
+=== Custom Event Listeners
+
+Implement observability integrations:
+
+[source,groovy]
+----
+class PrometheusListener implements GraphEventListener {
+    void onEvent(GraphEvent event) {
+        // Emit Prometheus metrics
+    }
+}
+----
+
+=== SPI Implementations
+
+Provide alternative implementations:
+
+* Database providers (`SqlProvider`, `NoSqlProvider`)
+* Messaging providers (`MessagingProvider`)
+* Storage providers (`ObjectStoreProvider`)
+* Serialization providers
+
+== Summary
+
+TaskGraph's architecture provides:
+
+* ✅ **Type-safe workflows** - Compile-time checking
+* ✅ **Asynchronous execution** - Efficient resource use
+* ✅ **Composable design** - Build complex from simple
+* ✅ **Secure by default** - Production-ready security
+* ✅ **Observable** - Event-driven monitoring
+* ✅ **Extensible** - SPI for custom needs
+* ✅ **Testable** - Built-in test harness
+
+The layered architecture ensures separation of concerns while maintaining flexibility for extension and customization.
+
+== Next Steps
+
+* **Chapter 2** - Learn why we chose a DSL approach
+* **Chapter 3** - Deep dive into Pool and Promise foundations
+* **Chapter 4** - Understand the Task/Collection/Graph layers

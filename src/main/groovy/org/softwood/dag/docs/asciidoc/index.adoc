@@ -1,0 +1,112 @@
+= TaskGraph Reference Guide
+Will Woodman <will.woodman@example.com>
+v2.0, 2026-01-20
+:doctype: book
+:icons: font
+:source-highlighter: rouge
+:toc: left
+:toclevels: 3
+:sectlinks:
+:sectnums:
+:stem:
+
+[preface]
+== Preface
+
+Welcome to the TaskGraph Reference Guide. This comprehensive documentation covers the architecture, design, and usage of the TaskGraph workflow orchestration framework.
+
+TaskGraph provides a powerful, type-safe DSL for building complex workflow graphs with support for:
+
+* **Declarative workflow definition** using Groovy DSL
+* **Asynchronous execution** with promises and futures
+* **Parallel processing** with configurable concurrency
+* **Error handling and retry logic** built-in at every layer
+* **Observability and monitoring** with event listeners
+* **Security by default** with sandboxed execution
+* **Extensibility** through SPI and custom implementations
+
+=== Who Should Read This Guide
+
+* **Developers** implementing workflows and data pipelines
+* **Architects** designing distributed systems
+* **DevOps Engineers** orchestrating complex operations
+* **Library Consumers** extending TaskGraph for custom needs
+
+=== How to Use This Guide
+
+This guide is structured as a progressive learning experience:
+
+. **Part I (Chapters 1-5)**: Foundation - Architecture, design philosophy, and core concepts
+. **Part II (Chapters 6-8)**: Usage - Practical guides and examples
+. **Part III (Chapters 9-10)**: Operations - Security, monitoring, and production deployment
+. **Part IV (Chapters 11-13)**: Reference - Deep dive into components and task types
+
+You can read sequentially or jump to specific chapters based on your needs.
+
+== Part I: Foundation
+
+include::chapters/01-architecture.adoc[]
+
+include::chapters/02-dsl-approach.adoc[]
+
+include::chapters/03-foundation-libraries.adoc[]
+
+include::chapters/04-layers.adoc[]
+
+include::chapters/05-extensibility.adoc[]
+
+== Part II: Usage Guide
+
+include::chapters/06-task-context.adoc[]
+
+include::chapters/07-examples.adoc[]
+
+include::chapters/08-test-harness.adoc[]
+
+== Part III: Operations
+
+include::chapters/09-security.adoc[]
+
+include::chapters/10-observability.adoc[]
+
+== Part IV: Reference
+
+include::chapters/11-taskbase.adoc[]
+
+include::chapters/12-gateways.adoc[]
+
+include::chapters/13-task-types.adoc[]
+
+[appendix]
+== Appendix A: Migration Guide
+
+Details on migrating from earlier versions.
+
+[appendix]
+== Appendix B: Performance Tuning
+
+Guidelines for optimizing TaskGraph performance.
+
+[appendix]
+== Appendix C: Troubleshooting
+
+Common issues and solutions.
+
+[appendix]
+== Appendix D: API Reference
+
+Complete API documentation (generated from source).
+
+[glossary]
+== Glossary
+
+[glossary]
+Task:: A unit of work in a workflow graph
+TaskGraph:: A directed acyclic graph (DAG) of tasks
+Promise:: A placeholder for a future value
+DSL:: Domain-Specific Language for workflow definition
+Gateway:: A decision point or fork/join in the workflow
+Circuit Breaker:: A resilience pattern to prevent cascading failures
+
+[index]
+== Index

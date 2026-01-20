@@ -25,6 +25,10 @@ import java.util.function.Supplier
  * delegated to the active {@link PromiseFactory} obtained from
  * {@link PromiseConfiguration}.</p>
  *
+ * <p><b>Note:</b> IntelliJ may show false positive warnings about duplicate type parameter 'T'.
+ * Each method declares its own method-level type parameter which is properly scoped.
+ * The code compiles and runs correctly.</p>
+ *
  * <h2>Design Goals</h2>
  * <ul>
  *   <li>Provide a simple, Groovy-friendly API for working with Promises.</li>
@@ -382,7 +386,7 @@ class Promises {
 
         if (totalPromises == 0) {
             // Return a completed promise with null for empty list
-            return newPromise(null)
+            return newPromise((T) null)
         }
 
         // For already-completed promises, try to handle synchronously
@@ -392,7 +396,7 @@ class Promises {
             for (Promise<T> p in promiseList) {
                 try {
                     // Try non-blocking get with timeout
-                    def value = p.get(0, TimeUnit.MILLISECONDS)
+                    T value = p.get(0, TimeUnit.MILLISECONDS)
                     // If we got here, this promise is already successful
                     return newPromise(value)
                 } catch (java.util.concurrent.TimeoutException e) {
@@ -414,16 +418,16 @@ class Promises {
         Set<String> errorMessages = Collections.synchronizedSet(new HashSet<String>())
         List<Throwable> errors = Collections.synchronizedList(new ArrayList<Throwable>())
 
-        promiseList.each { p ->
+        promiseList.each { Promise<T> p ->
             // Success handler - accept first successful result
-            p.onComplete { value ->
+            p.onComplete { T value ->
                 if (completed.compareAndSet(false, true)) {
                     resultPromise.accept(value)
                 }
             }
 
             // Error handler - track failures
-            p.onError { error ->
+            p.onError { Throwable error ->
                 // Deduplicate by error message to avoid counting same error twice
                 boolean isNewError = errorMessages.add(error.message)
                 if (isNewError) {
@@ -469,22 +473,22 @@ class Promises {
     static <T> Promise<List<T>> all(Iterable<Promise<T>> promises) {
         Promise<List<T>> resultPromise = newPromise()
 
-        def promiseList = promises.findAll { it != null }
-        def totalPromises = promiseList.size()
-        def results = new ArrayList(Collections.nCopies(totalPromises, null))
-        def successCount = new AtomicInteger(0)
+        List<Promise<T>> promiseList = promises.findAll { it != null }
+        int totalPromises = promiseList.size()
+        List<T> results = new ArrayList<T>(Collections.nCopies(totalPromises, (T) null))
+        AtomicInteger successCount = new AtomicInteger(0)
 
         if (totalPromises == 0) {
-            return newPromise(Collections.emptyList())
+            return newPromise(Collections.<T>emptyList())
         }
 
-        // ✅ FIX: Remove explicit types "Promise<T> p, int index"
-        promiseList.eachWithIndex { p, index ->
-            p.onError { e ->
+        // Explicit types help IntelliJ's type inference
+        promiseList.eachWithIndex { Promise<T> p, int index ->
+            p.onError { Throwable e ->
                 resultPromise.fail(e)
             }
 
-            p.onComplete { v ->
+            p.onComplete { T v ->
                 results[index] = v
                 int currentCount = successCount.incrementAndGet()
 

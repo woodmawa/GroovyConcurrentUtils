@@ -1,0 +1,878 @@
+= Security Architecture
+
+[abstract]
+--
+This chapter covers TaskGraph's comprehensive security features including script sandboxing, credential management, file system access controls, SSRF prevention, and the shared security infrastructure with ConfigBuilder. Security is enabled by default with opt-out granularity.
+--
+
+== Overview
+
+TaskGraph implements a "secure by default" architecture with multiple layers of protection:
+
+* **Script sandboxing** - Restrict dangerous operations in scripts
+* **File system security** - Control file access with allowlists
+* **Network security** - Prevent SSRF and validate URLs
+* **Credential management** - Secure credential storage and access
+* **Custom script base classes** - Organization-specific security models
+* **Audit logging** - Track security-relevant events
+* **Resource limits** - Prevent resource exhaustion
+
+[plantuml, security-architecture, svg]
+....
+@startuml
+package "Security Layer" {
+    [Script Sandbox] as Sandbox
+    [File Security] as FileSec
+    [Network Security] as NetSec
+    [Credential Manager] as CredMgr
+    [Audit Logger] as Audit
+}
+
+package "TaskBase" {
+    [SecurityConfig] as SecConfig
+}
+
+package "ConfigBuilder" {
+    [Shared Security] as SharedSec
+}
+
+Sandbox --> SecConfig
+FileSec --> SecConfig
+NetSec --> SecConfig
+CredMgr --> SecConfig
+Audit --> SecConfig
+
+SecConfig <--> SharedSec : shared implementation
+@enduml
+....
+
+== Script Sandboxing
+
+TaskGraph sandboxes Groovy scripts by default to prevent malicious code execution.
+
+=== Default Sandbox Behavior
+
+[source,groovy]
+----
+scriptTask("safe-script") {
+    // Sandboxed by default
+    script '''
+        // ✅ Allowed operations
+        def result = [1, 2, 3].collect { it * 2 }
+        println "Processing data"
+        return result
+
+        // ❌ Blocked operations (throw SecurityException)
+        // System.exit(0)                    // JVM termination blocked
+        // "rm -rf /".execute()             // Process execution blocked
+        // new File("/etc/passwd").text     // Unrestricted file access blocked
+        // new URL("file:///etc/passwd")    // Local file URL blocked
+    '''
+}
+----
+
+=== Sandbox Configuration
+
+[source,groovy]
+----
+scriptTask("custom-sandbox") {
+    sandboxed true  // Default
+
+    // Configure allowed operations
+    sandboxConfig {
+        // Allow specific packages
+        allowPackages([
+            "java.util",
+            "java.time",
+            "org.mycompany.domain"
+        ])
+
+        // Allow specific classes
+        allowClasses([
+            "java.math.BigDecimal",
+            "org.mycompany.Utils"
+        ])
+
+        // Deny specific methods
+        denyMethods([
+            "java.lang.System.exit",
+            "java.lang.Runtime.exec"
+        ])
+
+        // Allow specific methods despite package restrictions
+        allowMethods([
+            "java.io.File.exists",
+            "java.io.File.isDirectory"
+        ])
+    }
+
+    script '''
+        import java.time.LocalDate
+        import org.mycompany.domain.Customer
+
+        def today = LocalDate.now()
+        def customer = new Customer(name: "Alice")
+
+        // Allowed because configured
+        return processCustomer(customer)
+    '''
+}
+----
+
+=== Disabling Sandbox (Not Recommended)
+
+[source,groovy]
+----
+scriptTask("unsandboxed-script") {
+    sandboxed false  // ⚠️ Use with extreme caution
+
+    script '''
+        // Full Groovy access - no restrictions
+        // Only use for trusted scripts
+        def result = unsafeOperation()
+        return result
+    '''
+}
+----
+
+=== Custom Script Base Classes
+
+Provide custom security models for your organization:
+
+[source,groovy]
+----
+// Define custom base class with allowed operations
+abstract class CompanyScriptBase extends Script {
+
+    // Approved utility methods available to all scripts
+    def callApprovedAPI(String endpoint) {
+        // Internal API with authentication handled
+        def client = InternalAPIClient.withCredentials()
+        return client.get(endpoint)
+    }
+
+    def queryDataWarehouse(String sql) {
+        // Pre-approved database access
+        def ds = DataWarehouseAccess.getDataSource()
+        return executeSafely(ds, sql)
+    }
+
+    // Block dangerous operations
+    @Override
+    Object invokeMethod(String name, Object args) {
+        if (name in ['execute', 'exec', 'system']) {
+            throw new SecurityException("Process execution not allowed")
+        }
+        return super.invokeMethod(name, args)
+    }
+
+    @Override
+    void setProperty(String name, Object value) {
+        if (name.startsWith("sys")) {
+            throw new SecurityException("System property modification not allowed")
+        }
+        super.setProperty(name, value)
+    }
+}
+
+// Use in scripts
+scriptTask("company-script") {
+    customScriptBaseClass CompanyScriptBase
+
+    script '''
+        // Company-approved methods available
+        def data = queryDataWarehouse("SELECT * FROM sales")
+        def enriched = callApprovedAPI("/enrich")
+
+        return processData(data, enriched)
+    '''
+}
+----
+
+== File System Security
+
+Control file access with granular permissions.
+
+=== Allowed Directories
+
+[source,groovy]
+----
+fileTask("read-data") {
+    operation READ
+    sources(["/data/input/file.txt"])
+
+    securityConfig {
+        // Only these directories allowed
+        allowedDirectories([
+            "/data/input",
+            "/data/output",
+            "/tmp/workspace"
+        ])
+
+        // Explicitly deny directories (takes precedence)
+        deniedDirectories([
+            "/data/input/sensitive",
+            "/etc",
+            "/root"
+        ])
+    }
+}
+
+// ❌ This would throw SecurityException
+fileTask("blocked-read") {
+    operation READ
+    sources(["/etc/passwd"])  // Not in allowed directories
+
+    securityConfig {
+        allowedDirectories(["/data"])
+    }
+}
+----
+
+=== Path Traversal Prevention
+
+[source,groovy]
+----
+// TaskGraph automatically validates paths
+fileTask("safe-read") {
+    operation READ
+
+    // ❌ These paths are rejected
+    // sources(["../../../etc/passwd"])          // Path traversal
+    // sources(["/data/../../../etc/passwd"])    // Path traversal
+    // sources(["/data/input/file.txt\u0000"])  // Null byte injection
+
+    securityConfig {
+        allowedDirectories(["/data"])
+        validatePaths true  // Default: true
+        rejectPathTraversal true  // Default: true
+        rejectSymlinks false  // Default: false, set true for max security
+    }
+}
+----
+
+=== File Size Limits
+
+[source,groovy]
+----
+fileTask("size-limited") {
+    operation READ
+    sources(["/data/large-file.dat"])
+
+    securityConfig {
+        maxFileSize 100 * 1024 * 1024  // 100 MB max
+        maxTotalSize 500 * 1024 * 1024  // 500 MB total for all files
+    }
+}
+----
+
+=== File Type Validation
+
+[source,groovy]
+----
+fileTask("type-validated") {
+    operation READ
+    sources(["/data/document.pdf"])
+
+    securityConfig {
+        allowedExtensions([".pdf", ".txt", ".csv"])
+        allowedMimeTypes([
+            "application/pdf",
+            "text/plain",
+            "text/csv"
+        ])
+
+        validateMimeType true  // Check actual content, not just extension
+    }
+}
+----
+
+## Network Security
+
+Prevent SSRF (Server-Side Request Forgery) and other network attacks.
+
+=== URL Validation
+
+[source,groovy]
+----
+httpTask("safe-api-call") {
+    url "https://api.example.com/data"
+
+    securityConfig {
+        // Allowed URL patterns
+        allowedHosts([
+            "api.example.com",
+            "*.approved-domain.com",
+            "internal-api.company.local"
+        ])
+
+        // Denied patterns (takes precedence)
+        deniedHosts([
+            "localhost",
+            "127.0.0.1",
+            "169.254.169.254",  // AWS metadata service
+            "*.internal",
+            "10.*",              // Private networks
+            "172.16.*",
+            "192.168.*"
+        ])
+
+        // Protocol restrictions
+        allowedProtocols(["https"])  // Only HTTPS
+        denyInsecureProtocols true   // Block HTTP
+
+        // Port restrictions
+        allowedPorts([443, 8443])
+        denyCommonAttackPorts true   // Block 22, 23, 3389, etc.
+    }
+}
+----
+
+=== SSRF Prevention
+
+[source,groovy]
+----
+// TaskGraph blocks common SSRF attack vectors
+httpTask("ssrf-protected") {
+    securityConfig {
+        preventSSRF true  // Default: true
+
+        // Automatically blocks:
+        // - Private IP ranges (10.*, 192.168.*, 172.16-31.*)
+        // - Loopback (127.*, localhost, ::1)
+        // - Link-local (169.254.*)
+        // - Cloud metadata endpoints
+        // - DNS rebinding attacks
+    }
+
+    // ❌ These would be blocked
+    // url "http://localhost:8080/admin"
+    // url "http://169.254.169.254/latest/meta-data/"
+    // url "http://192.168.1.1/router-admin"
+}
+----
+
+=== DNS Resolution Control
+
+[source,groovy]
+----
+httpTask("dns-safe") {
+    url "https://api.example.com/data"
+
+    securityConfig {
+        // Resolve and validate DNS before request
+        validateDNS true
+
+        // Reject if resolves to private IP
+        rejectPrivateIPs true
+
+        // Cache DNS results
+        dnsCacheTTL 300  // 5 minutes
+    }
+}
+----
+
+=== Request Header Control
+
+[source,groovy]
+----
+httpTask("header-controlled") {
+    url "https://api.example.com/data"
+
+    securityConfig {
+        // Deny sensitive headers
+        deniedHeaders([
+            "X-Forwarded-For",
+            "X-Real-IP",
+            "Host",
+            "Authorization"  // Use credentialId instead
+        ])
+
+        // Require specific headers
+        requiredHeaders([
+            "User-Agent",
+            "Content-Type"
+        ])
+
+        // Validate header values
+        headerValidation {
+            "User-Agent" { value -> value.length() > 0 }
+            "Content-Type" { value -> value in ["application/json", "text/plain"] }
+        }
+    }
+}
+----
+
+== Credential Management
+
+Secure credential storage and access.
+
+=== Credential Providers
+
+[source,groovy]
+----
+// Multiple credential sources supported
+def workflow = TaskGraph.build {
+    task("use-credentials") {
+        action { ctx ->
+            // Environment variables
+            def apiKey = ctx.credential("API_KEY")
+
+            // AWS Secrets Manager
+            def dbPassword = ctx.credential("aws:secretsmanager:prod/db/password")
+
+            // HashiCorp Vault
+            def sshKey = ctx.credential("vault:secret/ssh/prod")
+
+            // Azure Key Vault
+            def certificate = ctx.credential("azure:keyvault:ssl-cert")
+
+            // Use credentials
+            connectToDatabase(dbPassword)
+        }
+    }
+}
+----
+
+=== Credential Injection
+
+[source,groovy]
+----
+// Credentials automatically injected
+sqlTask("database-query") {
+    credentialId "database-credentials"  // Injected automatically
+
+    query "SELECT * FROM users WHERE id = ?"
+    parameters([userId])
+}
+
+httpTask("api-call") {
+    credentialId "api-credentials"  // Used for Bearer token auth
+
+    url "https://api.example.com/data"
+}
+----
+
+=== Credential Masking
+
+[source,groovy]
+----
+// Credentials masked in logs
+task("process") {
+    action { ctx ->
+        def password = ctx.credential("db-password")
+
+        // Logs show: "Password: ****" instead of actual value
+        log.info("Password: $password")
+
+        // Audit log shows: "Credential accessed: db-password"
+        // Not the actual credential value
+    }
+}
+----
+
+=== Credential Rotation
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Configure credential rotation
+    credentialConfig {
+        provider "vault"
+        rotationInterval 3600  // Rotate every hour
+        cacheInvalidation true
+    }
+
+    task("use-rotating-credential") {
+        action { ctx ->
+            // Always gets current credential
+            def token = ctx.credential("rotating-api-token")
+
+            callAPI(token)
+        }
+    }
+}
+----
+
+== Shared Security with ConfigBuilder
+
+TaskGraph shares security infrastructure with ConfigBuilder.
+
+=== Consistent Security Model
+
+[source,groovy]
+----
+// Same security config in both TaskGraph and ConfigBuilder
+def securityConfig = new SecurityConfig()
+securityConfig.allowedDirectories(["/data", "/config"])
+securityConfig.customScriptBaseClass(CompanyScriptBase)
+
+// Use in ConfigBuilder
+def config = ConfigBuilder.build {
+    securityConfig(securityConfig)
+
+    script '''
+        // Same security model as TaskGraph
+        def data = loadConfig()
+        return data
+    '''
+}
+
+// Use in TaskGraph
+def workflow = TaskGraph.build {
+    securityConfig(securityConfig)  // Reuse same config
+
+    scriptTask("process") {
+        script '''
+            // Same security restrictions
+            def result = processData()
+            return result
+        '''
+    }
+}
+----
+
+=== Cross-Cutting Security
+
+[source,groovy]
+----
+// Define organization-wide security
+class OrganizationSecurity {
+    static SecurityConfig standard() {
+        new SecurityConfig(
+            sandboxed: true,
+            customScriptBaseClass: CompanyScriptBase,
+            allowedDirectories: ["/data", "/config"],
+            preventSSRF: true,
+            credentialProvider: "vault"
+        )
+    }
+
+    static SecurityConfig strict() {
+        new SecurityConfig(
+            sandboxed: true,
+            customScriptBaseClass: StrictScriptBase,
+            allowedDirectories: ["/data/approved"],
+            deniedDirectories: ["/data/sensitive"],
+            preventSSRF: true,
+            rejectSymlinks: true,
+            validateMimeTypes: true,
+            credentialProvider: "vault",
+            auditAll: true
+        )
+    }
+}
+
+// Apply organization security
+def workflow = TaskGraph.build {
+    securityConfig(OrganizationSecurity.standard())
+
+    // All tasks inherit security config
+    scriptTask("task1") { script '''...''' }
+    fileTask("task2") { operation READ }
+    httpTask("task3") { url "..." }
+}
+
+// Apply strict security for sensitive workflows
+def sensitiveWorkflow = TaskGraph.build {
+    securityConfig(OrganizationSecurity.strict())
+
+    // Stricter security applied
+    scriptTask("sensitive-task") { script '''...''' }
+}
+----
+
+== Audit Logging
+
+Track security-relevant events.
+
+=== Audit Configuration
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    auditConfig {
+        enabled true
+        level "INFO"  // TRACE, DEBUG, INFO, WARN, ERROR
+
+        // What to audit
+        auditCredentialAccess true
+        auditFileAccess true
+        auditNetworkCalls true
+        auditScriptExecution true
+        auditSecurityViolations true
+
+        // Where to log
+        auditLogger "org.mycompany.security.AuditLogger"
+        auditDestination "/var/log/taskgraph/audit.log"
+
+        // Include in audit logs
+        includeContext true
+        includeStackTrace true
+        includeUserInfo true
+        includeTimestamp true
+    }
+}
+----
+
+=== Audit Events
+
+[source,groovy]
+----
+// Audit events automatically logged
+scriptTask("audited-task") {
+    script '''
+        // Logs: AUDIT [SCRIPT_EXECUTION] Task: audited-task, User: alice, Time: 2026-01-20T10:30:00
+        def result = processData()
+
+        // Logs: AUDIT [CREDENTIAL_ACCESS] Credential: api-key, Task: audited-task
+        def key = bindings.ctx.credential("api-key")
+
+        return result
+    '''
+}
+
+// Custom audit events
+task("custom-audit") {
+    action { ctx ->
+        ctx.audit("CUSTOM_EVENT", [
+            action: "data-export",
+            recordCount: 1000,
+            destination: "external-system"
+        ])
+
+        exportData()
+    }
+}
+----
+
+=== Audit Log Format
+
+[source,json]
+----
+{
+  "timestamp": "2026-01-20T10:30:00.123Z",
+  "level": "INFO",
+  "eventType": "CREDENTIAL_ACCESS",
+  "task": {
+    "id": "fetch-data",
+    "workflow": "daily-etl"
+  },
+  "user": {
+    "id": "alice",
+    "roles": ["data-engineer"]
+  },
+  "credential": {
+    "id": "database-credentials",
+    "type": "vault"
+  },
+  "context": {
+    "environment": "production",
+    "region": "us-east-1"
+  },
+  "success": true
+}
+----
+
+## Resource Limits
+
+Prevent resource exhaustion attacks.
+
+=== Memory Limits
+
+[source,groovy]
+----
+task("memory-limited") {
+    resourceLimits {
+        maxMemory 512 * 1024 * 1024  // 512 MB
+        monitorMemory true
+    }
+
+    action {
+        // TaskGraph monitors memory usage
+        // Throws OutOfMemoryException if limit exceeded
+        def largeData = processLargeDataset()
+        return largeData
+    }
+}
+----
+
+=== Execution Time Limits
+
+[source,groovy]
+----
+task("time-limited") {
+    timeout 60000  // 60 seconds max
+    hardTimeout true  // Kill thread if exceeds (use cautiously)
+
+    action {
+        longRunningOperation()
+    }
+}
+----
+
+=== Concurrency Limits
+
+[source,groovy]
+----
+TaskGraph.build {
+    // Global concurrency limit
+    maxConcurrency 50
+
+    task("api-call") {
+        // Task-level limit
+        concurrencyLimit 10
+
+        // Resource semaphore
+        resource "external-api", max: 5
+
+        action { callExternalAPI() }
+    }
+}
+----
+
+=== Rate Limiting
+
+[source,groovy]
+----
+task("rate-limited") {
+    rateLimit {
+        maxRequests 100
+        perDuration 60  // 100 requests per minute
+        unit TimeUnit.SECONDS
+    }
+
+    action {
+        callAPI()
+    }
+}
+----
+
+== Security Best Practices
+
+=== Principle of Least Privilege
+
+[source,groovy]
+----
+// ✅ Good - minimal permissions
+fileTask("read-config") {
+    operation READ
+    sources(["/config/app.yml"])
+
+    securityConfig {
+        allowedDirectories(["/config"])
+        // Only what's needed
+    }
+}
+
+// ❌ Bad - excessive permissions
+fileTask("read-config") {
+    operation READ
+    sources(["/config/app.yml"])
+
+    securityConfig {
+        allowedDirectories(["/", "/etc", "/var", "/home"])
+        // Too broad!
+    }
+}
+----
+
+=== Defense in Depth
+
+[source,groovy]
+----
+// Multiple security layers
+scriptTask("secure-task") {
+    // Layer 1: Sandboxing
+    sandboxed true
+    customScriptBaseClass CompanySecureScriptBase
+
+    // Layer 2: File restrictions
+    securityConfig {
+        allowedDirectories(["/data/approved"])
+    }
+
+    // Layer 3: Network restrictions
+    networkSecurity {
+        allowedHosts(["approved-api.company.com"])
+        preventSSRF true
+    }
+
+    // Layer 4: Resource limits
+    resourceLimits {
+        maxMemory 256 * 1024 * 1024
+        timeout 30000
+    }
+
+    // Layer 5: Audit logging
+    auditExecution true
+
+    script '''...'''
+}
+----
+
+=== Secure Defaults
+
+[source,groovy]
+----
+// TaskGraph uses secure defaults
+scriptTask("default-secure") {
+    // These are all defaults (explicit here for clarity):
+    // sandboxed true
+    // preventSSRF true
+    // validatePaths true
+    // rejectPathTraversal true
+    // auditSecurityViolations true
+
+    script '''...'''
+}
+----
+
+=== Regular Security Audits
+
+[source,groovy]
+----
+// Enable comprehensive auditing
+def workflow = TaskGraph.build {
+    auditConfig {
+        enabled true
+        level "INFO"
+        auditAll true
+    }
+
+    // Periodically review audit logs
+    task("security-review") {
+        action {
+            def violations = AuditLogAnalyzer.findViolations(
+                since: new Date() - 7  // Last 7 days
+            )
+
+            if (violations) {
+                notifySecurityTeam(violations)
+            }
+        }
+    }
+}
+----
+
+## Summary
+
+TaskGraph provides comprehensive security:
+
+* ✅ **Script sandboxing** - Prevent malicious code execution
+* ✅ **File system security** - Control file access
+* ✅ **Network security** - Prevent SSRF and validate URLs
+* ✅ **Credential management** - Secure credential access
+* ✅ **Custom base classes** - Organization-specific security
+* ✅ **Audit logging** - Track security events
+* ✅ **Resource limits** - Prevent resource exhaustion
+* ✅ **Shared with ConfigBuilder** - Consistent security model
+* ✅ **Secure by default** - Opt-out, not opt-in
+
+Security is a first-class concern in TaskGraph, enabled by default and configurable for your organization's specific needs.
+
+== Next Steps
+
+* **Chapter 6** - TaskContext security features
+* **Chapter 8** - Test security configurations
+* **Appendix** - Complete security reference

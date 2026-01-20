@@ -1,0 +1,1099 @@
+= Concrete Task Types Reference
+
+[abstract]
+--
+Complete reference for all built-in task types provided by TaskGraph. This chapter documents every concrete task implementation, its DSL features, configuration options, and usage examples.
+--
+
+== Overview
+
+TaskGraph provides 15+ concrete task types organized by category:
+
+* **Core Tasks** - ServiceTask, ScriptTask
+* **HTTP/REST** - HttpTask, RestTask, GraphQLTask
+* **Database** - SqlTask, NoSqlTask, BatchSqlTask
+* **File Operations** - FileTask, CsvTask, JsonTask, XmlTask
+* **Messaging** - MessagingTask, KafkaTask, RabbitMQTask
+* **Cloud Services** - S3Task, BlobStorageTask, LambdaTask
+* **Utilities** - DelayTask, LogTask, TransformTask
+
+== Core Tasks
+
+=== ServiceTask
+
+Generic task for executing arbitrary code.
+
+[source,groovy]
+----
+task("service-task") {
+    action { ctx ->
+        // Any custom logic
+        def input = ctx.prev
+        def result = processData(input)
+        return result
+    }
+
+    // With method reference
+    action this::myMethod
+
+    // With closure delegate
+    action { ctx ->
+        def userId = ctx.global("userId")
+        return userService.getUser(userId)
+    }
+}
+
+// Configuration
+task("configured-service") {
+    description "Process user data"
+    timeout 30000
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+    }
+
+    action { ctx ->
+        performWork()
+    }
+}
+----
+
+=== ScriptTask
+
+Execute Groovy scripts with sandboxing.
+
+[source,groovy]
+----
+scriptTask("groovy-script") {
+    language "groovy"  // Default
+    sandboxed true     // Default
+
+    script '''
+        def data = bindings.data
+        def result = data.collect { it * 2 }
+        return result
+    '''
+
+    bindings([
+        data: [1, 2, 3, 4, 5]
+    ])
+
+    // Dynamic bindings
+    bindings { ctx ->
+        [
+            userId: ctx.global("userId"),
+            data: ctx.prev
+        ]
+    }
+}
+
+// Custom script base class
+scriptTask("custom-base") {
+    customScriptBaseClass CompanyScriptBase
+
+    script '''
+        // Company-specific methods available
+        def data = queryDataWarehouse("SELECT * FROM sales")
+        return processData(data)
+    '''
+}
+
+// JavaScript (via GraalVM)
+scriptTask("javascript") {
+    language "javascript"
+
+    script '''
+        const data = bindings.data;
+        const result = data.map(x => x * 2);
+        return result;
+    '''
+}
+----
+
+== HTTP/REST Tasks
+
+=== HttpTask
+
+Make HTTP requests.
+
+[source,groovy]
+----
+httpTask("api-call") {
+    url "https://api.example.com/users"
+    method GET
+
+    // Headers
+    header "Authorization", "Bearer ${credential('api-token')}"
+    header "Content-Type", "application/json"
+    header "User-Agent", "TaskGraph/2.0"
+
+    headers {
+        "X-Request-ID": UUID.randomUUID().toString()
+        "X-Correlation-ID": ctx.global("correlationId")
+    }
+
+    // Query parameters
+    queryParam "page", "1"
+    queryParam "limit", "100"
+
+    queryParams([
+        page: 1,
+        limit: 100,
+        sort: "name"
+    ])
+
+    // Timeout
+    timeout 30000
+    connectTimeout 5000
+    readTimeout 10000
+
+    // Retry
+    retryPolicy {
+        maxAttempts 3
+        retryOn(IOException, SocketTimeoutException)
+    }
+
+    // SSL
+    validateSSL true
+    trustStore "/path/to/truststore.jks"
+
+    // Response handling
+    responseHandler { response ->
+        if (response.statusCode == 200) {
+            return response.body
+        } else {
+            throw new ApiException("API returned ${response.statusCode}")
+        }
+    }
+}
+
+// POST with JSON body
+httpTask("post-json") {
+    url "https://api.example.com/users"
+    method POST
+
+    json {
+        name: "Alice"
+        email: "alice@example.com"
+        age: 30
+    }
+
+    // Or from variable
+    json { ctx -> ctx.prev }
+}
+
+// Form data
+httpTask("form-post") {
+    url "https://api.example.com/submit"
+    method POST
+    contentType "application/x-www-form-urlencoded"
+
+    formData {
+        username: "alice"
+        password: credential("user-password")
+    }
+}
+
+// Multipart upload
+httpTask("file-upload") {
+    url "https://api.example.com/upload"
+    method POST
+    contentType "multipart/form-data"
+
+    multipart {
+        file "document", new File("/path/to/file.pdf")
+        field "description", "Important document"
+    }
+}
+----
+
+=== RestTask
+
+Higher-level REST API client.
+
+[source,groovy]
+----
+restTask("rest-api") {
+    baseUrl "https://api.example.com"
+    version "v1"  // Added to path: /v1/
+
+    // Authentication
+    auth {
+        bearer credential("api-token")
+        // or: basic username: "user", password: credential("password")
+        // or: oauth2 clientId: "...", clientSecret: credential("...")
+    }
+
+    // GET request
+    get("/users/${userId}")
+
+    // POST with auto-serialization
+    post("/users") {
+        body([
+            name: "Alice",
+            email: "alice@example.com"
+        ])
+    }
+
+    // PUT
+    put("/users/${userId}") {
+        body(updatedUser)
+    }
+
+    // DELETE
+    delete("/users/${userId}")
+
+    // Response deserialization
+    responseType User.class
+
+    // Error handling
+    errorHandler {
+        on(404) { response ->
+            log.warn("User not found")
+            return null
+        }
+
+        on(500..599) { response ->
+            throw new ServerException("Server error: ${response.body}")
+        }
+    }
+}
+----
+
+=== GraphQLTask
+
+Execute GraphQL queries.
+
+[source,groovy]
+----
+graphqlTask("query-users") {
+    endpoint "https://api.example.com/graphql"
+
+    query '''
+        query GetUsers($limit: Int!) {
+            users(limit: $limit) {
+                id
+                name
+                email
+                orders {
+                    id
+                    total
+                }
+            }
+        }
+    '''
+
+    variables {
+        limit: 10
+    }
+
+    // Authentication
+    header "Authorization", "Bearer ${credential('graphql-token')}"
+
+    // Response extraction
+    extractPath "data.users"
+
+    // Error handling
+    onGraphQLError { errors ->
+        errors.each { error ->
+            log.error("GraphQL error: ${error.message}")
+        }
+        throw new GraphQLException("Query failed")
+    }
+}
+
+// Mutation
+graphqlTask("create-user") {
+    endpoint "https://api.example.com/graphql"
+
+    mutation '''
+        mutation CreateUser($input: CreateUserInput!) {
+            createUser(input: $input) {
+                id
+                name
+                email
+            }
+        }
+    '''
+
+    variables { ctx ->
+        def user = ctx.prev
+        [input: [
+            name: user.name,
+            email: user.email
+        ]]
+    }
+}
+----
+
+== Database Tasks
+
+=== SqlTask
+
+Execute SQL queries.
+
+[source,groovy]
+----
+sqlTask("query-users") {
+    datasource myDataSource
+
+    query """
+        SELECT id, name, email, created
+        FROM users
+        WHERE status = ?
+          AND created > ?
+        ORDER BY created DESC
+        LIMIT ?
+    """
+
+    parameters(["active", yesterday, 100])
+
+    // Dynamic parameters
+    parameters { ctx ->
+        [
+            ctx.global("status"),
+            ctx.global("since"),
+            ctx.global("limit")
+        ]
+    }
+
+    // Row mapping
+    rowMapper { rs ->
+        [
+            id: rs.getLong("id"),
+            name: rs.getString("name"),
+            email: rs.getString("email"),
+            created: rs.getTimestamp("created")
+        ]
+    }
+
+    // Or map to class
+    rowMapper User.class
+
+    // Result processing
+    resultProcessor { rows ->
+        return rows.collect { enrichUser(it) }
+    }
+}
+
+// INSERT/UPDATE/DELETE
+sqlTask("update-user") {
+    datasource myDataSource
+
+    query """
+        UPDATE users
+        SET name = ?, email = ?, updated = NOW()
+        WHERE id = ?
+    """
+
+    parameters { ctx ->
+        def user = ctx.prev
+        [user.name, user.email, user.id]
+    }
+
+    // Check affected rows
+    validateRowCount { rowCount ->
+        if (rowCount == 0) {
+            throw new NotFoundException("User not found")
+        }
+    }
+}
+
+// Transactions
+sqlTask("transactional") {
+    datasource myDataSource
+    transactional true
+    isolationLevel SERIALIZABLE
+
+    action { ctx ->
+        // Multiple queries in transaction
+        executeUpdate("UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, fromId])
+        executeUpdate("UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, toId])
+
+        return "Transfer complete"
+    }
+
+    onError { error ->
+        // Transaction automatically rolled back
+        log.error("Transaction failed, rolled back", error)
+    }
+}
+----
+
+=== BatchSqlTask
+
+Batch database operations for performance.
+
+[source,groovy]
+----
+batchSqlTask("batch-insert") {
+    datasource myDataSource
+
+    query """
+        INSERT INTO users (name, email, created)
+        VALUES (?, ?, NOW())
+    """
+
+    // Batch data
+    batchParameters { ctx ->
+        def users = ctx.prev
+
+        users.collect { user ->
+            [user.name, user.email]
+        }
+    }
+
+    batchSize 1000  // Insert 1000 at a time
+
+    onBatchComplete { batchNum, rowsAffected ->
+        log.info("Batch ${batchNum} completed: ${rowsAffected} rows")
+    }
+}
+----
+
+=== NoSqlTask
+
+Access NoSQL databases.
+
+[source,groovy]
+----
+// MongoDB
+noSqlTask("mongo-query") {
+    provider "mongodb"
+    database "mydb"
+    collection "users"
+
+    // Find documents
+    find {
+        status: "active"
+        age: [$gt: 18]
+    }
+
+    projection {
+        _id: 1
+        name: 1
+        email: 1
+    }
+
+    sort { created: -1 }
+    limit 100
+
+    // Result mapping
+    resultType User.class
+}
+
+// MongoDB insert
+noSqlTask("mongo-insert") {
+    provider "mongodb"
+    database "mydb"
+    collection "users"
+
+    insert { ctx ->
+        ctx.prev.collect { user ->
+            [
+                name: user.name,
+                email: user.email,
+                created: new Date()
+            ]
+        }
+    }
+}
+
+// Redis
+noSqlTask("redis-cache") {
+    provider "redis"
+
+    operation SET
+    key { ctx -> "user:${ctx.global('userId')}" }
+    value { ctx -> JsonOutput.toJson(ctx.prev) }
+    ttl 3600  // 1 hour
+
+    // Or GET
+    // operation GET
+    // key { ctx -> "user:${ctx.global('userId')}" }
+}
+
+// Elasticsearch
+noSqlTask("elasticsearch") {
+    provider "elasticsearch"
+    index "users"
+
+    query {
+        bool: {
+            must: [
+                [match: [status: "active"]],
+                [range: [age: [gte: 18]]]
+            ]
+        }
+    }
+
+    size 100
+    sort [[created: "desc"]]
+}
+----
+
+== File Operation Tasks
+
+=== FileTask
+
+Read, write, copy, move files.
+
+[source,groovy]
+----
+// Read file
+fileTask("read-file") {
+    operation READ
+    sources(["/data/input/file.txt"])
+
+    securityConfig {
+        allowedDirectories(["/data/input"])
+        maxFileSize 10 * 1024 * 1024  // 10 MB
+    }
+
+    encoding "UTF-8"
+
+    // Process content
+    contentProcessor { content ->
+        return content.toUpperCase()
+    }
+}
+
+// Write file
+fileTask("write-file") {
+    operation WRITE
+    destination "/data/output/result.txt"
+
+    content { ctx ->
+        JsonOutput.prettyPrint(JsonOutput.toJson(ctx.prev))
+    }
+
+    securityConfig {
+        allowedDirectories(["/data/output"])
+    }
+
+    overwrite true
+    createDirectories true
+}
+
+// Copy files
+fileTask("copy-files") {
+    operation COPY
+    sources(["/data/input/*.txt"])
+    destination "/data/archive/"
+
+    preserveTimestamp true
+    overwriteExisting false
+}
+
+// Move files
+fileTask("move-files") {
+    operation MOVE
+    sources(["/data/temp/*.dat"])
+    destination "/data/processed/"
+
+    atomicMove true
+}
+
+// Delete files
+fileTask("cleanup") {
+    operation DELETE
+    sources(["/data/temp/*"])
+
+    securityConfig {
+        allowedDirectories(["/data/temp"])
+    }
+}
+----
+
+=== CsvTask
+
+Read and write CSV files.
+
+[source,groovy]
+----
+// Read CSV
+csvTask("read-csv") {
+    operation READ
+    source "/data/customers.csv"
+
+    headers true  // First row is headers
+    delimiter ","
+    quote '"'
+
+    // Map to objects
+    rowMapper { row ->
+        [
+            id: row[0] as Long,
+            name: row[1],
+            email: row[2]
+        ]
+    }
+
+    // Or with named columns
+    rowMapper { columns ->
+        [
+            id: columns['id'] as Long,
+            name: columns['name'],
+            email: columns['email']
+        ]
+    }
+}
+
+// Write CSV
+csvTask("write-csv") {
+    operation WRITE
+    destination "/data/output/results.csv"
+
+    headers(["ID", "Name", "Email"])
+
+    data { ctx ->
+        ctx.prev.collect { user ->
+            [user.id, user.name, user.email]
+        }
+    }
+
+    delimiter ","
+    includeHeaders true
+}
+----
+
+=== JsonTask
+
+Read and write JSON files.
+
+[source,groovy]
+----
+// Read JSON
+jsonTask("read-json") {
+    operation READ
+    source "/data/config.json"
+
+    // Deserialize to class
+    targetType Config.class
+
+    // Or process as map
+    processor { json ->
+        json.users.collect { user ->
+            processUser(user)
+        }
+    }
+}
+
+// Write JSON
+jsonTask("write-json") {
+    operation WRITE
+    destination "/data/output/result.json"
+
+    content { ctx -> ctx.prev }
+
+    prettyPrint true
+    serializeNulls false
+}
+----
+
+=== XmlTask
+
+Read and write XML files.
+
+[source,groovy]
+----
+// Read XML
+xmlTask("read-xml") {
+    operation READ
+    source "/data/data.xml"
+
+    // XPath query
+    xpath "//user[@status='active']"
+
+    // Map to objects
+    nodeMapper { node ->
+        [
+            id: node.'@id'.text(),
+            name: node.name.text(),
+            email: node.email.text()
+        ]
+    }
+}
+
+// Write XML
+xmlTask("write-xml") {
+    operation WRITE
+    destination "/data/output/result.xml"
+
+    root "users"
+
+    content { ctx ->
+        ctx.prev.collect { user ->
+            [
+                '@id': user.id,
+                name: user.name,
+                email: user.email
+            ]
+        }
+    }
+
+    prettyPrint true
+}
+----
+
+== Messaging Tasks
+
+=== MessagingTask
+
+Send and receive messages.
+
+[source,groovy]
+----
+// Send message
+messagingTask("send-message") {
+    provider "rabbitmq"
+    operation SEND
+
+    destination "orders.queue"
+
+    message { ctx ->
+        [
+            orderId: ctx.global("orderId"),
+            customer: ctx.prev,
+            timestamp: new Date()
+        ]
+    }
+
+    headers {
+        "Content-Type": "application/json"
+        "X-Message-ID": UUID.randomUUID().toString()
+    }
+
+    persistent true
+    priority 5
+}
+
+// Receive message
+messagingTask("receive-message") {
+    provider "rabbitmq"
+    operation RECEIVE
+
+    source "orders.queue"
+
+    timeout 30000  // Wait max 30s
+
+    messageHandler { message ->
+        processOrder(message.body)
+    }
+}
+----
+
+=== KafkaTask
+
+Apache Kafka operations.
+
+[source,groovy]
+----
+// Produce to Kafka
+kafkaTask("produce") {
+    operation PRODUCE
+
+    topic "user-events"
+    key { ctx -> ctx.global("userId") }
+
+    message { ctx ->
+        [
+            event: "USER_CREATED",
+            userId: ctx.global("userId"),
+            data: ctx.prev,
+            timestamp: System.currentTimeMillis()
+        ]
+    }
+
+    partition 0  // Optional
+    headers {
+        "event-type": "user.created"
+    }
+
+    // Delivery semantics
+    acks "all"
+    retries 3
+}
+
+// Consume from Kafka
+kafkaTask("consume") {
+    operation CONSUME
+
+    topics(["user-events", "order-events"])
+    groupId "taskgraph-consumer"
+
+    pollDuration 1000  // 1 second
+    maxRecords 100
+
+    recordHandler { record ->
+        log.info("Consumed: ${record.topic()}-${record.partition()}-${record.offset()}")
+        processRecord(record.value())
+    }
+
+    commitSync true
+}
+----
+
+== Cloud Service Tasks
+
+=== S3Task
+
+AWS S3 operations.
+
+[source,groovy]
+----
+// Upload to S3
+s3Task("upload") {
+    operation PUT
+
+    bucket "my-bucket"
+    key { ctx -> "uploads/${ctx.global('userId')}/file.txt" }
+
+    content { ctx -> ctx.prev }
+
+    // Metadata
+    metadata {
+        "Content-Type": "text/plain"
+        "user-id": ctx.global("userId")
+    }
+
+    // Server-side encryption
+    encryption "AES256"
+
+    // Storage class
+    storageClass "STANDARD_IA"
+}
+
+// Download from S3
+s3Task("download") {
+    operation GET
+
+    bucket "my-bucket"
+    key "data/file.txt"
+
+    // Process content
+    contentHandler { inputStream ->
+        return processStream(inputStream)
+    }
+}
+
+// List S3 objects
+s3Task("list") {
+    operation LIST
+
+    bucket "my-bucket"
+    prefix "uploads/"
+
+    maxKeys 1000
+
+    // Filter results
+    filter { summary ->
+        summary.size > 0 &&
+        summary.lastModified.after(yesterday)
+    }
+}
+----
+
+=== LambdaTask
+
+Invoke AWS Lambda functions.
+
+[source,groovy]
+----
+lambdaTask("invoke-lambda") {
+    functionName "my-function"
+    functionVersion "\$LATEST"  // Or specific version
+
+    payload { ctx ->
+        [
+            userId: ctx.global("userId"),
+            data: ctx.prev
+        ]
+    }
+
+    invocationType "RequestResponse"  // Synchronous
+
+    // Async invocation
+    // invocationType "Event"
+
+    // Result handling
+    resultHandler { response ->
+        def result = JsonSlurper().parseText(response.payload)
+        return result.data
+    }
+
+    timeout 60000  // 1 minute
+}
+----
+
+== Utility Tasks
+
+=== DelayTask
+
+Introduce delays in workflow.
+
+[source,groovy]
+----
+delayTask("wait") {
+    delay 5000  // 5 seconds
+
+    // Or dynamic
+    delay { ctx ->
+        ctx.global("delayMs")
+    }
+
+    // With jitter
+    jitter 1000  // +/- 1 second
+
+    onDelay { duration ->
+        log.info("Waiting ${duration}ms")
+    }
+}
+----
+
+=== LogTask
+
+Log messages and data.
+
+[source,groovy]
+----
+logTask("log-result") {
+    level INFO
+
+    message { ctx ->
+        "Processed ${ctx.prev.size()} records"
+    }
+
+    // Structured logging
+    fields {
+        recordCount: ctx.prev.size()
+        userId: ctx.global("userId")
+        duration: ctx.prev.durationMs
+    }
+
+    logger "org.mycompany.workflows"
+}
+----
+
+=== TransformTask
+
+Transform data between tasks.
+
+[source,groovy]
+----
+transformTask("convert") {
+    transformer { ctx ->
+        def input = ctx.prev
+
+        // Transform data
+        return input.collect { item ->
+            [
+                id: item.id,
+                name: item.name.toUpperCase(),
+                processed: true,
+                timestamp: new Date()
+            ]
+        }
+    }
+
+    // Or use predefined transformers
+    transformer JsonToXml
+    // transformer CsvToJson
+    // transformer XmlToJson
+}
+----
+
+== Task Configuration Patterns
+
+=== Combining Features
+
+[source,groovy]
+----
+httpTask("comprehensive") {
+    // Identity
+    name "Fetch User Data"
+    description "Fetches user data from API"
+
+    // HTTP config
+    url "https://api.example.com/users/${userId}"
+    method GET
+    header "Authorization", "Bearer ${credential('api-token')}"
+
+    // Resilience
+    timeout 30000
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+        exponentialBackoff true
+        retryOn(IOException, TimeoutException)
+    }
+    circuitBreaker {
+        failureThreshold 5
+        timeout 30000
+    }
+
+    // Concurrency
+    concurrencyLimit 10
+    resource "api-rate-limit", max: 100
+
+    // Idempotency
+    idempotencyPolicy {
+        enabled true
+        ttl 3600
+        keyExtractor { ctx -> "fetch-user-${userId}" }
+    }
+
+    // Events
+    beforeExecute {
+        log.info("Fetching user ${userId}")
+        startTimer()
+    }
+
+    afterExecute { result ->
+        log.info("Fetched user: ${result.name}")
+        stopTimer()
+    }
+
+    onError { error ->
+        log.error("Failed to fetch user", error)
+        alertOps(error)
+    }
+
+    // Validation
+    responseHandler { response ->
+        if (response.statusCode == 200) {
+            return JsonSlurper().parseText(response.body)
+        } else if (response.statusCode == 404) {
+            return null  // User not found
+        } else {
+            throw new ApiException("API error: ${response.statusCode}")
+        }
+    }
+}
+----
+
+== Summary
+
+TaskGraph provides 15+ task types:
+
+* ✅ **Core** - ServiceTask, ScriptTask
+* ✅ **HTTP/REST** - HttpTask, RestTask, GraphQLTask
+* ✅ **Database** - SqlTask, NoSqlTask, BatchSqlTask
+* ✅ **File** - FileTask, CsvTask, JsonTask, XmlTask
+* ✅ **Messaging** - MessagingTask, KafkaTask, RabbitMQTask
+* ✅ **Cloud** - S3Task, BlobStorageTask, LambdaTask
+* ✅ **Utilities** - DelayTask, LogTask, TransformTask
+
+All tasks inherit features from TaskBase:
+* Retry logic
+* Circuit breaker
+* Timeout handling
+* Idempotency
+* Event emission
+* Error handling
+
+== Next Steps
+
+* **Chapter 7** - Task usage examples
+* **Chapter 11** - TaskBase reference
+* **Chapter 5** - Create custom task types

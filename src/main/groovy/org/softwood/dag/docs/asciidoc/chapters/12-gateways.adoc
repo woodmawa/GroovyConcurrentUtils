@@ -1,0 +1,845 @@
+= Gateway Types Reference
+
+[abstract]
+--
+Complete reference for all gateway types in TaskGraph. Gateways control workflow routing, enabling conditional logic, parallel execution, and complex orchestration patterns.
+--
+
+== Overview
+
+Gateways are decision points in workflows that control execution paths. TaskGraph provides several gateway types:
+
+* **Exclusive Gateway** - XOR logic, one path taken
+* **Parallel Gateway** - AND logic, all paths taken
+* **Inclusive Gateway** - OR logic, multiple paths conditionally
+* **Event Gateway** - Event-based routing
+* **Complex Gateway** - Custom routing logic
+
+== Exclusive Gateway
+
+Takes exactly one path based on conditions (XOR).
+
+=== Basic Usage
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("check-value") {
+        action { fetchValue() }
+    }
+
+    exclusiveGateway("route") {
+        dependsOn "check-value"
+
+        condition { ctx ->
+            ctx.prev > 100
+        }
+
+        whenTrue {
+            task("high-value") {
+                action { processHighValue() }
+            }
+        }
+
+        whenFalse {
+            task("low-value") {
+                action { processLowValue() }
+            }
+        }
+    }
+}
+----
+
+=== Multiple Conditions
+
+[source,groovy]
+----
+exclusiveGateway("classify") {
+    dependsOn "check-status"
+
+    // Evaluated in order, first match taken
+    when({ ctx -> ctx.prev == "urgent" }) {
+        task("urgent-path") { action { handleUrgent() } }
+    }
+
+    when({ ctx -> ctx.prev == "high" }) {
+        task("high-priority") { action { handleHigh() } }
+    }
+
+    when({ ctx -> ctx.prev == "normal" }) {
+        task("normal-priority") { action { handleNormal() } }
+    }
+
+    otherwise {
+        // Default path if no conditions match
+        task("low-priority") { action { handleLow() } }
+    }
+}
+----
+
+=== Switch-Style Gateway
+
+[source,groovy]
+----
+exclusiveGateway("switch") {
+    dependsOn "get-type"
+
+    switchOn { ctx -> ctx.prev }
+
+    case("type-a") {
+        task("process-a") { action { processTypeA() } }
+    }
+
+    case("type-b") {
+        task("process-b") { action { processTypeB() } }
+    }
+
+    case("type-c") {
+        task("process-c") { action { processTypeC() } }
+    }
+
+    default {
+        task("unknown-type") { action { handleUnknown() } }
+    }
+}
+----
+
+=== Path Validation
+
+[source,groovy]
+----
+exclusiveGateway("validated") {
+    // Ensure exactly one path taken
+    strictMode true  // Throws exception if no path matches
+
+    condition { ctx -> ctx.prev > 0 }
+    whenTrue { task("positive") { action { processPositive() } } }
+    whenFalse { task("negative") { action { processNegative() } } }
+}
+----
+
+== Parallel Gateway
+
+Executes all paths in parallel (AND).
+
+=== Fork and Join
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("start") {
+        action { fetchData() }
+    }
+
+    parallelGateway("split") {
+        dependsOn "start"
+
+        // Fork: All paths execute in parallel
+        fork {
+            task("path-a") { action { processA() } }
+            task("path-b") { action { processB() } }
+            task("path-c") { action { processC() } }
+        }
+
+        // Join: Wait for all paths to complete
+        join {
+            task("merge") {
+                dependsOn "path-a", "path-b", "path-c"
+                action { ctx ->
+                    def results = [
+                        ctx.taskResult("path-a"),
+                        ctx.taskResult("path-b"),
+                        ctx.taskResult("path-c")
+                    ]
+                    return mergeResults(results)
+                }
+            }
+        }
+    }
+}
+----
+
+=== Dynamic Parallel Paths
+
+[source,groovy]
+----
+parallelGateway("dynamic-split") {
+    dependsOn "get-regions"
+
+    fork { ctx ->
+        def regions = ctx.prev
+
+        // Create task for each region
+        regions.each { region ->
+            task("process-${region}") {
+                action { processRegion(region) }
+            }
+        }
+    }
+
+    join { ctx ->
+        def regions = ctx.taskResult("get-regions")
+
+        task("aggregate") {
+            dependsOn regions.collect { "process-${it}" }
+
+            action { ctx ->
+                def results = regions.collect { region ->
+                    ctx.taskResult("process-${region}")
+                }
+                return aggregateResults(results)
+            }
+        }
+    }
+}
+----
+
+=== Concurrent Execution Control
+
+[source,groovy]
+----
+parallelGateway("controlled-parallel") {
+    // Limit concurrent paths
+    maxConcurrency 5
+
+    fork {
+        // 10 paths, but only 5 run concurrently
+        (1..10).each { i ->
+            task("path-${i}") {
+                action { processPath(i) }
+            }
+        }
+    }
+
+    join {
+        task("join") {
+            dependsOn (1..10).collect { "path-${it}" }
+            action { ctx -> aggregateAll() }
+        }
+    }
+}
+----
+
+=== Timeout for Join
+
+[source,groovy]
+----
+parallelGateway("timeout-join") {
+    fork {
+        task("fast") { action { Thread.sleep(1000); "fast" } }
+        task("slow") { action { Thread.sleep(60000); "slow" } }
+    }
+
+    join {
+        // Wait max 5 seconds for all paths
+        timeout 5000
+
+        onTimeout { incompleteTasks ->
+            log.warn("Timeout waiting for: ${incompleteTasks.join(', ')}")
+            // Continue with completed tasks only
+        }
+
+        task("merge") {
+            action { ctx -> mergeCompleted() }
+        }
+    }
+}
+----
+
+== Inclusive Gateway
+
+Executes multiple paths conditionally (OR).
+
+=== Basic Inclusive Gateway
+
+[source,groovy]
+----
+inclusiveGateway("multi-path") {
+    dependsOn "check-flags"
+
+    // Multiple paths can execute
+    when({ ctx -> ctx.global("sendEmail") }) {
+        task("send-email") { action { sendEmail() } }
+    }
+
+    when({ ctx -> ctx.global("sendSMS") }) {
+        task("send-sms") { action { sendSMS() } }
+    }
+
+    when({ ctx -> ctx.global("sendPush") }) {
+        task("send-push") { action { sendPush() } }
+    }
+
+    // All matching paths execute in parallel
+    join {
+        task("confirm") {
+            dependsOn "send-email", "send-sms", "send-push"
+            action { confirmNotifications() }
+        }
+    }
+}
+----
+
+=== Minimum Paths
+
+[source,groovy]
+----
+inclusiveGateway("at-least-one") {
+    minPaths 1  // At least one path must be taken
+
+    when({ ctx -> condition1(ctx) }) {
+        task("option-1") { action { processOption1() } }
+    }
+
+    when({ ctx -> condition2(ctx) }) {
+        task("option-2") { action { processOption2() } }
+    }
+
+    when({ ctx -> condition3(ctx) }) {
+        task("option-3") { action { processOption3() } }
+    }
+
+    // If no conditions match, throws exception
+}
+----
+
+=== Maximum Paths
+
+[source,groovy]
+----
+inclusiveGateway("max-two") {
+    maxPaths 2  // Max two paths can be taken
+
+    when({ ctx -> condition1(ctx) }) {
+        task("path-1") { action { process1() } }
+    }
+
+    when({ ctx -> condition2(ctx) }) {
+        task("path-2") { action { process2() } }
+    }
+
+    when({ ctx -> condition3(ctx) }) {
+        task("path-3") { action { process3() } }
+    }
+
+    // Evaluates in order, stops after 2 matches
+}
+----
+
+== Event Gateway
+
+Routes based on events (event-driven routing).
+
+=== Basic Event Gateway
+
+[source,groovy]
+----
+eventGateway("wait-for-event") {
+    dependsOn "initiate"
+
+    // Wait for one of these events
+    on("order.completed") {
+        task("process-completion") {
+            action { processCompletion() }
+        }
+    }
+
+    on("order.cancelled") {
+        task("process-cancellation") {
+            action { processCancellation() }
+        }
+    }
+
+    on("order.timeout") {
+        task("handle-timeout") {
+            action { handleTimeout() }
+        }
+    }
+
+    // First event to arrive determines path
+    timeout 60000  // Max wait time
+}
+----
+
+=== Message-Based Routing
+
+[source,groovy]
+----
+eventGateway("message-router") {
+    dependsOn "send-request"
+
+    // Route based on message type
+    onMessage("response") { message ->
+        task("handle-response") {
+            action { ctx ->
+                processResponse(message)
+            }
+        }
+    }
+
+    onMessage("error") { message ->
+        task("handle-error") {
+            action { ctx ->
+                handleError(message)
+            }
+        }
+    }
+
+    onMessage("timeout") { message ->
+        task("handle-timeout") {
+            action { ctx ->
+                handleTimeout(message)
+            }
+        }
+    }
+
+    defaultHandler {
+        task("unknown-message") {
+            action { handleUnknown() }
+        }
+    }
+}
+----
+
+=== Timer-Based Events
+
+[source,groovy]
+----
+eventGateway("timer-events") {
+    // Wait for event or timer
+    onTimer(5000) {
+        task("timeout-path") {
+            action { handleTimeout() }
+        }
+    }
+
+    on("data.ready") {
+        task("data-path") {
+            action { processData() }
+        }
+    }
+
+    // Whichever happens first
+}
+----
+
+== Complex Gateway
+
+Custom routing logic for complex scenarios.
+
+=== Custom Routing
+
+[source,groovy]
+----
+complexGateway("custom-logic") {
+    dependsOn "evaluate"
+
+    // Custom routing logic
+    route { ctx ->
+        def value = ctx.prev
+        def paths = []
+
+        if (value > 100) {
+            paths << "high-value-processing"
+        }
+
+        if (value % 2 == 0) {
+            paths << "even-number-handling"
+        }
+
+        if (isPrime(value)) {
+            paths << "prime-number-analysis"
+        }
+
+        return paths
+    }
+
+    // Define available paths
+    path("high-value-processing") {
+        task("high-value") { action { processHigh() } }
+    }
+
+    path("even-number-handling") {
+        task("even") { action { processEven() } }
+    }
+
+    path("prime-number-analysis") {
+        task("prime") { action { analyzePrime() } }
+    }
+
+    // Multiple paths may be selected
+}
+----
+
+=== State Machine Gateway
+
+[source,groovy]
+----
+complexGateway("state-machine") {
+    dependsOn "get-state"
+
+    stateMachine {
+        state("PENDING") {
+            on("approve") { transition("APPROVED") }
+            on("reject") { transition("REJECTED") }
+        }
+
+        state("APPROVED") {
+            on("ship") { transition("SHIPPED") }
+            on("cancel") { transition("CANCELLED") }
+        }
+
+        state("SHIPPED") {
+            on("deliver") { transition("DELIVERED") }
+            on("return") { transition("RETURNED") }
+        }
+
+        state("DELIVERED") {
+            // Final state
+        }
+    }
+
+    route { ctx ->
+        def currentState = ctx.prev.state
+        def event = ctx.global("event")
+
+        return getTransition(currentState, event)
+    }
+}
+----
+
+=== Weighted Routing
+
+[source,groovy]
+----
+complexGateway("weighted-route") {
+    // Weighted random selection (e.g., A/B testing)
+    weightedRoute {
+        path("variant-a", weight: 70) {  // 70% traffic
+            task("a") { action { processVariantA() } }
+        }
+
+        path("variant-b", weight: 20) {  // 20% traffic
+            task("b") { action { processVariantB() } }
+        }
+
+        path("variant-c", weight: 10) {  // 10% traffic
+            task("c") { action { processVariantC() } }
+        }
+    }
+
+    route { ctx ->
+        def random = new Random().nextInt(100)
+
+        if (random < 70) return "variant-a"
+        if (random < 90) return "variant-b"
+        return "variant-c"
+    }
+}
+----
+
+== Gateway Patterns
+
+=== Discriminator Pattern
+
+First path to complete wins, others cancelled.
+
+[source,groovy]
+----
+discriminatorGateway("race") {
+    dependsOn "start"
+
+    fork {
+        task("source-a") { action { fetchFromA() } }
+        task("source-b") { action { fetchFromB() } }
+        task("source-c") { action { fetchFromC() } }
+    }
+
+    // First to complete wins
+    discriminate FIRST_COMPLETE
+
+    onWinner { winningTask ->
+        log.info("Winner: ${winningTask.id}")
+
+        // Cancel other tasks
+        cancelOthers()
+    }
+
+    join {
+        task("continue") {
+            action { ctx ->
+                // Use result from winning task
+                processWinner(ctx.prev)
+            }
+        }
+    }
+}
+----
+
+=== N-out-of-M Join
+
+Continue when N out of M paths complete.
+
+[source,groovy]
+----
+parallelGateway("n-out-of-m") {
+    fork {
+        task("task-1") { action { fetch1() } }
+        task("task-2") { action { fetch2() } }
+        task("task-3") { action { fetch3() } }
+        task("task-4") { action { fetch4() } }
+        task("task-5") { action { fetch5() } }
+    }
+
+    join {
+        // Continue when 3 out of 5 complete
+        threshold 3
+
+        onThresholdMet { completedTasks ->
+            log.info("3 tasks completed: ${completedTasks.join(', ')}")
+
+            // Cancel remaining tasks
+            cancelRemaining()
+        }
+
+        task("continue") {
+            action { ctx ->
+                // Process results from completed tasks
+                processCompleted(completedTasks)
+            }
+        }
+    }
+}
+----
+
+=== Synchronizing Merge
+
+Wait for all instances of a repeating task.
+
+[source,groovy]
+----
+synchronizingMergeGateway("sync") {
+    // Wait for all parallel instances
+    waitFor {
+        (1..10).collect { "process-batch-${it}" }
+    }
+
+    // All must complete before continuing
+    merge {
+        task("aggregate") {
+            action { ctx ->
+                def results = (1..10).collect { i ->
+                    ctx.taskResult("process-batch-${i}")
+                }
+                return aggregateResults(results)
+            }
+        }
+    }
+}
+----
+
+== Gateway Error Handling
+
+=== Error in Path
+
+[source,groovy]
+----
+exclusiveGateway("error-handled") {
+    condition { ctx -> ctx.prev > 0 }
+
+    whenTrue {
+        task("positive") {
+            action { processPositive() }
+
+            onError { error ->
+                // Handle error in this path
+                log.error("Positive path failed", error)
+                ctx.emit(new PathErrorEvent("positive", error))
+            }
+        }
+    }
+
+    whenFalse {
+        task("negative") {
+            action { processNegative() }
+        }
+    }
+
+    // Gateway continues even if one path fails
+    continueOnError true
+}
+----
+
+=== Gateway Timeout
+
+[source,groovy]
+----
+parallelGateway("timeout-handling") {
+    fork {
+        task("fast") { action { fastOperation() } }
+        task("slow") { action { slowOperation() } }
+    }
+
+    join {
+        timeout 10000  // 10 seconds
+
+        onTimeout { incompleteTasks ->
+            log.warn("Timeout: ${incompleteTasks.join(', ')}")
+
+            // Handle timeout
+            incompleteTasks.each { task ->
+                task.cancel()
+            }
+
+            // Continue with completed tasks
+            return CONTINUE
+        }
+
+        task("merge") {
+            action { mergeAvailable() }
+        }
+    }
+}
+----
+
+== Gateway Observability
+
+=== Gateway Events
+
+[source,groovy]
+----
+exclusiveGateway("monitored") {
+    onEvaluate { condition, result ->
+        log.info("Condition evaluated: ${result}")
+        metricsCollector.recordGatewayDecision(gateway.id, result)
+    }
+
+    onPathSelected { path ->
+        log.info("Path selected: ${path.id}")
+        metricsCollector.recordPathSelection(gateway.id, path.id)
+    }
+
+    condition { ctx -> ctx.prev > 100 }
+    whenTrue { task("high") { action { processHigh() } } }
+    whenFalse { task("low") { action { processLow() } } }
+}
+----
+
+=== Gateway Metrics
+
+[source,groovy]
+----
+def gateway = workflow.getGateway("my-gateway")
+
+// Access gateway metrics
+def metrics = gateway.getMetrics()
+
+println "Evaluations: ${metrics.evaluationCount}"
+println "Path selections: ${metrics.pathSelections}"
+println "Avg decision time: ${metrics.avgDecisionTimeMs}ms"
+
+metrics.pathSelections.each { path, count ->
+    println "  ${path}: ${count} times (${count/metrics.evaluationCount * 100}%)"
+}
+----
+
+== Best Practices
+
+=== Use Exclusive for Mutually Exclusive Paths
+
+[source,groovy]
+----
+// ✅ Good - use exclusive gateway
+exclusiveGateway("xor") {
+    condition { ctx -> ctx.prev > 0 }
+    whenTrue { task("positive") { action { processPositive() } } }
+    whenFalse { task("negative") { action { processNegative() } } }
+}
+
+// ❌ Bad - don't use inclusive for XOR logic
+inclusiveGateway("bad-xor") {
+    // Only one should execute, but inclusive allows both
+}
+----
+
+=== Always Provide Default Path
+
+[source,groovy]
+----
+// ✅ Good - has default path
+exclusiveGateway("safe") {
+    when({ ctx -> condition1(ctx) }) { task("path-1") { action { process1() } } }
+    when({ ctx -> condition2(ctx) }) { task("path-2") { action { process2() } } }
+    otherwise { task("default") { action { processDefault() } } }
+}
+
+// ❌ Bad - no default, could fail
+exclusiveGateway("unsafe") {
+    when({ ctx -> condition1(ctx) }) { task("path-1") { action { process1() } } }
+    // What if condition1 is false?
+}
+----
+
+=== Use Parallel for Independent Paths
+
+[source,groovy]
+----
+// ✅ Good - parallel for independent work
+parallelGateway("parallel") {
+    fork {
+        task("fetch-users") { action { fetchUsers() } }
+        task("fetch-orders") { action { fetchOrders() } }
+    }
+}
+
+// ❌ Bad - sequential for independent work
+task("fetch-users") { action { fetchUsers() } }
+task("fetch-orders") {
+    dependsOn "fetch-users"  // Unnecessary dependency!
+    action { fetchOrders() }
+}
+----
+
+=== Set Timeouts for Joins
+
+[source,groovy]
+----
+// ✅ Good - has timeout
+parallelGateway("safe-join") {
+    fork { /* ... */ }
+    join {
+        timeout 30000
+        task("merge") { action { merge() } }
+    }
+}
+
+// ❌ Bad - no timeout, could wait forever
+parallelGateway("unsafe-join") {
+    fork { /* ... */ }
+    join {
+        // No timeout!
+        task("merge") { action { merge() } }
+    }
+}
+----
+
+## Summary
+
+TaskGraph provides comprehensive gateway types:
+
+* ✅ **Exclusive** - XOR logic, one path taken
+* ✅ **Parallel** - AND logic, all paths taken concurrently
+* ✅ **Inclusive** - OR logic, multiple conditional paths
+* ✅ **Event** - Event-driven routing
+* ✅ **Complex** - Custom routing logic
+* ✅ **Patterns** - Discriminator, N-out-of-M, synchronizing
+* ✅ **Error handling** - Path errors and timeouts
+* ✅ **Observability** - Events and metrics
+
+Gateways enable sophisticated workflow routing and orchestration patterns.
+
+== Next Steps
+
+* **Chapter 7** - Gateway usage examples
+* **Chapter 4** - Gateways in workflow architecture
+* **Chapter 13** - Combine gateways with task types

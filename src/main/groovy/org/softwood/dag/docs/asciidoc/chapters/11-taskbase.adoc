@@ -1,0 +1,919 @@
+= TaskBase Reference
+
+[abstract]
+--
+Complete reference for TaskBase, the abstract base class that provides cross-cutting concerns for all tasks. This chapter documents every feature, method, and configuration option available to task implementations.
+--
+
+== Overview
+
+TaskBase is the foundation of all tasks in TaskGraph, providing:
+
+* **Lifecycle management** - Start, pause, cancel, resume
+* **Retry logic** - Configurable retry policies
+* **Circuit breaker** - Fault tolerance
+* **Timeout handling** - Execution time limits
+* **Idempotency** - Prevent duplicate executions
+* **Event emission** - Lifecycle events
+* **Error handling** - Comprehensive error management
+* **Result management** - Async result handling
+
+== Class Hierarchy
+
+[source,groovy]
+----
+abstract class TaskBase<T> implements Task<T> {
+    // Core identity
+    String id
+    String name
+    String description
+
+    // Execution context
+    TaskContext context
+
+    // Dependencies
+    List<TaskBase> predecessors = []
+    List<TaskBase> successors = []
+
+    // State
+    TaskState state = NOT_STARTED
+    DataflowVariable<T> result = new DataflowVariable<T>()
+
+    // Resilience
+    RetryPolicy retryPolicy
+    CircuitBreaker circuitBreaker
+    TimeoutPolicy timeoutPolicy
+    IdempotencyPolicy idempotencyPolicy
+
+    // Concurrency
+    ExecutorPool executorPool
+    Semaphore resourceSemaphore
+
+    // Metrics
+    long startTime
+    long endTime
+    int attemptCount
+    List<Throwable> errors = []
+
+    // Template method - subclasses implement
+    protected abstract T performTask(Object previousValue)
+}
+----
+
+== Core Properties
+
+=== Identity
+
+[source,groovy]
+----
+// Unique identifier (required)
+task.id = "my-task"
+
+// Human-readable name
+task.name = "Process User Data"
+
+// Optional description
+task.description = "Fetches and processes user data from API"
+
+// Tags for grouping/filtering
+task.tags = ["etl", "users", "production"]
+
+// Custom metadata
+task.metadata = [
+    owner: "data-team",
+    sla: "5min",
+    criticality: "high"
+]
+----
+
+=== State Management
+
+[source,groovy]
+----
+// Task states
+enum TaskState {
+    NOT_STARTED,      // Initial state
+    SCHEDULED,        // Scheduled for execution
+    WAITING_DEPENDENCIES,  // Waiting for predecessors
+    READY,            // Ready to execute
+    RUNNING,          // Currently executing
+    COMPLETED,        // Successfully completed
+    FAILED,           // Failed
+    SKIPPED,          // Skipped (condition false)
+    CANCELLED,        // Cancelled
+    RETRYING,         // Retrying after failure
+    PAUSED            // Paused
+}
+
+// Check state
+if (task.state == RUNNING) {
+    println "Task is running"
+}
+
+// State transitions emit events
+task.on(TaskStateChanged.class) { event ->
+    println "${event.taskId} changed from ${event.oldState} to ${event.newState}"
+}
+----
+
+== Lifecycle Methods
+
+=== Starting Execution
+
+[source,groovy]
+----
+// Start execution (returns Promise)
+Promise<T> start()
+
+// Example
+def promise = task.start()
+
+promise.then { result ->
+    println "Task completed: $result"
+}.onError { error ->
+    println "Task failed: $error"
+}
+
+// Or block for result
+def result = task.start().get()
+----
+
+=== Pausing and Resuming
+
+[source,groovy]
+----
+// Pause execution (if pausable)
+task.pause()
+
+// Resume execution
+task.resume()
+
+// Check if paused
+if (task.isPaused()) {
+    task.resume()
+}
+
+// Configure pausability
+task.pausable = true  // Default: false
+----
+
+=== Cancellation
+
+[source,groovy]
+----
+// Cancel execution
+task.cancel()
+
+// Check if cancelled
+if (task.isCancelled()) {
+    println "Task was cancelled"
+}
+
+// Handle cancellation
+task.onCancelled {
+    cleanup()
+    releaseResources()
+}
+----
+
+## Retry Policy
+
+Configure automatic retry on failure.
+
+=== Basic Retry Configuration
+
+[source,groovy]
+----
+task("retry-task") {
+    retryPolicy {
+        maxAttempts 3             // Max retry attempts
+        delay 1000                // Initial delay (ms)
+        exponentialBackoff true   // Exponential backoff
+        backoffMultiplier 2.0     // Backoff multiplier
+        maxDelay 60000            // Max delay (ms)
+    }
+}
+----
+
+=== Selective Retry
+
+[source,groovy]
+----
+task("selective-retry") {
+    retryPolicy {
+        maxAttempts 3
+
+        // Retry on specific exceptions
+        retryOn(IOException, TimeoutException)
+
+        // Don't retry on specific exceptions
+        abortOn(IllegalArgumentException, AuthenticationException)
+
+        // Custom retry condition
+        retryIf { error, attempt ->
+            error instanceof HttpException &&
+            error.statusCode == 503 &&  // Service unavailable
+            attempt < 5
+        }
+    }
+}
+----
+
+=== Retry Listeners
+
+[source,groovy]
+----
+task("monitored-retry") {
+    retryPolicy {
+        maxAttempts 3
+
+        onRetry { attempt, error ->
+            log.warn("Retry attempt ${attempt} after error: ${error.message}")
+            metricsCollector.incrementRetryCount(task.id)
+        }
+
+        onExhausted { error ->
+            log.error("All retry attempts exhausted", error)
+            alertOps(task.id, error)
+        }
+    }
+}
+----
+
+## Circuit Breaker
+
+Implement fault tolerance patterns.
+
+=== Basic Circuit Breaker
+
+[source,groovy]
+----
+task("protected-task") {
+    circuitBreaker {
+        failureThreshold 5          // Open after 5 failures
+        successThreshold 2          // Close after 2 successes
+        timeout 30000               // Consider failure after 30s
+        halfOpenAfter 60000         // Try again after 60s
+        resetTimeout 300000         // Full reset after 5min
+    }
+}
+----
+
+=== Circuit Breaker States
+
+[source,groovy]
+----
+// Circuit breaker states
+enum CircuitState {
+    CLOSED,       // Normal operation
+    OPEN,         // Blocking calls
+    HALF_OPEN     // Testing recovery
+}
+
+// Check circuit state
+def state = task.circuitBreaker.getState()
+
+if (state == OPEN) {
+    println "Circuit breaker is open - calls blocked"
+}
+
+// Force open/close
+task.circuitBreaker.forceOpen()
+task.circuitBreaker.forceClose()
+task.circuitBreaker.reset()
+
+// Listen to state changes
+task.circuitBreaker.onStateChange { oldState, newState ->
+    log.info("Circuit breaker ${oldState} -> ${newState}")
+    metricsCollector.recordCircuitState(task.id, newState)
+}
+----
+
+=== Fallback on Circuit Open
+
+[source,groovy]
+----
+task("circuit-with-fallback") {
+    circuitBreaker {
+        failureThreshold 3
+        timeout 30000
+
+        onOpen {
+            log.warn("Circuit opened for ${task.id}")
+        }
+
+        fallback { error ->
+            // Return cached or default value
+            log.info("Using fallback value")
+            return cachedValue ?: defaultValue
+        }
+    }
+}
+----
+
+## Timeout Policy
+
+Control execution time limits.
+
+=== Basic Timeout
+
+[source,groovy]
+----
+task("time-limited") {
+    timeout 30000  // 30 seconds
+
+    action {
+        // Must complete within 30 seconds
+        longRunningOperation()
+    }
+}
+----
+
+=== Advanced Timeout Configuration
+
+[source,groovy]
+----
+task("timeout-config") {
+    timeoutPolicy {
+        timeout 30000              // Timeout duration
+        hardTimeout false          // Don't kill thread (default)
+        interruptOnTimeout true    // Interrupt thread
+        timeoutAction FAIL         // Action: FAIL, RETRY, FALLBACK
+
+        onTimeout { duration ->
+            log.warn("Task timed out after ${duration}ms")
+            metricsCollector.recordTimeout(task.id)
+        }
+
+        fallback {
+            // Return fallback value on timeout
+            return fallbackValue
+        }
+    }
+}
+----
+
+## Idempotency Policy
+
+Prevent duplicate executions.
+
+=== Basic Idempotency
+
+[source,groovy]
+----
+task("idempotent-task") {
+    idempotencyPolicy {
+        enabled true
+        ttl 3600  // Cache for 1 hour
+
+        // Generate idempotency key
+        keyExtractor { ctx ->
+            "task:${task.id}:user:${ctx.global('userId')}"
+        }
+    }
+
+    action { ctx ->
+        // Only executes once per key within TTL
+        expensiveOperation()
+    }
+}
+----
+
+=== Custom Idempotency Store
+
+[source,groovy]
+----
+task("redis-idempotent") {
+    idempotencyPolicy {
+        enabled true
+        ttl 3600
+
+        // Custom storage (e.g., Redis)
+        store new RedisIdempotencyStore(redisClient)
+
+        keyExtractor { ctx ->
+            "workflow:${ctx.global('workflowId')}:task:${task.id}"
+        }
+
+        onDuplicate { cachedResult ->
+            log.info("Returning cached result for ${task.id}")
+            metricsCollector.incrementIdempotentHits(task.id)
+        }
+    }
+}
+----
+
+## Concurrency Control
+
+Manage parallel execution.
+
+=== Concurrency Limits
+
+[source,groovy]
+----
+task("limited-concurrency") {
+    concurrencyLimit 5  // Max 5 instances concurrently
+
+    action {
+        // Only 5 instances of this task can run at once
+        performWork()
+    }
+}
+----
+
+=== Resource Semaphores
+
+[source,groovy]
+----
+task("shared-resource") {
+    resource "database-pool", max: 10
+
+    action {
+        // Acquires semaphore permit from "database-pool"
+        // Max 10 permits available across all tasks
+        queryDatabase()
+    }
+}
+
+task("another-db-task") {
+    resource "database-pool", max: 10
+
+    action {
+        // Shares same semaphore
+        queryDatabase()
+    }
+}
+----
+
+=== Custom Executor Pool
+
+[source,groovy]
+----
+// Use custom thread pool
+def ioPool = ExecutorPoolFactory.newCachedThreadPool()
+
+task("io-bound") {
+    executorPool ioPool
+
+    action {
+        // Executes in custom pool
+        performIOOperation()
+    }
+}
+----
+
+## Conditional Execution
+
+Control whether task executes.
+
+=== Simple Condition
+
+[source,groovy]
+----
+task("conditional") {
+    condition { ctx ->
+        ctx.global("environment") == "production"
+    }
+
+    action {
+        // Only runs in production
+        sendToProductionAPI()
+    }
+}
+----
+
+=== Complex Conditions
+
+[source,groovy]
+----
+task("complex-condition") {
+    condition { ctx ->
+        def enabled = ctx.config("feature.enabled")
+        def userType = ctx.global("userType")
+        def time = LocalTime.now()
+
+        return enabled &&
+               userType == "premium" &&
+               time.hour >= 9 && time.hour < 17
+    }
+
+    onSkipped {
+        log.info("Task skipped: condition false")
+        metricsCollector.incrementSkippedTasks(task.id)
+    }
+
+    action {
+        // Only executes if condition true
+        performWork()
+    }
+}
+----
+
+## Event Handling
+
+React to task lifecycle events.
+
+=== Lifecycle Hooks
+
+[source,groovy]
+----
+task("lifecycle-hooks") {
+    // Before execution
+    beforeExecute {
+        log.info("Starting task ${task.id}")
+        startTimer()
+    }
+
+    // After successful execution
+    afterExecute { result ->
+        log.info("Task completed with result: $result")
+        stopTimer()
+        recordMetric(result)
+    }
+
+    // On any error
+    onError { error ->
+        log.error("Task failed", error)
+        alertOps(error)
+    }
+
+    // On specific error types
+    onError(IOException) { error ->
+        log.warn("IO error occurred", error)
+    }
+
+    onError(TimeoutException) { error ->
+        log.warn("Task timed out", error)
+    }
+
+    // On retry
+    onRetry { attempt, error ->
+        log.warn("Retry attempt ${attempt}", error)
+    }
+
+    // On completion (success or failure)
+    onComplete {
+        cleanup()
+        releaseResources()
+    }
+
+    // On cancellation
+    onCancelled {
+        log.info("Task cancelled")
+        rollback()
+    }
+
+    action {
+        performWork()
+    }
+}
+----
+
+=== Custom Events
+
+[source,groovy]
+----
+task("event-emitter") {
+    action { ctx ->
+        // Emit custom events
+        ctx.emit(new CustomEvent(
+            type: "DATA_PROCESSED",
+            taskId: task.id,
+            data: processedData
+        ))
+
+        // Emit progress events
+        (1..10).each { i ->
+            ctx.emit(new ProgressEvent(
+                taskId: task.id,
+                progress: i * 10,
+                message: "Processing batch ${i}/10"
+            ))
+
+            processBatch(i)
+        }
+
+        return result
+    }
+}
+----
+
+## Validation
+
+Validate task configuration.
+
+=== Built-in Validation
+
+[source,groovy]
+----
+task("validated") {
+    // Validate configuration
+    validate {
+        require(id != null, "Task ID required")
+        require(name != null, "Task name required")
+        require(predecessors.every { it != null }, "Invalid predecessor")
+
+        if (retryPolicy) {
+            require(retryPolicy.maxAttempts > 0, "Invalid max attempts")
+            require(retryPolicy.delay >= 0, "Invalid delay")
+        }
+
+        if (circuitBreaker) {
+            require(circuitBreaker.failureThreshold > 0, "Invalid failure threshold")
+        }
+    }
+}
+----
+
+=== Custom Validation
+
+[source,groovy]
+----
+class CustomTask extends TaskBase<Result> {
+    String apiUrl
+    String apiKey
+
+    @Override
+    void validate() {
+        super.validate()
+
+        if (!apiUrl) {
+            throw new ValidationException("API URL required")
+        }
+
+        if (!apiUrl.startsWith("https://")) {
+            throw new ValidationException("HTTPS required")
+        }
+
+        if (!apiKey) {
+            throw new ValidationException("API key required")
+        }
+    }
+
+    @Override
+    protected Result performTask(Object prev) {
+        // Execute task
+    }
+}
+----
+
+## Error Handling
+
+Comprehensive error management.
+
+=== Error Recovery
+
+[source,groovy]
+----
+task("error-recovery") {
+    action {
+        try {
+            return riskyOperation()
+        } catch (RecoverableException e) {
+            log.warn("Recoverable error", e)
+            return fallbackOperation()
+        }
+    }
+
+    // Automatic recovery for specific errors
+    recover(IOException) { error ->
+        log.warn("IO error, using cache", error)
+        return cachedValue
+    }
+
+    recover(TimeoutException) { error ->
+        log.warn("Timeout, using default", error)
+        return defaultValue
+    }
+}
+----
+
+=== Error Propagation
+
+[source,groovy]
+----
+task("error-propagation") {
+    // Wrap errors
+    wrapErrors true  // Wrap in TaskExecutionException
+
+    // Transform errors
+    errorTransformer { error ->
+        if (error instanceof HttpException) {
+            return new APIException("API call failed", error)
+        }
+        return error
+    }
+
+    // Suppress specific errors
+    suppressErrors(NotFoundException)
+
+    action {
+        performWork()
+    }
+}
+----
+
+## Result Management
+
+Handle task results.
+
+=== Result Transformation
+
+[source,groovy]
+----
+task("transform-result") {
+    action {
+        return fetchData()  // Returns List<User>
+    }
+
+    // Transform result
+    transformResult { users ->
+        return users.collect { user ->
+            [id: user.id, name: user.name]
+        }
+    }
+}
+----
+
+=== Result Caching
+
+[source,groovy]
+----
+task("cached-result") {
+    resultCache {
+        enabled true
+        ttl 3600  // Cache for 1 hour
+        key { ctx -> "users:${ctx.global('tenantId')}" }
+
+        // Custom cache implementation
+        cache new RedisCacheProvider(redisClient)
+
+        onCacheHit { cachedResult ->
+            log.info("Using cached result")
+            metricsCollector.incrementCacheHits(task.id)
+        }
+
+        onCacheMiss {
+            log.info("Cache miss, executing task")
+            metricsCollector.incrementCacheMisses(task.id)
+        }
+    }
+}
+----
+
+=== Result Cleanup
+
+[source,groovy]
+----
+task("large-result") {
+    cleanupResults true  // Clear after successors consume
+
+    action {
+        return new byte[100 * 1024 * 1024]  // 100 MB
+    }
+}
+
+task("consumer") {
+    dependsOn "large-result"
+
+    action { ctx ->
+        def data = ctx.prev
+        processData(data)
+
+        // "large-result" cleared from memory here
+    }
+}
+----
+
+## Metrics and Monitoring
+
+Built-in metrics collection.
+
+=== Task Metrics
+
+[source,groovy]
+----
+// Access task metrics
+def metrics = task.getMetrics()
+
+println "Execution count: ${metrics.executionCount}"
+println "Failure count: ${metrics.failureCount}"
+println "Success rate: ${metrics.successRate * 100}%"
+println "Avg duration: ${metrics.avgDurationMs}ms"
+println "Min duration: ${metrics.minDurationMs}ms"
+println "Max duration: ${metrics.maxDurationMs}ms"
+println "Total duration: ${metrics.totalDurationMs}ms"
+println "Retry count: ${metrics.retryCount}"
+println "Circuit breaker opens: ${metrics.circuitBreakerOpens}"
+println "Timeout count: ${metrics.timeoutCount}"
+----
+
+=== Custom Metrics
+
+[source,groovy]
+----
+task("custom-metrics") {
+    action { ctx ->
+        // Record custom metrics
+        ctx.recordMetric("${task.id}.records.processed", data.size())
+        ctx.recordMetric("${task.id}.processing.duration", duration)
+        ctx.recordMetric("${task.id}.memory.used", memoryUsed)
+
+        return result
+    }
+}
+
+// Export to monitoring systems
+task.metrics.export(prometheusRegistry)
+----
+
+## Best Practices
+
+=== Use Retry for Transient Failures
+
+[source,groovy]
+----
+// ✅ Good - retry transient failures
+httpTask("api-call") {
+    retryPolicy {
+        maxAttempts 3
+        retryOn(IOException, TimeoutException)
+        exponentialBackoff true
+    }
+}
+
+// ❌ Bad - retry permanent failures
+task("bad-retry") {
+    retryPolicy {
+        maxAttempts 3
+        // Will retry even for permanent errors like 404
+    }
+}
+----
+
+=== Use Circuit Breaker for External Services
+
+[source,groovy]
+----
+// ✅ Good - protect external service calls
+httpTask("external-api") {
+    circuitBreaker {
+        failureThreshold 5
+        timeout 30000
+    }
+}
+----
+
+=== Set Appropriate Timeouts
+
+[source,groovy]
+----
+// ✅ Good - reasonable timeout
+task("api-call") {
+    timeout 30000  // 30 seconds
+}
+
+// ❌ Bad - too long
+task("api-call") {
+    timeout 600000  // 10 minutes is too long for API call
+}
+----
+
+=== Clean Up Large Results
+
+[source,groovy]
+----
+// ✅ Good - clean up large data
+task("large-data") {
+    cleanupResults true
+}
+
+// ❌ Bad - keep large data in memory
+task("large-data") {
+    cleanupResults false  // Keeps 100MB in memory
+    action { new byte[100 * 1024 * 1024] }
+}
+----
+
+## Summary
+
+TaskBase provides comprehensive task infrastructure:
+
+* ✅ **Lifecycle** - Start, pause, cancel, resume
+* ✅ **Retry** - Automatic retry with backoff
+* ✅ **Circuit breaker** - Fault tolerance
+* ✅ **Timeout** - Execution time limits
+* ✅ **Idempotency** - Prevent duplicates
+* ✅ **Concurrency** - Control parallel execution
+* ✅ **Events** - Lifecycle hooks and custom events
+* ✅ **Validation** - Configuration validation
+* ✅ **Error handling** - Recovery and propagation
+* ✅ **Metrics** - Built-in monitoring
+
+All these features are available to every task through inheritance from TaskBase.
+
+== Next Steps
+
+* **Chapter 13** - Concrete task implementations
+* **Chapter 5** - Extend TaskBase for custom tasks
+* **Chapter 8** - Test TaskBase features

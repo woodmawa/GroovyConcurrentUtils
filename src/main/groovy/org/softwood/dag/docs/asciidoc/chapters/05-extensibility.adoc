@@ -1,0 +1,1059 @@
+= Extensibility Through SPI
+
+[abstract]
+--
+This chapter explores how TaskGraph leverages the Service Provider Interface (SPI) pattern to enable extensibility while providing comprehensive default implementations. You'll learn how to extend TaskGraph for custom needs while benefiting from battle-tested common capabilities.
+--
+
+== Overview
+
+TaskGraph follows a "batteries included but swappable" philosophy:
+
+* **Default implementations** - Production-ready implementations for common scenarios
+* **SPI extensibility** - Clean extension points for custom needs
+* **No vendor lock-in** - Swap implementations without code changes
+
+=== Design Philosophy
+
+**Provide Common Capabilities**::
+Most users need database access, HTTP calls, file operations, messaging, etc. TaskGraph provides these out of the box.
+
+**Enable Customization**::
+Every organization has unique requirements. SPI allows custom implementations.
+
+**Maintain Compatibility**::
+SPI contracts ensure custom implementations work seamlessly with TaskGraph.
+
+== SPI Architecture
+
+=== Core SPI Pattern
+
+TaskGraph uses Java's ServiceLoader mechanism:
+
+[plantuml, spi-pattern, svg]
+....
+@startuml
+interface Provider {
+    + String getName()
+    + int getPriority()
+    + T createInstance(Config config)
+}
+
+class "ServiceLoader<Provider>" as ServiceLoader {
+    + load(Class<Provider>)
+    + iterator()
+}
+
+class UserImplementation {
+    implements Provider
+}
+
+class DefaultImplementation {
+    implements Provider
+}
+
+Provider <|.. UserImplementation
+Provider <|.. DefaultImplementation
+ServiceLoader ..> Provider : loads
+@enduml
+....
+
+=== Provider Discovery
+
+TaskGraph automatically discovers and loads providers:
+
+[source,groovy]
+----
+// TaskGraph discovers providers at startup
+ServiceLoader<DatabaseProvider> loader =
+    ServiceLoader.load(DatabaseProvider.class)
+
+// Select provider by name or priority
+DatabaseProvider provider = loader.stream()
+    .map(ServiceLoader.Provider::get)
+    .max(Comparator.comparing(Provider::getPriority))
+    .orElse(new DefaultDatabaseProvider())
+----
+
+=== Provider Registration
+
+Register providers via `META-INF/services`:
+
+....
+src/main/resources/META-INF/services/
+    org.softwood.dag.spi.DatabaseProvider
+    org.softwood.dag.spi.MessagingProvider
+    org.softwood.dag.spi.StorageProvider
+....
+
+Example file content:
+....
+com.mycompany.CustomDatabaseProvider
+com.mycompany.CustomMessagingProvider
+....
+
+== Available SPI Extension Points
+
+=== Database Providers
+
+==== DatabaseProvider SPI
+
+[source,groovy]
+----
+interface DatabaseProvider {
+    // Provider metadata
+    String getName()
+    int getPriority()
+
+    // Connection management
+    Connection getConnection(DatabaseConfig config)
+    DataSource getDataSource(DatabaseConfig config)
+
+    // Query execution
+    <T> T executeQuery(String sql, List params, RowMapper<T> mapper)
+    int executeUpdate(String sql, List params)
+    List<Map<String, Object>> executeBatch(String sql, List<List> batchParams)
+
+    // Transaction management
+    void beginTransaction()
+    void commit()
+    void rollback()
+
+    // Health check
+    boolean isHealthy()
+}
+----
+
+==== Default Implementation
+
+TaskGraph provides a default JDBC provider:
+
+[source,groovy]
+----
+class DefaultJdbcProvider implements DatabaseProvider {
+    String getName() { "default-jdbc" }
+    int getPriority() { 0 }  // Lowest priority
+
+    Connection getConnection(DatabaseConfig config) {
+        // Standard JDBC connection
+        return DriverManager.getConnection(
+            config.url,
+            config.username,
+            config.password
+        )
+    }
+
+    <T> T executeQuery(String sql, List params, RowMapper<T> mapper) {
+        // JDBC query execution with proper resource management
+    }
+}
+----
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomOracleProvider implements DatabaseProvider {
+    String getName() { "oracle-optimized" }
+    int getPriority() { 100 }  // Higher priority
+
+    Connection getConnection(DatabaseConfig config) {
+        // Oracle-specific optimizations
+        def props = new Properties()
+        props.setProperty("oracle.net.CONNECT_TIMEOUT", "5000")
+        props.setProperty("oracle.jdbc.ReadTimeout", "30000")
+
+        return OracleDriver.getConnection(
+            config.url,
+            props
+        )
+    }
+
+    <T> T executeQuery(String sql, List params, RowMapper<T> mapper) {
+        // Oracle-specific query hints and optimizations
+        def optimizedSql = addOracleHints(sql)
+        // Execute with Oracle-specific features
+    }
+}
+----
+
+==== Usage in Tasks
+
+[source,groovy]
+----
+sqlTask("query-data") {
+    // TaskGraph automatically selects highest priority provider
+    provider "oracle-optimized"  // Or let auto-selection work
+
+    query "SELECT * FROM users WHERE id = ?"
+    parameters([userId])
+}
+----
+
+=== NoSQL Providers
+
+==== NoSqlProvider SPI
+
+[source,groovy]
+----
+interface NoSqlProvider {
+    String getName()
+    int getPriority()
+    String getType()  // "document", "key-value", "column", "graph"
+
+    // CRUD operations
+    <T> T get(String collection, String id, Class<T> type)
+    void put(String collection, String id, Object value)
+    void delete(String collection, String id)
+
+    // Query operations
+    <T> List<T> find(String collection, Query query, Class<T> type)
+    long count(String collection, Query query)
+
+    // Bulk operations
+    <T> void bulkInsert(String collection, List<T> documents)
+    void bulkUpdate(String collection, List<Update> updates)
+
+    // Index management
+    void createIndex(String collection, IndexDefinition index)
+}
+----
+
+==== Provided Implementations
+
+TaskGraph includes providers for:
+
+* **MongoDB** - Document store
+* **Redis** - Key-value store
+* **Cassandra** - Column family store
+* **Neo4j** - Graph database
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomDynamoDBProvider implements NoSqlProvider {
+    String getName() { "dynamodb" }
+    String getType() { "key-value" }
+
+    private AmazonDynamoDB client
+
+    <T> T get(String collection, String id, Class<T> type) {
+        def result = client.getItem(
+            new GetItemRequest()
+                .withTableName(collection)
+                .withKey([id: new AttributeValue(id)])
+        )
+        return mapToObject(result.item, type)
+    }
+
+    void put(String collection, String id, Object value) {
+        def item = objectToMap(value)
+        client.putItem(
+            new PutItemRequest()
+                .withTableName(collection)
+                .withItem(item)
+        )
+    }
+}
+----
+
+=== Messaging Providers
+
+==== MessagingProvider SPI
+
+[source,groovy]
+----
+interface MessagingProvider {
+    String getName()
+    int getPriority()
+    String getProtocol()  // "amqp", "kafka", "jms", etc.
+
+    // Publishing
+    void send(String destination, Object message)
+    void send(String destination, Object message, Map<String, Object> headers)
+    Future<SendResult> sendAsync(String destination, Object message)
+
+    // Consuming
+    <T> T receive(String destination, Class<T> type)
+    <T> T receive(String destination, long timeout, Class<T> type)
+    void subscribe(String destination, MessageHandler handler)
+
+    // Request-Reply
+    <T> T sendAndReceive(String destination, Object request, Class<T> responseType)
+
+    // Connection management
+    void connect()
+    void disconnect()
+    boolean isConnected()
+}
+----
+
+==== Provided Implementations
+
+* **RabbitMQ** - AMQP messaging
+* **Apache Kafka** - Event streaming
+* **ActiveMQ** - JMS messaging
+* **AWS SQS** - Cloud messaging
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomAzureServiceBusProvider implements MessagingProvider {
+    String getName() { "azure-servicebus" }
+    String getProtocol() { "amqp" }
+
+    private ServiceBusClient client
+
+    void send(String destination, Object message) {
+        def sender = client.createSender(destination)
+        try {
+            sender.sendMessage(
+                new ServiceBusMessage(serialize(message))
+            )
+        } finally {
+            sender.close()
+        }
+    }
+
+    <T> T receive(String destination, long timeout, Class<T> type) {
+        def receiver = client.createReceiver(destination)
+        try {
+            def message = receiver.receiveMessages(1,
+                Duration.ofMillis(timeout)).first()
+            return deserialize(message.body, type)
+        } finally {
+            receiver.close()
+        }
+    }
+}
+----
+
+=== Storage Providers
+
+==== ObjectStoreProvider SPI
+
+[source,groovy]
+----
+interface ObjectStoreProvider {
+    String getName()
+    int getPriority()
+    String getType()  // "s3", "blob", "file", etc.
+
+    // Object operations
+    void put(String bucket, String key, InputStream data)
+    void put(String bucket, String key, byte[] data)
+    InputStream get(String bucket, String key)
+    void delete(String bucket, String key)
+    boolean exists(String bucket, String key)
+
+    // Metadata operations
+    ObjectMetadata getMetadata(String bucket, String key)
+    void setMetadata(String bucket, String key, ObjectMetadata metadata)
+
+    // Listing operations
+    List<ObjectSummary> list(String bucket, String prefix)
+
+    // Multipart upload
+    String initiateMultipartUpload(String bucket, String key)
+    void uploadPart(String uploadId, int partNumber, byte[] data)
+    void completeMultipartUpload(String uploadId)
+}
+----
+
+==== Provided Implementations
+
+* **AWS S3** - Amazon object storage
+* **Azure Blob** - Microsoft blob storage
+* **Google Cloud Storage** - Google object storage
+* **MinIO** - Self-hosted S3-compatible storage
+* **Local File System** - Development/testing
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomSwiftProvider implements ObjectStoreProvider {
+    String getName() { "openstack-swift" }
+    String getType() { "swift" }
+
+    private SwiftClient client
+
+    void put(String bucket, String key, InputStream data) {
+        client.put(
+            new PutObjectRequest()
+                .withContainer(bucket)
+                .withObject(key)
+                .withInputStream(data)
+        )
+    }
+
+    InputStream get(String bucket, String key) {
+        def obj = client.getObject(bucket, key)
+        return obj.inputStream
+    }
+
+    List<ObjectSummary> list(String bucket, String prefix) {
+        return client.listObjects(bucket)
+            .findAll { it.name.startsWith(prefix) }
+            .collect { obj ->
+                new ObjectSummary(
+                    key: obj.name,
+                    size: obj.contentLength,
+                    lastModified: obj.lastModified
+                )
+            }
+    }
+}
+----
+
+=== Serialization Providers
+
+==== SerializationProvider SPI
+
+[source,groovy]
+----
+interface SerializationProvider {
+    String getName()
+    int getPriority()
+    List<String> getSupportedFormats()  // "json", "xml", "protobuf", etc.
+
+    // Serialization
+    byte[] serialize(Object obj)
+    String serializeToString(Object obj)
+
+    // Deserialization
+    <T> T deserialize(byte[] data, Class<T> type)
+    <T> T deserialize(String data, Class<T> type)
+
+    // Streaming
+    void serialize(Object obj, OutputStream out)
+    <T> T deserialize(InputStream in, Class<T> type)
+
+    // Configuration
+    void configure(Map<String, Object> config)
+}
+----
+
+==== Provided Implementations
+
+* **Jackson** - JSON/XML serialization
+* **Gson** - Google JSON library
+* **Protocol Buffers** - Binary serialization
+* **Avro** - Schema-based serialization
+* **Java Serialization** - Fallback
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomMsgPackProvider implements SerializationProvider {
+    String getName() { "msgpack" }
+    List<String> getSupportedFormats() { ["msgpack", "messagepack"] }
+
+    private MessagePack msgpack = new MessagePack()
+
+    byte[] serialize(Object obj) {
+        return msgpack.write(obj)
+    }
+
+    <T> T deserialize(byte[] data, Class<T> type) {
+        return msgpack.read(data, type)
+    }
+}
+----
+
+=== Credential Providers
+
+==== CredentialProvider SPI
+
+[source,groovy]
+----
+interface CredentialProvider {
+    String getName()
+    int getPriority()
+
+    // Credential retrieval
+    Credentials getCredentials(String credentialId)
+    String getSecret(String secretId)
+    Map<String, String> getSecrets(List<String> secretIds)
+
+    // Caching
+    void invalidateCache(String credentialId)
+    void invalidateAll()
+
+    // Health check
+    boolean isAvailable()
+}
+----
+
+==== Provided Implementations
+
+* **Environment Variables** - System env vars
+* **System Properties** - Java properties
+* **AWS Secrets Manager** - Cloud secrets
+* **HashiCorp Vault** - Enterprise secrets
+* **Azure Key Vault** - Azure secrets
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class Custom1PasswordProvider implements CredentialProvider {
+    String getName() { "1password" }
+    int getPriority() { 50 }
+
+    private OnePasswordClient client
+
+    String getSecret(String secretId) {
+        // Format: op://vault/item/field
+        def parts = secretId.split("/")
+        def vault = parts[2]
+        def item = parts[3]
+        def field = parts[4]
+
+        return client.read(vault, item, field)
+    }
+
+    Credentials getCredentials(String credentialId) {
+        def username = getSecret("${credentialId}/username")
+        def password = getSecret("${credentialId}/password")
+        return new Credentials(username, password)
+    }
+}
+----
+
+=== HTTP Client Providers
+
+==== HttpClientProvider SPI
+
+[source,groovy]
+----
+interface HttpClientProvider {
+    String getName()
+    int getPriority()
+
+    // Request execution
+    HttpResponse execute(HttpRequest request)
+    Future<HttpResponse> executeAsync(HttpRequest request)
+
+    // Streaming
+    InputStream executeStreaming(HttpRequest request)
+
+    // Configuration
+    void configure(HttpClientConfig config)
+
+    // Connection management
+    void closeIdleConnections(long idleTime, TimeUnit unit)
+    void shutdown()
+}
+----
+
+==== Provided Implementations
+
+* **Apache HttpClient** - Industry standard (default)
+* **OkHttp** - Modern HTTP client
+* **Java 11 HttpClient** - Built-in client
+
+==== Custom Implementation Example
+
+[source,groovy]
+----
+class CustomHttpClientProvider implements HttpClientProvider {
+    String getName() { "custom-http" }
+    int getPriority() { 75 }
+
+    private OkHttpClient client
+
+    HttpResponse execute(HttpRequest request) {
+        def okRequest = Request.Builder()
+            .url(request.url)
+            .method(request.method, request.body)
+            .build()
+
+        request.headers.each { k, v ->
+            okRequest.header(k, v)
+        }
+
+        def response = client.newCall(okRequest).execute()
+
+        return new HttpResponse(
+            statusCode: response.code(),
+            body: response.body().bytes(),
+            headers: response.headers().toMultimap()
+        )
+    }
+
+    Future<HttpResponse> executeAsync(HttpRequest request) {
+        // Async execution
+        def promise = Promises.deferred()
+
+        client.newCall(okRequest).enqueue(
+            new Callback() {
+                void onResponse(Call call, Response response) {
+                    promise.resolve(mapResponse(response))
+                }
+                void onFailure(Call call, IOException e) {
+                    promise.reject(e)
+                }
+            }
+        )
+
+        return promise.promise
+    }
+}
+----
+
+== Creating Custom Task Types
+
+Beyond SPI providers, you can create custom task types.
+
+=== Extending TaskBase
+
+[source,groovy]
+----
+class ElasticsearchTask extends TaskBase<SearchResult> {
+    String index
+    String query
+    ElasticsearchClient client
+
+    @Override
+    protected SearchResult performTask(Object previousValue) {
+        // Implement Elasticsearch-specific logic
+        def searchRequest = new SearchRequest(index)
+        searchRequest.source(
+            new SearchSourceBuilder()
+                .query(QueryBuilders.queryStringQuery(query))
+        )
+
+        def response = client.search(searchRequest, RequestOptions.DEFAULT)
+
+        return new SearchResult(
+            hits: response.hits.hits.collect { it.sourceAsMap },
+            totalHits: response.hits.totalHits.value
+        )
+    }
+
+    // Custom DSL methods
+    ElasticsearchTask index(String index) {
+        this.index = index
+        return this
+    }
+
+    ElasticsearchTask query(String query) {
+        this.query = query
+        return this
+    }
+}
+----
+
+=== DSL Builder for Custom Tasks
+
+[source,groovy]
+----
+// Add DSL method to TaskGraphBuilder
+class CustomTaskGraphBuilder extends TaskGraphBuilder {
+
+    ElasticsearchTask elasticsearchTask(String id,
+                                         @DelegatesTo(ElasticsearchTask) Closure config) {
+        def task = new ElasticsearchTask(id, context)
+        config.delegate = task
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config()
+
+        addTask(task)
+        return task
+    }
+}
+----
+
+=== Usage
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    elasticsearchTask("search-users") {
+        index "users"
+        query "status:active AND role:admin"
+
+        retryPolicy {
+            maxAttempts 3
+            delay 1000
+        }
+    }
+
+    task("process-results") {
+        dependsOn "search-users"
+        action { ctx ->
+            def results = ctx.prev
+            processSearchResults(results)
+        }
+    }
+}
+----
+
+== Custom Gateway Types
+
+Create custom gateways for specialized routing logic.
+
+=== Extending Gateway
+
+[source,groovy]
+----
+class WeightedGateway extends Gateway {
+    Map<TaskBase, Integer> weights = [:]
+
+    @Override
+    TaskBase selectPath(TaskContext context) {
+        // Select path based on weighted random selection
+        def totalWeight = weights.values().sum()
+        def random = new Random().nextInt(totalWeight)
+
+        def cumulative = 0
+        for (entry in weights.entrySet()) {
+            cumulative += entry.value
+            if (random < cumulative) {
+                return entry.key
+            }
+        }
+
+        return weights.keySet().first()
+    }
+
+    // DSL methods
+    void path(TaskBase task, int weight) {
+        weights[task] = weight
+    }
+}
+----
+
+=== DSL Builder
+
+[source,groovy]
+----
+class CustomTaskGraphBuilder extends TaskGraphBuilder {
+
+    WeightedGateway weightedGateway(String id,
+                                    @DelegatesTo(WeightedGateway) Closure config) {
+        def gateway = new WeightedGateway(id, context)
+        config.delegate = gateway
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config()
+
+        addTask(gateway)
+        return gateway
+    }
+}
+----
+
+=== Usage
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("fast-path") { action { fastProcess() } }
+    task("slow-path") { action { thoroughProcess() } }
+    task("medium-path") { action { balancedProcess() } }
+
+    weightedGateway("route") {
+        path task("fast-path"), 70      // 70% probability
+        path task("medium-path"), 20    // 20% probability
+        path task("slow-path"), 10      // 10% probability
+    }
+}
+----
+
+== Custom Script Base Classes
+
+Provide custom script base classes for domain-specific operations.
+
+=== Creating Custom Base Class
+
+[source,groovy]
+----
+abstract class CompanyScriptBase extends Script {
+    // Company-specific utilities available in all scripts
+
+    def fetchFromDataWarehouse(String query) {
+        // Internal data warehouse access
+        def client = DataWarehouseClient.instance
+        return client.query(query)
+    }
+
+    def sendToKafka(String topic, Object message) {
+        // Internal Kafka cluster
+        def producer = KafkaProducerPool.getProducer()
+        producer.send(topic, message)
+    }
+
+    def callInternalAPI(String endpoint, Map params) {
+        // Internal API with auth handled automatically
+        def client = InternalAPIClient.withAuth()
+        return client.get(endpoint, params)
+    }
+
+    // Restricted operations
+    @Override
+    void execute() {
+        // Prevent file system access
+        throw new SecurityException("Direct script execution not allowed")
+    }
+}
+----
+
+=== Usage in Scripts
+
+[source,groovy]
+----
+scriptTask("company-workflow") {
+    customScriptBaseClass CompanyScriptBase
+
+    script '''
+        // Company-specific methods available
+        def data = fetchFromDataWarehouse("SELECT * FROM sales")
+
+        def processed = data.collect { row ->
+            processRow(row)
+        }
+
+        sendToKafka("processed-sales", processed)
+
+        return processed.size()
+    '''
+}
+----
+
+== Provider Selection Strategies
+
+=== Priority-Based Selection
+
+TaskGraph selects providers by priority:
+
+[source,groovy]
+----
+class HighPriorityProvider implements DatabaseProvider {
+    int getPriority() { 100 }  // Selected first
+}
+
+class DefaultProvider implements DatabaseProvider {
+    int getPriority() { 0 }  // Fallback
+}
+----
+
+=== Explicit Provider Selection
+
+[source,groovy]
+----
+sqlTask("query") {
+    provider "oracle-optimized"  // Explicitly select provider
+    query "SELECT * FROM users"
+}
+----
+
+=== Configuration-Based Selection
+
+[source,groovy]
+----
+// application.properties
+taskgraph.database.provider=oracle-optimized
+taskgraph.messaging.provider=rabbitmq
+taskgraph.storage.provider=aws-s3
+
+// TaskGraph reads config and selects providers
+def workflow = TaskGraph.build {
+    sqlTask("query") {
+        // Uses provider from config
+        query "SELECT * FROM users"
+    }
+}
+----
+
+=== Environment-Based Selection
+
+[source,groovy]
+----
+class EnvironmentAwareProvider implements DatabaseProvider {
+    int getPriority() {
+        // Higher priority in production
+        return System.getenv("ENV") == "production" ? 100 : 0
+    }
+}
+----
+
+## Testing Custom Providers
+
+=== Unit Testing Providers
+
+[source,groovy]
+----
+class CustomProviderTest {
+    @Test
+    void testProviderDiscovery() {
+        def loader = ServiceLoader.load(DatabaseProvider.class)
+        def provider = loader.find { it.name == "custom-provider" }
+
+        assert provider != null
+        assert provider.priority == 100
+    }
+
+    @Test
+    void testProviderFunctionality() {
+        def provider = new CustomDatabaseProvider()
+        def config = new DatabaseConfig(url: "jdbc:custom:...")
+
+        def conn = provider.getConnection(config)
+        assert conn != null
+        assert conn.isValid(5)
+    }
+}
+----
+
+=== Integration Testing
+
+[source,groovy]
+----
+class CustomProviderIntegrationTest {
+    @Test
+    void testInWorkflow() {
+        def workflow = TaskGraph.build {
+            sqlTask("query") {
+                provider "custom-provider"
+                query "SELECT * FROM test_table"
+            }
+        }
+
+        def result = workflow.start().get()
+        assert result.status == SUCCESS
+        assert result.getTaskResult("query").value != null
+    }
+}
+----
+
+## Best Practices
+
+=== Provider Design
+
+**1. Single Responsibility**
+[source,groovy]
+----
+// ✅ Good - focused provider
+class PostgresProvider implements DatabaseProvider {
+    // PostgreSQL-specific implementation
+}
+
+// ❌ Bad - too broad
+class UniversalDatabaseProvider implements DatabaseProvider {
+    // Tries to support all databases
+}
+----
+
+**2. Fail Fast**
+[source,groovy]
+----
+Connection getConnection(DatabaseConfig config) {
+    // Validate config immediately
+    if (!config.url?.startsWith("jdbc:postgres:")) {
+        throw new IllegalArgumentException(
+            "Invalid PostgreSQL URL: ${config.url}"
+        )
+    }
+    // Continue with connection
+}
+----
+
+**3. Resource Management**
+[source,groovy]
+----
+class MyProvider implements DatabaseProvider {
+    private DataSource dataSource
+
+    void shutdown() {
+        // Clean up resources
+        if (dataSource instanceof Closeable) {
+            dataSource.close()
+        }
+    }
+}
+----
+
+**4. Health Checks**
+[source,groovy]
+----
+boolean isHealthy() {
+    try {
+        def conn = getConnection(config)
+        def healthy = conn.isValid(5)
+        conn.close()
+        return healthy
+    } catch (Exception e) {
+        log.error("Health check failed", e)
+        return false
+    }
+}
+----
+
+=== Custom Task Design
+
+**1. Inherit Cross-Cutting Concerns**
+[source,groovy]
+----
+// ✅ Extends TaskBase to get retry, circuit breaker, etc.
+class CustomTask extends TaskBase<Result> {
+    @Override
+    protected Result performTask(Object prev) {
+        // Focus on task logic
+    }
+}
+----
+
+**2. Validate Configuration**
+[source,groovy]
+----
+@Override
+void validate() {
+    super.validate()
+
+    if (index == null || index.isEmpty()) {
+        throw new ValidationException("Index is required")
+    }
+    if (query == null) {
+        throw new ValidationException("Query is required")
+    }
+}
+----
+
+**3. Fluent DSL Methods**
+[source,groovy]
+----
+CustomTask index(String index) {
+    this.index = index
+    return this  // Return this for chaining
+}
+
+CustomTask query(String query) {
+    this.query = query
+    return this  // Return this for chaining
+}
+----
+
+## Summary
+
+TaskGraph's SPI model provides:
+
+* ✅ **Comprehensive defaults** - Production-ready implementations
+* ✅ **Clean extension points** - Well-defined SPI contracts
+* ✅ **Multiple providers** - Database, messaging, storage, etc.
+* ✅ **Custom tasks** - Create domain-specific tasks
+* ✅ **Custom gateways** - Specialized routing logic
+* ✅ **Script base classes** - Domain-specific script capabilities
+* ✅ **Auto-discovery** - ServiceLoader-based provider discovery
+* ✅ **Priority-based selection** - Flexible provider selection
+
+The SPI pattern enables TaskGraph to be both powerful out-of-the-box and infinitely extensible for custom requirements.
+
+== Next Steps
+
+* **Chapter 11** - TaskBase reference with all extension points
+* **Chapter 13** - All provided concrete task types
+* **Appendix** - Complete SPI reference documentation

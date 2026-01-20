@@ -1,0 +1,893 @@
+= TaskGraph Test Harness
+
+[abstract]
+--
+This chapter covers TaskGraph's comprehensive test harness, designed to make testing workflows easy, fast, and reliable. Learn how to unit test tasks, integration test workflows, and validate complex orchestration logic.
+--
+
+== Overview
+
+TaskGraph provides a dedicated test harness with:
+
+* **Task mocking** - Mock individual tasks for unit testing
+* **Workflow simulation** - Simulate execution without side effects
+* **Time control** - Fast-forward time for timeout testing
+* **Failure injection** - Test error handling paths
+* **Execution verification** - Assert execution order and results
+* **Performance profiling** - Measure workflow performance
+
+== Test Harness Architecture
+
+[plantuml, test-architecture, svg]
+....
+@startuml
+package "Test Harness" {
+    class TaskGraphTestHarness {
+        + mock(taskId, result)
+        + stub(taskId, closure)
+        + simulate()
+        + verify()
+        + assertExecutionOrder()
+    }
+
+    class MockExecutorPool {
+        + synchronousExecution()
+        + immediateCompletion()
+    }
+
+    class TimeController {
+        + advanceTime(duration)
+        + freeze()
+        + unfreeze()
+    }
+
+    class FailureInjector {
+        + failTask(taskId, error)
+        + slowTask(taskId, delay)
+    }
+}
+
+TaskGraphTestHarness --> MockExecutorPool
+TaskGraphTestHarness --> TimeController
+TaskGraphTestHarness --> FailureInjector
+@enduml
+....
+
+== Setting Up Tests
+
+=== Test Dependencies
+
+[source,groovy]
+----
+// build.gradle
+dependencies {
+    testImplementation 'org.softwood.dag:taskgraph-test:2.0.0'
+    testImplementation 'org.spockframework:spock-core:2.3-groovy-3.0'
+}
+----
+
+=== Basic Test Structure
+
+[source,groovy]
+----
+import org.softwood.dag.test.*
+import spock.lang.Specification
+
+class WorkflowTest extends Specification {
+
+    TaskGraphTestHarness harness
+
+    def setup() {
+        harness = new TaskGraphTestHarness()
+    }
+
+    def cleanup() {
+        harness.reset()
+    }
+
+    def "test workflow execution"() {
+        given:
+        def workflow = buildWorkflow()
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.status == SUCCESS
+        result.executedTaskCount == 5
+    }
+}
+----
+
+== Unit Testing Tasks
+
+=== Testing Individual Tasks
+
+[source,groovy]
+----
+class TaskUnitTest extends Specification {
+
+    def "test service task logic"() {
+        given:
+        def context = new TaskContext()
+        context.global("userId", 123)
+
+        def task = new ServiceTask("fetch-user", context) {
+            action { ctx ->
+                def userId = ctx.global("userId")
+                return userService.getUser(userId)
+            }
+        }
+
+        when:
+        def result = task.start().get()
+
+        then:
+        result != null
+        result.id == 123
+    }
+
+    def "test task with retry"() {
+        given:
+        def attemptCount = 0
+        def task = new ServiceTask("flaky-task", context) {
+            retryPolicy {
+                maxAttempts 3
+                delay 100
+            }
+
+            action {
+                attemptCount++
+                if (attemptCount < 3) {
+                    throw new RuntimeException("Temporary failure")
+                }
+                return "Success"
+            }
+        }
+
+        when:
+        def result = task.start().get()
+
+        then:
+        result == "Success"
+        attemptCount == 3
+    }
+
+    def "test task timeout"() {
+        given:
+        def task = new ServiceTask("slow-task", context) {
+            timeout 1000
+
+            action {
+                Thread.sleep(5000)
+                return "Should not reach here"
+            }
+        }
+
+        when:
+        task.start().get()
+
+        then:
+        thrown(TimeoutException)
+    }
+}
+----
+
+=== Testing Custom Tasks
+
+[source,groovy]
+----
+class CustomTaskTest extends Specification {
+
+    def "test elasticsearch task"() {
+        given:
+        def mockClient = Mock(ElasticsearchClient)
+        def task = new ElasticsearchTask("search", context)
+        task.client = mockClient
+        task.index("users")
+        task.query("status:active")
+
+        when:
+        def result = task.start().get()
+
+        then:
+        1 * mockClient.search({ SearchRequest req ->
+            req.indices() == ["users"]
+            req.source().query().queryString().queryString() == "status:active"
+        }) >> mockSearchResponse
+
+        result.totalHits == 100
+    }
+}
+----
+
+== Integration Testing Workflows
+
+=== Testing Complete Workflows
+
+[source,groovy]
+----
+class WorkflowIntegrationTest extends Specification {
+
+    def "test ETL pipeline"() {
+        given:
+        def workflow = TaskGraph.build {
+            httpTask("extract") {
+                url "https://api.example.com/data"
+            }
+
+            task("transform") {
+                dependsOn "extract"
+                action { ctx -> transformData(ctx.prev) }
+            }
+
+            sqlTask("load") {
+                dependsOn "transform"
+                datasource testDataSource
+                query "INSERT INTO results VALUES (?)"
+            }
+        }
+
+        when:
+        def result = workflow.start().get()
+
+        then:
+        result.status == SUCCESS
+        result.getTaskResult("extract").value != null
+        result.getTaskResult("transform").value != null
+        result.getTaskResult("load").rowsAffected > 0
+    }
+}
+----
+
+=== Using Test Harness
+
+[source,groovy]
+----
+class WorkflowHarnessTest extends Specification {
+
+    TaskGraphTestHarness harness = new TaskGraphTestHarness()
+
+    def "test workflow with mocks"() {
+        given:
+        def workflow = buildComplexWorkflow()
+
+        // Mock external service calls
+        harness.mock("fetch-users", [
+            [id: 1, name: "Alice"],
+            [id: 2, name: "Bob"]
+        ])
+
+        harness.mock("fetch-orders", [
+            [id: 101, userId: 1, total: 50.00],
+            [id: 102, userId: 2, total: 75.00]
+        ])
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.status == SUCCESS
+        harness.verifyExecuted("fetch-users", "fetch-orders", "join-data")
+        harness.verifyExecutionOrder("fetch-users", "join-data")
+        harness.verifyExecutionOrder("fetch-orders", "join-data")
+    }
+
+    def "test workflow with stubs"() {
+        given:
+        def workflow = buildWorkflow()
+
+        // Stub with dynamic behavior
+        harness.stub("process-data") { ctx ->
+            def input = ctx.prev
+            return input.collect { it * 2 }
+        }
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.getTaskResult("process-data").value == [2, 4, 6, 8]
+    }
+}
+----
+
+== Failure Injection Testing
+
+=== Testing Error Handling
+
+[source,groovy]
+----
+class ErrorHandlingTest extends Specification {
+
+    TaskGraphTestHarness harness = new TaskGraphTestHarness()
+
+    def "test task failure handling"() {
+        given:
+        def workflow = buildWorkflow()
+
+        // Inject failure
+        harness.failTask("fetch-data", new IOException("Network error"))
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.status == FAILED
+        result.getTaskResult("fetch-data").isFailure()
+        result.getTaskResult("fetch-data").error instanceof IOException
+    }
+
+    def "test retry on failure"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("flaky-task") {
+                retryPolicy {
+                    maxAttempts 3
+                    delay 1000
+                }
+                action { riskyOperation() }
+            }
+        }
+
+        def attempts = 0
+        harness.stub("flaky-task") {
+            attempts++
+            if (attempts < 3) {
+                throw new RuntimeException("Temporary error")
+            }
+            return "Success"
+        }
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.status == SUCCESS
+        attempts == 3
+        harness.getTaskAttempts("flaky-task") == 3
+    }
+
+    def "test fallback on failure"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("primary") {
+                action { fetchFromPrimary() }
+            }
+
+            task("fallback") {
+                condition { ctx ->
+                    ctx.taskResult("primary")?.isFailure()
+                }
+                action { fetchFromFallback() }
+            }
+
+            task("process") {
+                dependsOn "primary", "fallback"
+                action { ctx ->
+                    def data = ctx.taskResult("primary")?.value ?:
+                              ctx.taskResult("fallback")?.value
+                    return processData(data)
+                }
+            }
+        }
+
+        harness.failTask("primary", new TimeoutException())
+        harness.mock("fallback", mockData)
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.status == SUCCESS
+        result.getTaskResult("primary").isFailure()
+        result.getTaskResult("fallback").isSuccess()
+        result.getTaskResult("process").value != null
+    }
+}
+----
+
+=== Testing Circuit Breaker
+
+[source,groovy]
+----
+def "test circuit breaker opens on failures"() {
+    given:
+    def workflow = TaskGraph.build {
+        task("external-api") {
+            circuitBreaker {
+                failureThreshold 3
+                timeout 30000
+            }
+            action { callExternalAPI() }
+        }
+    }
+
+    // Inject failures
+    harness.alwaysFail("external-api", new IOException("Service unavailable"))
+
+    when: "Execute multiple times"
+    5.times {
+        try {
+            harness.execute(workflow)
+        } catch (Exception ignored) {}
+    }
+
+    then: "Circuit breaker opens after 3 failures"
+    harness.getCircuitBreakerState("external-api") == OPEN
+    harness.getTaskFailureCount("external-api") == 3  // Only 3 attempts, then circuit open
+}
+----
+
+== Time-Based Testing
+
+=== Fast-Forward Time
+
+[source,groovy]
+----
+class TimeBasedTest extends Specification {
+
+    def "test timeout behavior"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("slow-task") {
+                timeout 5000
+                action {
+                    Thread.sleep(10000)
+                    return "Result"
+                }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+        harness.timeControl.freeze()  // Freeze time
+
+        when:
+        def promise = harness.executeAsync(workflow)
+
+        // Fast-forward past timeout
+        harness.timeControl.advanceTime(6000)
+
+        def result = promise.get()
+
+        then:
+        result.status == FAILED
+        result.getTaskResult("slow-task").error instanceof TimeoutException
+    }
+
+    def "test retry delay"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("retry-task") {
+                retryPolicy {
+                    maxAttempts 3
+                    delay 5000  // 5 second delay between retries
+                }
+                action { riskyOperation() }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+        harness.timeControl.freeze()
+
+        def attempts = 0
+        harness.stub("retry-task") {
+            attempts++
+            if (attempts < 3) {
+                throw new RuntimeException("Fail")
+            }
+            return "Success"
+        }
+
+        when:
+        def promise = harness.executeAsync(workflow)
+
+        // Fast-forward through retries
+        3.times {
+            harness.timeControl.advanceTime(5000)
+        }
+
+        def result = promise.get()
+
+        then:
+        result.status == SUCCESS
+        attempts == 3
+        // Test completed in milliseconds instead of 10+ seconds
+    }
+}
+----
+
+=== Testing Scheduled Workflows
+
+[source,groovy]
+----
+def "test scheduled execution"() {
+    given:
+    def workflow = buildWorkflow()
+    def harness = new TaskGraphTestHarness()
+    harness.timeControl.freeze()
+
+    def executionCount = 0
+    def scheduler = harness.mockScheduler()
+
+    scheduler.scheduleAtFixedRate(
+        { workflow.start().get(); executionCount++ },
+        0,
+        3600,  // Every hour
+        TimeUnit.SECONDS
+    )
+
+    when: "Advance 5 hours"
+    5.times {
+        harness.timeControl.advanceTime(3600, TimeUnit.SECONDS)
+    }
+
+    then: "Workflow executed 5 times"
+    executionCount == 5
+}
+----
+
+== Execution Verification
+
+=== Verifying Task Execution
+
+[source,groovy]
+----
+class ExecutionVerificationTest extends Specification {
+
+    def "verify all tasks executed"() {
+        given:
+        def workflow = buildComplexWorkflow()
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        harness.verifyExecuted("task-a", "task-b", "task-c")
+        harness.verifyNotExecuted("optional-task")
+    }
+
+    def "verify execution order"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("task-a") { action { "A" } }
+            task("task-b") {
+                dependsOn "task-a"
+                action { "B" }
+            }
+            task("task-c") {
+                dependsOn "task-b"
+                action { "C" }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        harness.verifyExecutionOrder("task-a", "task-b", "task-c")
+        harness.verifyTaskExecutedBefore("task-a", "task-b")
+        harness.verifyTaskExecutedAfter("task-c", "task-b")
+    }
+
+    def "verify parallel execution"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("task-a") { action { "A" } }
+
+            task("task-b") {
+                dependsOn "task-a"
+                action { "B" }
+            }
+
+            task("task-c") {
+                dependsOn "task-a"
+                action { "C" }
+            }
+
+            task("task-d") {
+                dependsOn "task-b", "task-c"
+                action { "D" }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        harness.verifyParallelExecution("task-b", "task-c")
+        harness.verifyTaskExecutedBefore("task-a", "task-b")
+        harness.verifyTaskExecutedBefore("task-a", "task-c")
+        harness.verifyTaskExecutedAfter("task-d", "task-b")
+        harness.verifyTaskExecutedAfter("task-d", "task-c")
+    }
+}
+----
+
+=== Asserting Task Results
+
+[source,groovy]
+----
+def "verify task results"() {
+    given:
+    def workflow = buildWorkflow()
+    def harness = new TaskGraphTestHarness()
+
+    when:
+    harness.execute(workflow)
+
+    then:
+    harness.assertTaskResult("fetch-data") { result ->
+        result != null
+        result.size() == 10
+        result.every { it.id != null }
+    }
+
+    harness.assertTaskResult("transform") { result ->
+        result.every { it.processed == true }
+    }
+}
+----
+
+== Performance Testing
+
+=== Measuring Execution Time
+
+[source,groovy]
+----
+class PerformanceTest extends Specification {
+
+    def "measure workflow execution time"() {
+        given:
+        def workflow = buildComplexWorkflow()
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        def result = harness.execute(workflow)
+
+        then:
+        result.durationMs < 5000  // Must complete in under 5 seconds
+
+        harness.getTaskDuration("task-a") < 1000
+        harness.getTaskDuration("task-b") < 2000
+    }
+
+    def "profile workflow performance"() {
+        given:
+        def workflow = buildWorkflow()
+        def harness = new TaskGraphTestHarness()
+        harness.enableProfiling()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        def profile = harness.getProfile()
+
+        println "Total duration: ${profile.totalDuration}ms"
+        println "Task breakdown:"
+        profile.taskProfiles.each { task ->
+            println "  ${task.id}: ${task.duration}ms (${task.percentageOfTotal}%)"
+        }
+
+        // Assert no task takes more than 50% of total time
+        profile.taskProfiles.every { it.percentageOfTotal < 50 }
+    }
+}
+----
+
+=== Load Testing
+
+[source,groovy]
+----
+def "load test workflow"() {
+    given:
+    def workflow = buildWorkflow()
+    def harness = new TaskGraphTestHarness()
+
+    def iterations = 1000
+    def maxConcurrency = 50
+
+    when:
+    def pool = ExecutorPoolFactory.newFixedThreadPool(maxConcurrency)
+    def startTime = System.currentTimeMillis()
+
+    def futures = (1..iterations).collect {
+        pool.submit {
+            harness.execute(workflow)
+        }
+    }
+
+    futures*.get()  // Wait for all
+    def duration = System.currentTimeMillis() - startTime
+
+    then:
+    def throughput = (iterations / duration) * 1000
+    println "Throughput: ${throughput} workflows/second"
+
+    throughput > 100  // At least 100 workflows per second
+}
+----
+
+== Testing Conditional Logic
+
+=== Testing Gateways
+
+[source,groovy]
+----
+class GatewayTest extends Specification {
+
+    def "test exclusive gateway routing"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("check") { action { 10 } }
+
+            exclusiveGateway("route") {
+                dependsOn "check"
+
+                condition { ctx -> ctx.prev > 5 }
+                whenTrue { task("high-path") { action { "HIGH" } } }
+                whenFalse { task("low-path") { action { "LOW" } } }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        harness.verifyExecuted("high-path")
+        harness.verifyNotExecuted("low-path")
+    }
+
+    def "test parallel gateway"() {
+        given:
+        def workflow = TaskGraph.build {
+            task("start") { action { "GO" } }
+
+            parallelGateway("split") {
+                dependsOn "start"
+
+                fork {
+                    task("path-a") { action { "A" } }
+                    task("path-b") { action { "B" } }
+                    task("path-c") { action { "C" } }
+                }
+
+                join {
+                    task("merge") {
+                        dependsOn "path-a", "path-b", "path-c"
+                        action { ctx -> "MERGED" }
+                    }
+                }
+            }
+        }
+
+        def harness = new TaskGraphTestHarness()
+
+        when:
+        harness.execute(workflow)
+
+        then:
+        harness.verifyParallelExecution("path-a", "path-b", "path-c")
+        harness.verifyExecuted("merge")
+    }
+}
+----
+
+## Testing Best Practices
+
+=== Isolate External Dependencies
+
+[source,groovy]
+----
+// ✅ Good - mock external services
+def "test with mocked services"() {
+    given:
+    def mockHttpClient = Mock(HttpClient)
+    def mockDatabase = Mock(Database)
+
+    def workflow = TaskGraph.build {
+        service(HttpClient.class, mockHttpClient)
+        service(Database.class, mockDatabase)
+
+        httpTask("fetch") { url "..." }
+        sqlTask("store") { query "..." }
+    }
+
+    when:
+    workflow.start().get()
+
+    then:
+    1 * mockHttpClient.execute(_)
+    1 * mockDatabase.execute(_)
+}
+----
+
+=== Use Test Data Builders
+
+[source,groovy]
+----
+class TestDataBuilder {
+    static TaskGraph buildTestWorkflow() {
+        return TaskGraph.build {
+            task("task-1") { action { "result-1" } }
+            task("task-2") {
+                dependsOn "task-1"
+                action { "result-2" }
+            }
+        }
+    }
+
+    static TaskContext buildTestContext() {
+        def context = new TaskContext()
+        context.global("userId", 123)
+        context.global("apiToken", "test-token")
+        return context
+    }
+}
+
+// Use in tests
+def "test with builder"() {
+    given:
+    def workflow = TestDataBuilder.buildTestWorkflow()
+    def context = TestDataBuilder.buildTestContext()
+
+    // ... test code
+}
+----
+
+=== Test One Thing Per Test
+
+[source,groovy]
+----
+// ✅ Good - focused tests
+def "test task A executes successfully"() { /* ... */ }
+def "test task B depends on task A"() { /* ... */ }
+def "test task C handles errors"() { /* ... */ }
+
+// ❌ Bad - testing too much
+def "test entire workflow"() {
+    // Tests 20 different things
+}
+----
+
+=== Use Descriptive Test Names
+
+[source,groovy]
+----
+// ✅ Good - clear intent
+def "should retry task up to 3 times on IOException"() { /* ... */ }
+def "should skip task when condition is false"() { /* ... */ }
+def "should execute tasks B and C in parallel after A completes"() { /* ... */ }
+
+// ❌ Bad - unclear intent
+def "test1"() { /* ... */ }
+def "testWorkflow"() { /* ... */ }
+----
+
+== Summary
+
+The TaskGraph test harness provides:
+
+* ✅ **Task mocking** - Mock external dependencies
+* ✅ **Failure injection** - Test error handling paths
+* ✅ **Time control** - Fast-forward time for testing
+* ✅ **Execution verification** - Assert execution order
+* ✅ **Performance profiling** - Measure workflow performance
+* ✅ **Integration testing** - Test complete workflows
+* ✅ **Unit testing** - Test individual tasks
+
+With the test harness, you can confidently test workflows of any complexity.
+
+== Next Steps
+
+* **Chapter 7** - More examples to test
+* **Chapter 9** - Test security features
+* **Chapter 10** - Test observability features

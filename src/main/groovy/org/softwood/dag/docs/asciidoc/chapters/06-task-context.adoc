@@ -1,0 +1,931 @@
+= TaskContext: Shared Execution State
+
+[abstract]
+--
+This chapter explores TaskContext, the execution environment that provides shared state, configuration, credentials, and services to all tasks in a workflow. Understanding TaskContext is essential for building cohesive, maintainable workflows.
+--
+
+== Overview
+
+TaskContext is the shared execution environment for all tasks in a TaskGraph workflow. It provides:
+
+* **Variable storage** - Task-scoped and global variables
+* **Configuration access** - Centralized configuration
+* **Credential management** - Secure credential resolution
+* **Service registry** - Shared services and resources
+* **Event dispatcher** - Event publishing
+* **Result storage** - Task result access
+
+[plantuml, context-architecture, svg]
+....
+@startuml
+class TaskContext {
+    - Map<String, Object> globalVars
+    - Map<String, Map<String, Object>> taskVars
+    - Configuration config
+    - CredentialResolver credentialResolver
+    - ServiceRegistry serviceRegistry
+    - EventDispatcher eventDispatcher
+    - Map<String, Object> taskResults
+
+    + get(String key)
+    + set(String key, Object value)
+    + taskVar(String taskId, String key)
+    + config(String key)
+    + credential(String credentialId)
+    + service(Class<T> type)
+    + emit(Event event)
+    + taskResult(String taskId)
+}
+
+class TaskBase {
+    - TaskContext context
+}
+
+class TaskGraph {
+    - TaskContext context
+}
+
+TaskBase --> TaskContext : uses
+TaskGraph --> TaskContext : creates
+@enduml
+....
+
+== Variable Storage
+
+TaskContext provides hierarchical variable storage.
+
+=== Global Variables
+
+Shared across all tasks in the workflow:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Set global variable at graph level
+    global("environment", "production")
+    global("userId", 12345)
+    global("apiToken", fetchToken())
+
+    task("task1") {
+        action { ctx ->
+            // Access global variable
+            def env = ctx.global("environment")
+            def userId = ctx.global("userId")
+
+            println "Running in $env for user $userId"
+            return fetchData(userId)
+        }
+    }
+
+    task("task2") {
+        dependsOn "task1"
+        action { ctx ->
+            // All tasks see same global variables
+            def env = ctx.global("environment")
+            def userId = ctx.global("userId")
+
+            processData(env, userId)
+        }
+    }
+}
+----
+
+=== Task-Scoped Variables
+
+Private to a specific task:
+
+[source,groovy]
+----
+task("task1") {
+    action { ctx ->
+        // Set task-scoped variable
+        ctx.taskVar("task1", "internalState", someValue)
+
+        // Read task-scoped variable
+        def state = ctx.taskVar("task1", "internalState")
+
+        return result
+    }
+}
+
+task("task2") {
+    action { ctx ->
+        // Cannot access task1's variables
+        def state = ctx.taskVar("task1", "internalState")  // Returns null
+    }
+}
+----
+
+=== Previous Task Result
+
+Access the result of the immediate predecessor:
+
+[source,groovy]
+----
+task("fetch") {
+    action { fetchUsers() }
+}
+
+task("process") {
+    dependsOn "fetch"
+    action { ctx ->
+        // ctx.prev contains result from "fetch"
+        def users = ctx.prev
+        return users.collect { processUser(it) }
+    }
+}
+----
+
+=== Task Results by ID
+
+Access any task's result by ID:
+
+[source,groovy]
+----
+task("fetch-users") {
+    action { fetchUsers() }
+}
+
+task("fetch-orders") {
+    action { fetchOrders() }
+}
+
+task("join") {
+    dependsOn "fetch-users", "fetch-orders"
+    action { ctx ->
+        // Access specific task results
+        def users = ctx.taskResult("fetch-users")
+        def orders = ctx.taskResult("fetch-orders")
+
+        return joinData(users, orders)
+    }
+}
+----
+
+=== Variable Type Safety
+
+TaskContext provides type-safe variable access:
+
+[source,groovy]
+----
+// Type-safe getters
+def userId = ctx.global("userId", Integer.class)
+def userName = ctx.global("userName", String.class)
+def config = ctx.global("config", Config.class)
+
+// With default values
+def timeout = ctx.global("timeout", Integer.class, 30000)
+def retries = ctx.global("retries", Integer.class, 3)
+
+// Null-safe access
+def optional = ctx.globalOptional("maybeNull")
+optional.ifPresent { value ->
+    println "Value: $value"
+}
+----
+
+== Configuration Management
+
+=== Hierarchical Configuration
+
+TaskContext supports hierarchical configuration:
+
+[source,groovy]
+----
+// application.properties or application.yml
+taskgraph:
+  database:
+    url: jdbc:postgresql://localhost:5432/mydb
+    username: dbuser
+    pool:
+      maxSize: 20
+      minSize: 5
+  http:
+    timeout: 30000
+    retries: 3
+
+// Access in tasks
+task("query") {
+    action { ctx ->
+        def dbUrl = ctx.config("taskgraph.database.url")
+        def poolMax = ctx.config("taskgraph.database.pool.maxSize")
+        def timeout = ctx.config("taskgraph.http.timeout")
+
+        // Use config values
+    }
+}
+----
+
+=== Configuration Sources
+
+TaskContext merges configuration from multiple sources:
+
+1. **System properties** (highest priority)
+2. **Environment variables**
+3. **Configuration files** (application.properties, application.yml)
+4. **Programmatic configuration**
+5. **Default values** (lowest priority)
+
+[source,groovy]
+----
+// Programmatic configuration
+def workflow = TaskGraph.build {
+    config {
+        set("app.timeout", 30000)
+        set("app.retries", 3)
+        set("app.environment", "production")
+    }
+
+    task("process") {
+        action { ctx ->
+            def timeout = ctx.config("app.timeout")
+            // Use timeout
+        }
+    }
+}
+----
+
+=== Environment-Specific Configuration
+
+[source,groovy]
+----
+// application-dev.yml
+taskgraph:
+  database:
+    url: jdbc:postgresql://localhost:5432/devdb
+  http:
+    timeout: 60000
+
+// application-prod.yml
+taskgraph:
+  database:
+    url: jdbc:postgresql://prod-server:5432/proddb
+  http:
+    timeout: 10000
+
+// Select profile
+System.setProperty("spring.profiles.active", "prod")
+
+def workflow = TaskGraph.build {
+    task("query") {
+        action { ctx ->
+            // Gets prod config
+            def dbUrl = ctx.config("taskgraph.database.url")
+            def timeout = ctx.config("taskgraph.http.timeout")
+        }
+    }
+}
+----
+
+=== Type-Safe Configuration
+
+[source,groovy]
+----
+// Define configuration class
+@ConfigurationProperties("taskgraph.database")
+class DatabaseConfig {
+    String url
+    String username
+    PoolConfig pool
+
+    static class PoolConfig {
+        int maxSize
+        int minSize
+        long keepAliveMs
+    }
+}
+
+// Bind configuration
+def dbConfig = ctx.config(DatabaseConfig.class)
+
+// Type-safe access
+println dbConfig.url
+println dbConfig.pool.maxSize
+----
+
+== Credential Management
+
+TaskContext provides secure credential resolution.
+
+=== Credential Resolvers
+
+Multiple credential sources supported:
+
+[source,groovy]
+----
+// Environment variables
+def password = ctx.credential("DB_PASSWORD")
+
+// AWS Secrets Manager
+def apiKey = ctx.credential("aws:secretsmanager:api-key")
+
+// HashiCorp Vault
+def dbCreds = ctx.credential("vault:secret/database/prod")
+
+// Azure Key Vault
+def cert = ctx.credential("azure:keyvault:ssl-cert")
+
+// System properties
+def token = ctx.credential("sys:api.token")
+----
+
+=== Credential Caching
+
+Credentials are cached for performance:
+
+[source,groovy]
+----
+// First access - fetches from source
+def password = ctx.credential("db-password")  // ~100ms
+
+// Subsequent access - cached
+def password2 = ctx.credential("db-password")  // ~1ms
+
+// Invalidate cache
+ctx.invalidateCredential("db-password")
+
+// Next access fetches again
+def password3 = ctx.credential("db-password")  // ~100ms
+----
+
+=== Structured Credentials
+
+[source,groovy]
+----
+// Fetch structured credential
+def dbCreds = ctx.credential("database-credentials")
+
+// Structured format: { username: "...", password: "..." }
+def username = dbCreds.username
+def password = dbCreds.password
+
+// Use in connection
+def conn = DriverManager.getConnection(
+    ctx.config("db.url"),
+    username,
+    password
+)
+----
+
+=== Credential Injection
+
+Automatically inject credentials into tasks:
+
+[source,groovy]
+----
+sqlTask("query") {
+    credentialId "database-credentials"  // Auto-injected
+
+    query "SELECT * FROM users"
+}
+
+httpTask("api-call") {
+    credentialId "api-credentials"  // Auto-injected for auth
+
+    url "https://api.example.com/data"
+}
+----
+
+== Service Registry
+
+TaskContext maintains a registry of shared services.
+
+=== Registering Services
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Register services at graph level
+    service(DataSource.class, createDataSource())
+    service(HttpClient.class, createHttpClient())
+    service(CacheManager.class, createCacheManager())
+
+    task("query") {
+        action { ctx ->
+            // Access registered service
+            def ds = ctx.service(DataSource.class)
+            def conn = ds.connection
+            // Use connection
+        }
+    }
+
+    task("api-call") {
+        action { ctx ->
+            def client = ctx.service(HttpClient.class)
+            def response = client.execute(request)
+            return response
+        }
+    }
+}
+----
+
+=== Service Lifecycle
+
+Services can have lifecycle management:
+
+[source,groovy]
+----
+interface ManagedService {
+    void start()
+    void stop()
+    boolean isRunning()
+}
+
+class ConnectionPoolService implements ManagedService {
+    private HikariDataSource dataSource
+
+    void start() {
+        dataSource = new HikariDataSource(config)
+    }
+
+    void stop() {
+        dataSource?.close()
+    }
+
+    boolean isRunning() {
+        return dataSource != null && !dataSource.isClosed()
+    }
+
+    Connection getConnection() {
+        return dataSource.connection
+    }
+}
+
+// Register managed service
+def poolService = new ConnectionPoolService()
+ctx.registerService(DataSource.class, poolService)
+
+// TaskGraph starts service
+poolService.start()
+
+// Use in tasks
+task("query") {
+    action { ctx ->
+        def pool = ctx.service(DataSource.class)
+        def conn = pool.connection
+        // Use connection
+    }
+}
+
+// TaskGraph stops service on completion
+workflow.onComplete {
+    poolService.stop()
+}
+----
+
+=== Service Factories
+
+Lazy service initialization:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Register service factory
+    serviceFactory(DataSource.class) {
+        // Created on first access
+        createDataSource(ctx.config("database"))
+    }
+
+    task("query") {
+        action { ctx ->
+            // Service created here if not already
+            def ds = ctx.service(DataSource.class)
+            // Use datasource
+        }
+    }
+}
+----
+
+== Event Dispatching
+
+TaskContext provides event publishing capabilities.
+
+=== Publishing Events
+
+[source,groovy]
+----
+task("process") {
+    action { ctx ->
+        // Publish custom event
+        ctx.emit(new CustomEvent(
+            type: "DATA_PROCESSED",
+            data: processedData,
+            timestamp: System.currentTimeMillis()
+        ))
+
+        return processedData
+    }
+}
+----
+
+=== Event Listeners
+
+[source,groovy]
+----
+// Add event listener
+workflow.addListener(new EventListener() {
+    void onEvent(Event event) {
+        if (event instanceof CustomEvent) {
+            println "Custom event: ${event.type}"
+            println "Data: ${event.data}"
+
+            // Send to monitoring system
+            metricsCollector.record(event)
+        }
+    }
+})
+----
+
+=== Typed Event Handlers
+
+[source,groovy]
+----
+// Type-specific handlers
+workflow.on(TaskStartedEvent.class) { event ->
+    println "Task started: ${event.taskName}"
+}
+
+workflow.on(TaskCompletedEvent.class) { event ->
+    println "Task completed: ${event.taskName} in ${event.durationMs}ms"
+}
+
+workflow.on(CustomEvent.class) { event ->
+    println "Custom: ${event.type}"
+}
+----
+
+== Context Inheritance
+
+=== Parent-Child Context
+
+SubGraphs inherit parent context:
+
+[source,groovy]
+----
+def parentWorkflow = TaskGraph.build {
+    global("apiToken", fetchToken())
+    global("environment", "production")
+
+    subgraph("child-workflow", childWorkflow) {
+        // Child inherits parent globals
+    }
+}
+
+def childWorkflow = TaskGraph.build {
+    task("child-task") {
+        action { ctx ->
+            // Access parent global variables
+            def token = ctx.global("apiToken")
+            def env = ctx.global("environment")
+
+            // Child can also set its own
+            ctx.global("childVar", "value")
+        }
+    }
+}
+----
+
+=== Context Isolation
+
+Task-scoped variables are isolated:
+
+[source,groovy]
+----
+task("task1") {
+    action { ctx ->
+        ctx.taskVar("task1", "secret", "sensitive-data")
+        // Only task1 can see this
+    }
+}
+
+task("task2") {
+    action { ctx ->
+        // Cannot access task1's variables
+        def secret = ctx.taskVar("task1", "secret")  // null
+    }
+}
+----
+
+== Advanced Context Features
+
+=== Context Cloning
+
+Clone context for parallel execution:
+
+[source,groovy]
+----
+def baseContext = new TaskContext()
+baseContext.global("shared", "value")
+
+// Clone for isolated execution
+def context1 = baseContext.clone()
+def context2 = baseContext.clone()
+
+// Each clone has independent state
+context1.global("instance", "1")
+context2.global("instance", "2")
+
+// Both see shared values
+assert context1.global("shared") == "value"
+assert context2.global("shared") == "value"
+
+// But not each other's modifications
+assert context1.global("instance") == "1"
+assert context2.global("instance") == "2"
+----
+
+=== Context Snapshots
+
+Capture context state at a point in time:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("setup") {
+        action { ctx ->
+            ctx.global("state", "initialized")
+        }
+    }
+
+    task("checkpoint") {
+        dependsOn "setup"
+        action { ctx ->
+            // Capture snapshot
+            def snapshot = ctx.snapshot()
+
+            // Continue modifying context
+            ctx.global("state", "processing")
+
+            // Restore if needed
+            if (errorOccurred) {
+                ctx.restore(snapshot)
+            }
+        }
+    }
+}
+----
+
+=== Context Validation
+
+Validate required context at build time:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Require globals
+    requireGlobal("apiToken")
+    requireGlobal("environment")
+    requireGlobal("userId")
+
+    // Validate on build
+    validate()
+
+    task("process") {
+        action { ctx ->
+            // Guaranteed to have these globals
+            def token = ctx.global("apiToken")
+            def env = ctx.global("environment")
+        }
+    }
+}
+
+// ❌ Throws ValidationException if missing
+workflow.start()
+----
+
+=== Context Debugging
+
+[source,groovy]
+----
+// Enable context tracing
+ctx.enableTracing()
+
+task("debug") {
+    action { ctx ->
+        // Log context access
+        ctx.global("value")  // Logs: Context.global(value) = ...
+
+        // Dump context state
+        println ctx.dump()
+        /*
+         * Global Variables:
+         *   environment = production
+         *   userId = 12345
+         *   apiToken = ***REDACTED***
+         *
+         * Task Variables:
+         *   task1.state = initialized
+         *
+         * Configuration:
+         *   database.url = jdbc:...
+         *   http.timeout = 30000
+         *
+         * Services:
+         *   DataSource = HikariDataSource@abc123
+         *   HttpClient = ApacheHttpClient@def456
+         */
+    }
+}
+----
+
+== Context Best Practices
+
+=== Use Global Variables for Shared State
+
+[source,groovy]
+----
+// ✅ Good - shared state in globals
+def workflow = TaskGraph.build {
+    global("userId", 12345)
+    global("apiToken", token)
+
+    task("task1") {
+        action { ctx ->
+            def userId = ctx.global("userId")
+            // Use userId
+        }
+    }
+}
+
+// ❌ Bad - duplicated values
+task("task1") {
+    action {
+        def userId = 12345  // Hardcoded
+    }
+}
+----
+
+=== Use Configuration for Environment-Specific Values
+
+[source,groovy]
+----
+// ✅ Good - externalized config
+task("api-call") {
+    action { ctx ->
+        def url = ctx.config("api.url")
+        def timeout = ctx.config("api.timeout")
+        // Use config values
+    }
+}
+
+// ❌ Bad - hardcoded values
+task("api-call") {
+    action {
+        def url = "https://api.example.com"  // Hardcoded
+    }
+}
+----
+
+=== Use Credentials for Sensitive Data
+
+[source,groovy]
+----
+// ✅ Good - secure credential resolution
+task("connect") {
+    action { ctx ->
+        def password = ctx.credential("db-password")
+        // Use password
+    }
+}
+
+// ❌ Bad - hardcoded credentials
+task("connect") {
+    action {
+        def password = "secret123"  // ❌ NEVER DO THIS!
+    }
+}
+----
+
+=== Use Service Registry for Shared Resources
+
+[source,groovy]
+----
+// ✅ Good - shared service
+def workflow = TaskGraph.build {
+    service(HttpClient.class, createClient())
+
+    task("call1") {
+        action { ctx ->
+            def client = ctx.service(HttpClient.class)
+            client.execute(request1)
+        }
+    }
+
+    task("call2") {
+        action { ctx ->
+            def client = ctx.service(HttpClient.class)
+            client.execute(request2)
+        }
+    }
+}
+
+// ❌ Bad - creating multiple clients
+task("call1") {
+    action {
+        def client = new HttpClient()  // Creates new instance
+    }
+}
+task("call2") {
+    action {
+        def client = new HttpClient()  // Creates another instance
+    }
+}
+----
+
+=== Clean Up Task-Scoped Variables
+
+[source,groovy]
+----
+task("large-data") {
+    action { ctx ->
+        def data = fetchLargeDataset()
+
+        // Store temporarily
+        ctx.taskVar("large-data", "dataset", data)
+
+        // Process
+        processData(data)
+
+        // Clean up
+        ctx.removeTaskVar("large-data", "dataset")
+
+        return result
+    }
+}
+----
+
+== Context Performance Considerations
+
+=== Variable Access Performance
+
+* **Global variable access:** O(1) - HashMap lookup
+* **Task variable access:** O(1) - Nested HashMap lookup
+* **Configuration access:** O(1) with caching
+* **Credential access:** O(1) with caching (first access may be slow)
+* **Service access:** O(1) - Registry lookup
+
+=== Memory Management
+
+[source,groovy]
+----
+// Large intermediate results consume memory
+task("large-result") {
+    action {
+        return new byte[100 * 1024 * 1024]  // 100 MB
+    }
+}
+
+// Clear result after use
+task("process") {
+    dependsOn "large-result"
+    action { ctx ->
+        def data = ctx.prev
+        processData(data)
+
+        // Clear from context
+        ctx.clearTaskResult("large-result")
+
+        return result
+    }
+}
+----
+
+=== Credential Caching
+
+[source,groovy]
+----
+// Configure cache TTL
+ctx.credentialCache {
+    ttl 3600  // Cache for 1 hour
+    maxSize 100  // Max 100 credentials
+}
+
+// Credentials cached automatically
+def password = ctx.credential("db-password")  // Fetches
+def password2 = ctx.credential("db-password")  // Cached
+
+// Invalidate when needed
+ctx.invalidateCredential("db-password")
+----
+
+== Summary
+
+TaskContext provides:
+
+* ✅ **Variable storage** - Global and task-scoped variables
+* ✅ **Configuration** - Hierarchical, environment-specific config
+* ✅ **Credentials** - Secure credential resolution with caching
+* ✅ **Service registry** - Shared services and resources
+* ✅ **Event dispatching** - Custom event publishing
+* ✅ **Result access** - Access task results by ID
+* ✅ **Type safety** - Type-safe access methods
+* ✅ **Performance** - Efficient lookups and caching
+
+TaskContext is the glue that binds workflows together, providing a consistent execution environment for all tasks.
+
+== Next Steps
+
+* **Chapter 7** - Practical examples using TaskContext
+* **Chapter 9** - Security features in TaskContext
+* **Chapter 10** - Observability with events

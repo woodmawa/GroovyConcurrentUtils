@@ -1,0 +1,697 @@
+= DSL Approach
+
+[abstract]
+--
+This chapter explains why TaskGraph uses a Groovy DSL rather than XML configuration or annotations, and demonstrates the power and flexibility this provides.
+--
+
+== Why DSL Over XML/Annotations?
+
+TaskGraph chose a Groovy-based DSL approach for workflow definition. Let's explore why this was the right choice.
+
+=== The Problem with XML Configuration
+
+Traditional workflow frameworks often use XML configuration:
+
+[source,xml]
+----
+<!-- ❌ XML Configuration - Verbose and Error-Prone -->
+<workflow id="data-pipeline">
+    <task id="extract" type="http">
+        <property name="url" value="https://api.example.com/data"/>
+        <property name="method" value="GET"/>
+        <dependency ref="validate-credentials"/>
+    </task>
+    <task id="transform" type="script">
+        <property name="language" value="groovy"/>
+        <property name="script"><![CDATA[
+            data.collect { it.value * 2 }
+        ]]></property>
+        <dependency ref="extract"/>
+    </task>
+    <task id="load" type="database">
+        <property name="query" value="INSERT INTO results VALUES (?)"/>
+        <dependency ref="transform"/>
+    </task>
+</workflow>
+----
+
+**Problems with XML:**
+
+* ❌ **Verbose** - 20+ lines for simple workflow
+* ❌ **No type safety** - Errors only at runtime
+* ❌ **No IDE support** - No autocomplete, no refactoring
+* ❌ **Not programmable** - Can't use variables, loops, functions
+* ❌ **Hard to test** - Requires parsing XML in tests
+* ❌ **Poor readability** - Obscured by tags and attributes
+
+=== The Problem with Annotations
+
+Some frameworks use Java annotations:
+
+[source,java]
+----
+// ❌ Annotation Configuration - Rigid and Limited
+@Workflow(id = "data-pipeline")
+public class DataPipeline {
+
+    @Task(id = "extract", type = "http")
+    @HttpConfig(url = "https://api.example.com/data", method = "GET")
+    @DependsOn("validate-credentials")
+    public HttpResult extract() {
+        // Implementation
+    }
+
+    @Task(id = "transform", type = "script")
+    @DependsOn("extract")
+    public List<Data> transform(HttpResult input) {
+        // Limited to Java - no dynamic scripting
+    }
+
+    @Task(id = "load", type = "database")
+    @DependsOn("transform")
+    public void load(List<Data> data) {
+        // Implementation
+    }
+}
+----
+
+**Problems with Annotations:**
+
+* ❌ **Inflexible** - Configuration in code, can't change at runtime
+* ❌ **Verbose** - Lots of boilerplate
+* ❌ **Limited expressiveness** - Annotations have syntax limitations
+* ❌ **Tight coupling** - Workflow structure tied to class structure
+* ❌ **Hard to compose** - Can't easily build from smaller pieces
+
+=== The DSL Advantage
+
+TaskGraph uses a Groovy DSL that combines the best of both worlds:
+
+[source,groovy]
+----
+// ✅ DSL - Concise, Type-Safe, and Powerful
+def workflow = TaskGraph.build {
+    httpTask("extract") {
+        url "https://api.example.com/data"
+        method GET
+        dependsOn "validate-credentials"
+    }
+
+    scriptTask("transform") {
+        dependsOn "extract"
+        script '''
+            data.collect { it.value * 2 }
+        '''
+    }
+
+    sqlTask("load") {
+        dependsOn "transform"
+        query "INSERT INTO results VALUES (?)"
+    }
+}
+----
+
+**Advantages:**
+
+* ✅ **Concise** - 15 lines vs 30+ in XML
+* ✅ **Type-safe** - Compile-time checking
+* ✅ **IDE-friendly** - Autocomplete, refactoring, navigation
+* ✅ **Programmable** - Full Groovy language available
+* ✅ **Testable** - Easy to test in unit tests
+* ✅ **Readable** - Clear intent, minimal noise
+
+== DSL Design Principles
+
+=== Principle 1: Fluent and Readable
+
+The DSL reads like natural language:
+
+[source,groovy]
+----
+task("send-email") {
+    to "user@example.com"
+    subject "Welcome!"
+    body "Thank you for signing up"
+    sendWhen { ctx -> ctx.global("email-verified") }
+}
+----
+
+**Reading aloud:** "Task 'send-email' sends to 'user@example.com' with subject 'Welcome!' and body 'Thank you...' when email is verified."
+
+=== Principle 2: Hierarchical Structure
+
+The DSL reflects the natural hierarchy:
+
+[source,groovy]
+----
+TaskGraph.build {                    // Graph level
+    task("parent") {                 // Task level
+        retryPolicy {                // Feature level
+            maxAttempts 3            // Configuration level
+            delay 1000
+        }
+    }
+}
+----
+
+Each level has appropriate scope and configuration options.
+
+=== Principle 3: Sensible Defaults
+
+Most configuration is optional with sensible defaults:
+
+[source,groovy]
+----
+// Minimal configuration - uses defaults
+httpTask("fetch") {
+    url "https://api.example.com/data"
+    // Defaults: method=GET, timeout=30s, retries=0
+}
+
+// Full configuration - override defaults
+httpTask("fetch") {
+    url "https://api.example.com/data"
+    method POST
+    timeout 60000
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+    }
+}
+----
+
+=== Principle 4: Type Safety
+
+The DSL leverages Groovy's static typing:
+
+[source,groovy]
+----
+httpTask("api-call") {
+    url "https://api.example.com"  // ✅ String
+    method POST                     // ✅ Enum (HttpMethod.POST)
+    timeout 30000                   // ✅ Integer (milliseconds)
+
+    // url 12345                    // ❌ Compile error: wrong type
+    // method "INVALID"             // ❌ Compile error: invalid method
+}
+----
+
+IDE provides autocomplete and type checking:
+
+image::images/ide-autocomplete.png[]
+
+=== Principle 5: Composability
+
+DSL elements compose naturally:
+
+[source,groovy]
+----
+// Define reusable pieces
+def retryConfig = {
+    maxAttempts 3
+    delay 1000
+    exponentialBackoff true
+}
+
+def securityHeaders = {
+    header "Authorization", "Bearer ${token}"
+    header "X-API-Key", apiKey
+}
+
+// Compose into tasks
+httpTask("api-call-1") {
+    url "https://api1.example.com"
+    retryPolicy(retryConfig)
+    headers(securityHeaders)
+}
+
+httpTask("api-call-2") {
+    url "https://api2.example.com"
+    retryPolicy(retryConfig)
+    headers(securityHeaders)
+}
+----
+
+== DSL Components
+
+=== Graph-Level DSL
+
+The top level defines the workflow structure:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Graph configuration
+    maxConcurrency 10
+    id "my-workflow"
+    failFast true
+
+    // Task definitions
+    task("step1") { /* ... */ }
+    task("step2") { /* ... */ }
+
+    // Add listeners
+    addListener(myListener)
+}
+----
+
+**Available at graph level:**
+
+* `maxConcurrency` - Limit concurrent tasks
+* `id` - Workflow identifier
+* `failFast` - Stop on first failure
+* `addListener` - Register event listeners
+* `task()` - Define tasks
+* Gateway builders (covered in Chapter 12)
+
+=== Task-Level DSL
+
+Each task type has specific DSL methods:
+
+[source,groovy]
+----
+httpTask("api-call") {
+    // HTTP-specific
+    url "https://api.example.com"
+    method POST
+    json { name: "Alice", age: 30 }
+    auth {
+        bearer token
+    }
+
+    // Common to all tasks
+    dependsOn "previous-task"
+    retryPolicy { /* ... */ }
+    timeout 30000
+    concurrencyLimit 5
+}
+----
+
+**Common task configuration:**
+
+* `dependsOn` - Task dependencies
+* `retryPolicy` - Retry configuration
+* `circuitBreaker` - Circuit breaker config
+* `timeout` - Task timeout
+* `concurrencyLimit` - Concurrent instances
+* `resource` - Shared resource semaphore
+* `condition` - Conditional execution
+* `idempotencyPolicy` - Idempotency config
+
+**Task-specific configuration:**
+
+* HttpTask: `url`, `method`, `headers`, `auth`, `json`, `formData`
+* SqlTask: `query`, `parameters`, `datasource`
+* ScriptTask: `language`, `script`, `bindings`, `sandboxed`
+* FileTask: `sources`, `operation`, `securityConfig`
+
+=== Closure-Based Configuration
+
+Many DSL methods accept closures for complex configuration:
+
+[source,groovy]
+----
+task("complex") {
+    // Closure for retry policy
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+        exponentialBackoff true
+        retryOn(IOException.class, TimeoutException.class)
+    }
+
+    // Closure for circuit breaker
+    circuitBreaker {
+        failureThreshold 5
+        timeout 30000
+        halfOpenAfter 60000
+    }
+
+    // Closure for action
+    action { ctx ->
+        def input = ctx.prev
+        return processData(input)
+    }
+}
+----
+
+=== Method Reference Support
+
+The DSL supports method references for cleaner code:
+
+[source,groovy]
+----
+class DataProcessor {
+    def extract(ctx) { /* ... */ }
+    def transform(ctx) { /* ... */ }
+    def load(ctx) { /* ... */ }
+}
+
+def processor = new DataProcessor()
+
+TaskGraph.build {
+    task("extract", processor::extract)
+    task("transform", processor::transform) {
+        dependsOn "extract"
+    }
+    task("load", processor::load) {
+        dependsOn "transform"
+    }
+}
+----
+
+== Dynamic Workflow Construction
+
+The DSL is programmable - you can use Groovy's full power:
+
+=== Loops and Iteration
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Generate tasks dynamically
+    def regions = ['us-east', 'eu-west', 'ap-south']
+
+    regions.each { region ->
+        httpTask("fetch-${region}") {
+            url "https://api.${region}.example.com/data"
+        }
+    }
+
+    // Aggregate all results
+    task("aggregate") {
+        dependsOn regions.collect { "fetch-${it}" }
+        action { ctx ->
+            regions.collect { ctx.taskResult("fetch-${it}") }
+        }
+    }
+}
+----
+
+=== Conditional Task Creation
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("process") { /* ... */ }
+
+    // Add email notification only in production
+    if (System.getenv("ENVIRONMENT") == "production") {
+        mailTask("notify") {
+            dependsOn "process"
+            to "ops@example.com"
+            subject "Processing completed"
+        }
+    }
+}
+----
+
+=== Parameterized Workflows
+
+[source,groovy]
+----
+def buildDataPipeline(String source, String destination, int parallelism) {
+    return TaskGraph.build {
+        maxConcurrency parallelism
+
+        task("extract-${source}") {
+            // Extract from source
+        }
+
+        task("load-${destination}") {
+            dependsOn "extract-${source}"
+            // Load to destination
+        }
+    }
+}
+
+// Create multiple pipelines
+def pipeline1 = buildDataPipeline("s3", "postgres", 10)
+def pipeline2 = buildDataPipeline("kafka", "elasticsearch", 5)
+----
+
+=== Higher-Order Functions
+
+[source,groovy]
+----
+// Reusable workflow builder
+def withRetryAndCircuitBreaker(Closure taskDef) {
+    return {
+        taskDef.delegate = delegate
+        taskDef()
+
+        retryPolicy {
+            maxAttempts 3
+            delay 1000
+        }
+        circuitBreaker {
+            failureThreshold 5
+            timeout 30000
+        }
+    }
+}
+
+// Use the builder
+TaskGraph.build {
+    task("resilient-api-call", withRetryAndCircuitBreaker {
+        httpTask {
+            url "https://api.example.com"
+        }
+    })
+}
+----
+
+== DSL Best Practices
+
+=== Extract Common Configuration
+
+Don't repeat yourself - extract common patterns:
+
+[source,groovy]
+----
+// ❌ Repetitive
+httpTask("api1") {
+    auth { bearer token }
+    header "Content-Type", "application/json"
+    timeout 30000
+    retryPolicy { maxAttempts 3; delay 1000 }
+}
+
+httpTask("api2") {
+    auth { bearer token }
+    header "Content-Type", "application/json"
+    timeout 30000
+    retryPolicy { maxAttempts 3; delay 1000 }
+}
+
+// ✅ Extracted common config
+def apiDefaults = {
+    auth { bearer token }
+    header "Content-Type", "application/json"
+    timeout 30000
+    retryPolicy { maxAttempts 3; delay 1000 }
+}
+
+httpTask("api1") {
+    url "https://api1.example.com"
+    apiDefaults.delegate = delegate
+    apiDefaults()
+}
+
+httpTask("api2") {
+    url "https://api2.example.com"
+    apiDefaults.delegate = delegate
+    apiDefaults()
+}
+----
+
+=== Use Descriptive Task IDs
+
+Task IDs should describe what the task does:
+
+[source,groovy]
+----
+// ❌ Poor task IDs
+task("task1") { /* ... */ }
+task("task2") { /* ... */ }
+task("task3") { /* ... */ }
+
+// ✅ Descriptive task IDs
+task("validate-user-input") { /* ... */ }
+task("fetch-customer-data") { /* ... */ }
+task("calculate-invoice-total") { /* ... */ }
+----
+
+=== Group Related Tasks
+
+Use logical grouping for clarity:
+
+[source,groovy]
+----
+TaskGraph.build {
+    // Data extraction phase
+    task("extract-users") { /* ... */ }
+    task("extract-orders") { /* ... */ }
+    task("extract-products") { /* ... */ }
+
+    // Transformation phase
+    task("transform-users") {
+        dependsOn "extract-users"
+    }
+    task("transform-orders") {
+        dependsOn "extract-orders"
+    }
+    task("transform-products") {
+        dependsOn "extract-products"
+    }
+
+    // Loading phase
+    task("load-data-warehouse") {
+        dependsOn "transform-users", "transform-orders", "transform-products"
+    }
+}
+----
+
+=== Leverage Type Safety
+
+Use enums and constants instead of strings:
+
+[source,groovy]
+----
+import static org.softwood.dag.task.HttpMethod.*
+
+// ✅ Type-safe
+httpTask("api-call") {
+    method POST  // Enum
+}
+
+// ❌ String-based (error-prone)
+httpTask("api-call") {
+    method "POST"  // Typos not caught: "PSOT", "post", etc.
+}
+----
+
+== DSL vs Programmatic API
+
+TaskGraph provides both DSL and programmatic APIs:
+
+=== DSL Approach (Recommended)
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("step1") { /* ... */ }
+    task("step2") {
+        dependsOn "step1"
+    }
+}
+----
+
+**When to use:**
+* Building workflows declaratively
+* Rapid prototyping
+* Configuration-driven workflows
+* Most use cases
+
+=== Programmatic API
+
+[source,groovy]
+----
+def workflow = new TaskGraph()
+def task1 = new ServiceTask("step1", "Step 1", ctx)
+def task2 = new ServiceTask("step2", "Step 2", ctx)
+task2.addPredecessor(task1)
+workflow.addTask(task1)
+workflow.addTask(task2)
+----
+
+**When to use:**
+* Dynamic workflow generation at runtime
+* Complex conditional logic
+* Integration with external systems
+* Advanced customization
+
+=== Hybrid Approach
+
+Mix both styles as needed:
+
+[source,groovy]
+----
+// Start with DSL
+def workflow = TaskGraph.build {
+    task("step1") { /* ... */ }
+}
+
+// Add tasks programmatically
+if (needsExtraProcessing) {
+    def extraTask = new CustomTask("extra", "Extra", ctx)
+    workflow.addTask(extraTask)
+    workflow.getDependencyGraph().addEdge("step1", "extra")
+}
+----
+
+== Comparison Summary
+
+[cols="1,3,3,3"]
+|===
+|Aspect |XML |Annotations |DSL
+
+|**Verbosity**
+|High
+|Medium
+|Low
+
+|**Type Safety**
+|None
+|Compile-time
+|Compile-time
+
+|**IDE Support**
+|Poor
+|Good
+|Excellent
+
+|**Programmability**
+|None
+|Limited
+|Full Groovy
+
+|**Testability**
+|Hard
+|Medium
+|Easy
+
+|**Flexibility**
+|Low
+|Low
+|High
+
+|**Learning Curve**
+|Easy
+|Medium
+|Easy
+
+|**Runtime Changes**
+|Possible
+|Not possible
+|Possible
+|===
+
+== Summary
+
+The DSL approach provides:
+
+* ✅ **Concise syntax** - Less boilerplate
+* ✅ **Type safety** - Compile-time checking
+* ✅ **IDE support** - Autocomplete and refactoring
+* ✅ **Programmable** - Full Groovy power
+* ✅ **Testable** - Easy unit testing
+* ✅ **Flexible** - Dynamic construction
+
+This makes TaskGraph workflows easy to write, maintain, and evolve.
+
+== Next Steps
+
+* **Chapter 3** - Understand the foundation libraries (Pool & Promises)
+* **Chapter 7** - See practical examples of DSL usage

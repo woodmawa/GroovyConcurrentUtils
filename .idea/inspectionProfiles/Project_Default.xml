@@ -1,0 +1,11 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <!--
+      Disable spurious "Name already defined" errors for generic type parameters
+      in static methods. This is a known IntelliJ IDEA bug with Groovy's handling
+      of method-level type parameters like static <T> Promise<T> method()
+    -->
+    <inspection_tool class="GroovyAssignabilityCheck" enabled="false" level="WARNING" enabled_by_default="false" />
+  </profile>
+</component>

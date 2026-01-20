@@ -1,0 +1,797 @@
+= Practical Examples and Usage Patterns
+
+[abstract]
+--
+This chapter provides practical, real-world examples demonstrating common TaskGraph usage patterns. Each example is complete and ready to adapt for your own workflows.
+--
+
+== Overview
+
+This chapter covers common workflow patterns:
+
+* Data pipelines (ETL)
+* API orchestration
+* Parallel processing
+* Conditional workflows
+* Error handling patterns
+* Retry strategies
+* Long-running workflows
+* Event-driven workflows
+
+== Example 1: Simple Data Pipeline (ETL)
+
+Extract data from an API, transform it, and load into a database.
+
+[source,groovy]
+----
+import org.softwood.dag.*
+
+def etlPipeline = TaskGraph.build {
+    // Extract: Fetch data from REST API
+    httpTask("extract-users") {
+        url "https://api.example.com/users"
+        method GET
+        header "Authorization", "Bearer ${config('api.token')}"
+
+        retryPolicy {
+            maxAttempts 3
+            delay 1000
+            exponentialBackoff true
+        }
+    }
+
+    // Transform: Clean and validate data
+    scriptTask("transform-users") {
+        dependsOn "extract-users"
+
+        script '''
+            def users = bindings.users
+            return users.collect { user ->
+                [
+                    id: user.id,
+                    name: user.name?.trim(),
+                    email: user.email?.toLowerCase(),
+                    created: new Date()
+                ]
+            }.findAll { it.name && it.email }
+        '''
+
+        bindings { ctx ->
+            [users: ctx.prev]
+        }
+    }
+
+    // Load: Insert into database
+    sqlTask("load-users") {
+        dependsOn "transform-users"
+
+        datasource myDataSource
+        query """
+            INSERT INTO users (id, name, email, created)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                email = EXCLUDED.email
+        """
+
+        batchParameters { ctx ->
+            ctx.prev.collect { user ->
+                [user.id, user.name, user.email, user.created]
+            }
+        }
+    }
+}
+
+// Execute pipeline
+def result = etlPipeline.start().get()
+println "Loaded ${result.getTaskResult('load-users').rowsAffected} users"
+----
+
+== Example 2: Fan-Out / Fan-In Pattern
+
+Process multiple data sources in parallel, then aggregate results.
+
+[source,groovy]
+----
+def aggregationWorkflow = TaskGraph.build {
+    // Define multiple data sources
+    def sources = ['users', 'orders', 'products', 'reviews']
+
+    // Fan-out: Fetch from all sources in parallel
+    sources.each { source ->
+        httpTask("fetch-${source}") {
+            url "https://api.example.com/${source}"
+            method GET
+            timeout 30000
+
+            circuitBreaker {
+                failureThreshold 5
+                timeout 30000
+            }
+        }
+    }
+
+    // Fan-in: Aggregate all results
+    task("aggregate-data") {
+        dependsOn sources.collect { "fetch-${it}" }
+
+        action { ctx ->
+            def aggregated = [:]
+
+            sources.each { source ->
+                def result = ctx.taskResult("fetch-${source}")
+                aggregated[source] = result
+            }
+
+            return [
+                timestamp: new Date(),
+                sources: aggregated.keySet(),
+                totalRecords: aggregated.values().sum { it.size() },
+                data: aggregated
+            ]
+        }
+    }
+
+    // Store aggregated results
+    task("store-results") {
+        dependsOn "aggregate-data"
+
+        action { ctx ->
+            def data = ctx.prev
+            storageService.save("daily-aggregation", data)
+            return "Stored ${data.totalRecords} records"
+        }
+    }
+}
+
+def result = aggregationWorkflow.start().get()
+println result.getTaskResult("store-results").value
+----
+
+== Example 3: Conditional Routing
+
+Route workflow based on runtime conditions.
+
+[source,groovy]
+----
+def conditionalWorkflow = TaskGraph.build {
+    // Fetch user data
+    task("fetch-user") {
+        action { ctx ->
+            def userId = ctx.global("userId")
+            return userService.getUser(userId)
+        }
+    }
+
+    // Route based on user type
+    exclusiveGateway("check-user-type") {
+        dependsOn "fetch-user"
+
+        condition { ctx ->
+            def user = ctx.prev
+            user.type == "premium"
+        }
+
+        whenTrue {
+            task("premium-processing") {
+                action { ctx ->
+                    def user = ctx.taskResult("fetch-user")
+                    return processPremiumUser(user)
+                }
+            }
+        }
+
+        whenFalse {
+            task("standard-processing") {
+                action { ctx ->
+                    def user = ctx.taskResult("fetch-user")
+                    return processStandardUser(user)
+                }
+            }
+        }
+    }
+
+    // Merge paths
+    task("finalize") {
+        dependsOn "premium-processing", "standard-processing"
+
+        action { ctx ->
+            // One of these will have executed
+            def result = ctx.taskResult("premium-processing") ?:
+                        ctx.taskResult("standard-processing")
+
+            finalizeProcessing(result)
+        }
+    }
+}
+----
+
+== Example 4: Error Handling with Fallbacks
+
+Handle errors gracefully with fallback strategies.
+
+[source,groovy]
+----
+def resilientWorkflow = TaskGraph.build {
+    // Primary data source
+    httpTask("fetch-primary") {
+        url "https://primary-api.example.com/data"
+        timeout 5000
+
+        circuitBreaker {
+            failureThreshold 3
+            timeout 30000
+        }
+    }
+
+    // Fallback to cache
+    task("try-cache") {
+        condition { ctx ->
+            // Only run if primary failed
+            ctx.taskResult("fetch-primary")?.isFailure()
+        }
+
+        action { ctx ->
+            log.warn("Primary source failed, trying cache")
+            return cacheService.get("cached-data")
+        }
+    }
+
+    // Final fallback to secondary source
+    httpTask("fetch-secondary") {
+        condition { ctx ->
+            ctx.taskResult("fetch-primary")?.isFailure() &&
+            ctx.taskResult("try-cache")?.isEmpty()
+        }
+
+        url "https://secondary-api.example.com/data"
+        timeout 10000
+
+        retryPolicy {
+            maxAttempts 5
+            delay 2000
+        }
+    }
+
+    // Use whichever source worked
+    task("process-data") {
+        dependsOn "fetch-primary", "try-cache", "fetch-secondary"
+
+        action { ctx ->
+            def data = ctx.taskResult("fetch-primary")?.value ?:
+                      ctx.taskResult("try-cache")?.value ?:
+                      ctx.taskResult("fetch-secondary")?.value
+
+            if (!data) {
+                throw new NoDataException("All sources failed")
+            }
+
+            return processData(data)
+        }
+    }
+}
+----
+
+== Example 5: Parallel Batch Processing
+
+Process large datasets in parallel batches.
+
+[source,groovy]
+----
+def batchWorkflow = TaskGraph.build {
+    // Fetch all records
+    task("fetch-records") {
+        action {
+            return recordService.findAll() // Returns 10,000 records
+        }
+    }
+
+    // Create batches
+    task("create-batches") {
+        dependsOn "fetch-records"
+
+        action { ctx ->
+            def records = ctx.prev
+            def batchSize = 100
+
+            return records.collate(batchSize) // 100 batches of 100
+        }
+    }
+
+    // Process batches in parallel
+    task("process-batches") {
+        dependsOn "create-batches"
+        concurrencyLimit 10 // Max 10 batches at once
+
+        action { ctx ->
+            def batches = ctx.prev
+
+            def promises = batches.withIndex().collect { batch, index ->
+                Promises.task(pool) {
+                    log.info("Processing batch ${index + 1}/${batches.size()}")
+                    processBatch(batch)
+                }
+            }
+
+            // Wait for all batches
+            return Promises.all(promises).get()
+        }
+    }
+
+    // Aggregate results
+    task("aggregate-results") {
+        dependsOn "process-batches"
+
+        action { ctx ->
+            def batchResults = ctx.prev
+
+            return [
+                totalProcessed: batchResults.sum { it.count },
+                successful: batchResults.count { it.success },
+                failed: batchResults.count { !it.success },
+                duration: System.currentTimeMillis() - startTime
+            ]
+        }
+    }
+}
+
+def result = batchWorkflow.start().get()
+println "Processed ${result.getTaskResult('aggregate-results').totalProcessed} records"
+----
+
+== Example 6: Saga Pattern (Distributed Transaction)
+
+Implement compensating transactions for distributed operations.
+
+[source,groovy]
+----
+def bookingSaga = TaskGraph.build {
+    // Step 1: Reserve flight
+    task("reserve-flight") {
+        action { ctx ->
+            def booking = ctx.global("booking")
+            return flightService.reserve(booking.flightId)
+        }
+
+        onError { ctx, error ->
+            // No compensation needed - reservation not made
+            log.error("Flight reservation failed", error)
+        }
+    }
+
+    // Step 2: Reserve hotel
+    task("reserve-hotel") {
+        dependsOn "reserve-flight"
+
+        action { ctx ->
+            def booking = ctx.global("booking")
+            return hotelService.reserve(booking.hotelId)
+        }
+
+        onError { ctx, error ->
+            // Compensate: Cancel flight
+            def flightReservation = ctx.taskResult("reserve-flight")
+            flightService.cancel(flightReservation.id)
+            log.error("Hotel reservation failed, cancelled flight", error)
+        }
+    }
+
+    // Step 3: Charge payment
+    task("charge-payment") {
+        dependsOn "reserve-hotel"
+
+        action { ctx ->
+            def booking = ctx.global("booking")
+            return paymentService.charge(booking.amount, booking.cardId)
+        }
+
+        onError { ctx, error ->
+            // Compensate: Cancel hotel and flight
+            def hotelReservation = ctx.taskResult("reserve-hotel")
+            def flightReservation = ctx.taskResult("reserve-flight")
+
+            hotelService.cancel(hotelReservation.id)
+            flightService.cancel(flightReservation.id)
+
+            log.error("Payment failed, cancelled all reservations", error)
+        }
+    }
+
+    // Step 4: Confirm booking
+    task("confirm-booking") {
+        dependsOn "charge-payment"
+
+        action { ctx ->
+            def flightRes = ctx.taskResult("reserve-flight")
+            def hotelRes = ctx.taskResult("reserve-hotel")
+            def payment = ctx.taskResult("charge-payment")
+
+            return bookingService.confirm(
+                flightRes.id,
+                hotelRes.id,
+                payment.transactionId
+            )
+        }
+
+        onError { ctx, error ->
+            // Compensate: Refund and cancel all
+            def payment = ctx.taskResult("charge-payment")
+            paymentService.refund(payment.transactionId)
+
+            def hotelRes = ctx.taskResult("reserve-hotel")
+            def flightRes = ctx.taskResult("reserve-flight")
+
+            hotelService.cancel(hotelRes.id)
+            flightService.cancel(flightRes.id)
+
+            log.error("Confirmation failed, rolled back all", error)
+        }
+    }
+}
+----
+
+== Example 7: API Orchestration
+
+Orchestrate multiple API calls with dependencies.
+
+[source,groovy]
+----
+def apiOrchestration = TaskGraph.build {
+    // Authenticate
+    httpTask("authenticate") {
+        url "https://auth.example.com/token"
+        method POST
+        json {
+            client_id: config("auth.clientId")
+            client_secret: credential("auth-secret")
+            grant_type: "client_credentials"
+        }
+    }
+
+    // Fetch user profile (needs auth)
+    httpTask("fetch-profile") {
+        dependsOn "authenticate"
+
+        url "https://api.example.com/profile"
+        method GET
+
+        header { ctx ->
+            def token = ctx.taskResult("authenticate").access_token
+            return ["Authorization": "Bearer ${token}"]
+        }
+    }
+
+    // Fetch user orders (parallel with profile)
+    httpTask("fetch-orders") {
+        dependsOn "authenticate"
+
+        url "https://api.example.com/orders"
+        method GET
+
+        header { ctx ->
+            def token = ctx.taskResult("authenticate").access_token
+            return ["Authorization": "Bearer ${token}"]
+        }
+    }
+
+    // Fetch recommendations (parallel)
+    httpTask("fetch-recommendations") {
+        dependsOn "authenticate"
+
+        url "https://api.example.com/recommendations"
+        method GET
+
+        header { ctx ->
+            def token = ctx.taskResult("authenticate").access_token
+            return ["Authorization": "Bearer ${token}"]
+        }
+    }
+
+    // Combine all data
+    task("combine-data") {
+        dependsOn "fetch-profile", "fetch-orders", "fetch-recommendations"
+
+        action { ctx ->
+            return [
+                profile: ctx.taskResult("fetch-profile"),
+                orders: ctx.taskResult("fetch-orders"),
+                recommendations: ctx.taskResult("fetch-recommendations"),
+                timestamp: new Date()
+            ]
+        }
+    }
+
+    // Cache combined data
+    task("cache-data") {
+        dependsOn "combine-data"
+
+        action { ctx ->
+            def data = ctx.prev
+            cacheService.put("user-data", data, ttl: 3600)
+            return "Cached"
+        }
+    }
+}
+----
+
+== Example 8: File Processing Pipeline
+
+Process files with validation and transformation.
+
+[source,groovy]
+----
+def fileProcessor = TaskGraph.build {
+    // Read input file
+    fileTask("read-input") {
+        operation READ
+        sources(["/data/input/customers.csv"])
+
+        securityConfig {
+            allowedDirectories(["/data/input"])
+            maxFileSize 100 * 1024 * 1024 // 100 MB
+        }
+    }
+
+    // Parse CSV
+    task("parse-csv") {
+        dependsOn "read-input"
+
+        action { ctx ->
+            def content = ctx.prev
+            return CSVParser.parse(content)
+        }
+    }
+
+    // Validate records
+    task("validate-records") {
+        dependsOn "parse-csv"
+
+        action { ctx ->
+            def records = ctx.prev
+
+            return records.collect { record ->
+                def errors = []
+
+                if (!record.email?.matches(/.*@.*/)) {
+                    errors << "Invalid email"
+                }
+                if (!record.phone?.matches(/\d{10}/)) {
+                    errors << "Invalid phone"
+                }
+
+                return [
+                    record: record,
+                    valid: errors.isEmpty(),
+                    errors: errors
+                ]
+            }
+        }
+    }
+
+    // Split valid/invalid
+    task("split-records") {
+        dependsOn "validate-records"
+
+        action { ctx ->
+            def validated = ctx.prev
+
+            return [
+                valid: validated.findAll { it.valid }.collect { it.record },
+                invalid: validated.findAll { !it.valid }
+            ]
+        }
+    }
+
+    // Process valid records
+    task("process-valid") {
+        dependsOn "split-records"
+
+        action { ctx ->
+            def split = ctx.prev
+            def valid = split.valid
+
+            // Transform and enrich
+            return valid.collect { record ->
+                enrichCustomerData(record)
+            }
+        }
+    }
+
+    // Write valid records
+    fileTask("write-valid") {
+        dependsOn "process-valid"
+
+        operation WRITE
+        destination "/data/output/customers-processed.json"
+        content { ctx -> JsonOutput.toJson(ctx.prev) }
+
+        securityConfig {
+            allowedDirectories(["/data/output"])
+        }
+    }
+
+    // Write error report
+    task("write-errors") {
+        dependsOn "split-records"
+
+        action { ctx ->
+            def split = ctx.taskResult("split-records")
+            def invalid = split.invalid
+
+            def report = invalid.collect { record ->
+                "${record.record.id}: ${record.errors.join(', ')}"
+            }.join("\n")
+
+            new File("/data/output/errors.txt").text = report
+            return "${invalid.size()} errors written"
+        }
+    }
+}
+----
+
+== Example 9: Periodic Job with Scheduling
+
+Schedule recurring workflow execution.
+
+[source,groovy]
+----
+import java.util.concurrent.*
+
+// Define workflow
+def dailyReport = TaskGraph.build {
+    task("fetch-daily-data") {
+        action {
+            def yesterday = new Date() - 1
+            return dataService.fetchByDate(yesterday)
+        }
+    }
+
+    task("generate-report") {
+        dependsOn "fetch-daily-data"
+
+        action { ctx ->
+            def data = ctx.prev
+            return reportGenerator.create(data)
+        }
+    }
+
+    task("send-email") {
+        dependsOn "generate-report"
+
+        mailTask {
+            to config("report.recipients")
+            subject "Daily Report - ${new Date().format('yyyy-MM-dd')}"
+            attachments { ctx -> [ctx.prev] }
+        }
+    }
+}
+
+// Schedule daily execution
+def scheduler = Executors.newScheduledThreadPool(1)
+
+scheduler.scheduleAtFixedRate(
+    {
+        try {
+            log.info("Starting daily report")
+            def result = dailyReport.start().get()
+            log.info("Daily report completed: ${result.status}")
+        } catch (Exception e) {
+            log.error("Daily report failed", e)
+            notifyOps(e)
+        }
+    },
+    0,                          // Initial delay
+    1,                          // Period
+    TimeUnit.DAYS               // Unit
+)
+----
+
+== Example 10: Dynamic Workflow Construction
+
+Build workflow dynamically based on configuration.
+
+[source,groovy]
+----
+def buildDynamicWorkflow(Config config) {
+    return TaskGraph.build {
+        // Create tasks for each data source
+        config.dataSources.each { source ->
+            httpTask("fetch-${source.id}") {
+                url source.url
+                method GET
+                timeout source.timeout ?: 30000
+
+                if (source.requiresAuth) {
+                    header "Authorization", "Bearer ${credential(source.credentialId)}"
+                }
+            }
+        }
+
+        // Create transformation tasks
+        config.transformations.each { transform ->
+            task("transform-${transform.id}") {
+                // Depend on source task
+                dependsOn "fetch-${transform.sourceId}"
+
+                action { ctx ->
+                    def data = ctx.prev
+                    applyTransformation(data, transform.rules)
+                }
+            }
+        }
+
+        // Create loading tasks
+        config.destinations.each { dest ->
+            task("load-${dest.id}") {
+                // Depend on corresponding transformation
+                dependsOn "transform-${dest.transformId}"
+
+                action { ctx ->
+                    def data = ctx.prev
+                    loadToDestination(data, dest)
+                }
+            }
+        }
+    }
+}
+
+// Load configuration
+def config = ConfigLoader.load("workflow-config.yml")
+
+// Build and execute workflow
+def workflow = buildDynamicWorkflow(config)
+def result = workflow.start().get()
+----
+
+== Common Patterns Summary
+
+[cols="1,3,2"]
+|===
+|Pattern |Use Case |Key Features
+
+|**ETL Pipeline**
+|Data extraction, transformation, loading
+|Sequential dependencies, error handling
+
+|**Fan-Out / Fan-In**
+|Parallel processing, aggregation
+|Parallel execution, result combination
+
+|**Conditional Routing**
+|Branch based on runtime data
+|Exclusive gateways, dynamic paths
+
+|**Fallback Chain**
+|Resilience, fault tolerance
+|Multiple data sources, graceful degradation
+
+|**Batch Processing**
+|Large dataset processing
+|Parallel batches, concurrency limits
+
+|**Saga Pattern**
+|Distributed transactions
+|Compensation, rollback logic
+
+|**API Orchestration**
+|Multiple API coordination
+|Authentication, parallel calls
+
+|**File Processing**
+|File validation, transformation
+|Read/write, validation, error handling
+
+|**Scheduled Jobs**
+|Recurring workflows
+|Periodic execution, error notification
+
+|**Dynamic Workflows**
+|Config-driven workflows
+|Runtime construction, flexibility
+|===
+
+== Next Steps
+
+* **Chapter 8** - Test these patterns with the test harness
+* **Chapter 9** - Add security to workflows
+* **Chapter 10** - Monitor workflow execution

@@ -1,0 +1,954 @@
+= Observability and Monitoring
+
+[abstract]
+--
+This chapter covers TaskGraph's observability features including event-driven monitoring, metrics collection, execution snapshots, health checks, and integration with monitoring systems. Learn how to watch and observe TaskGraph execution from your code.
+--
+
+== Overview
+
+TaskGraph provides comprehensive observability through:
+
+* **Event system** - Real-time workflow events
+* **Execution snapshots** - Point-in-time workflow state
+* **Health checks** - Workflow and task health monitoring
+* **Metrics collection** - Performance and resource metrics
+* **Distributed tracing** - Track execution across systems
+* **Logging integration** - Structured logging support
+* **Monitoring integrations** - Prometheus, Grafana, etc.
+
+[plantuml, observability-arch, svg]
+....
+@startuml
+package "TaskGraph" {
+    [Workflow Execution] as WF
+}
+
+package "Observability Layer" {
+    [Event Dispatcher] as Events
+    [Metrics Collector] as Metrics
+    [Health Monitor] as Health
+    [Snapshot Manager] as Snapshots
+}
+
+package "Integrations" {
+    [Prometheus] as Prom
+    [Grafana] as Graf
+    [Jaeger] as Trace
+    [ELK Stack] as ELK
+}
+
+WF --> Events
+WF --> Metrics
+WF --> Health
+WF --> Snapshots
+
+Events --> Prom
+Metrics --> Prom
+Health --> Prom
+
+Prom --> Graf
+Events --> Trace
+Events --> ELK
+@enduml
+....
+
+== Event System
+
+TaskGraph emits events at every lifecycle stage.
+
+=== Event Types
+
+[source,groovy]
+----
+// Graph-level events
+GRAPH_STARTED          // Workflow execution started
+GRAPH_COMPLETED        // Workflow completed successfully
+GRAPH_FAILED           // Workflow failed
+GRAPH_PAUSED           // Workflow paused
+GRAPH_RESUMED          // Workflow resumed
+GRAPH_CANCELLED        // Workflow cancelled
+
+// Task-level events
+TASK_SCHEDULED         // Task scheduled for execution
+TASK_STARTED           // Task execution started
+TASK_COMPLETED         // Task completed successfully
+TASK_FAILED            // Task failed
+TASK_RETRYING          // Task retrying after failure
+TASK_SKIPPED           // Task skipped (condition false)
+TASK_TIMEOUT           // Task timed out
+
+// Resilience events
+CIRCUIT_OPENED         // Circuit breaker opened
+CIRCUIT_HALF_OPEN      // Circuit breaker half-open
+CIRCUIT_CLOSED         // Circuit breaker closed
+RATE_LIMITED           // Task rate limited
+RESOURCE_WARNING       // Resource usage warning
+
+// Custom events
+CUSTOM_EVENT           // User-defined events
+----
+
+=== Event Listeners
+
+[source,groovy]
+----
+import org.softwood.dag.events.*
+
+def workflow = TaskGraph.build {
+    task("my-task") {
+        action { "result" }
+    }
+}
+
+// Add event listener
+workflow.addListener(new GraphEventListener() {
+    @Override
+    void onEvent(GraphEvent event) {
+        switch (event.type) {
+            case GRAPH_STARTED:
+                println "Workflow started: ${event.graphId}"
+                metricsCollector.workflowStarted(event.graphId)
+                break
+
+            case TASK_STARTED:
+                def task = event.taskEvent
+                println "Task started: ${task.taskName}"
+                logToElastic(task)
+                break
+
+            case TASK_COMPLETED:
+                def task = event.taskEvent
+                println "Task completed: ${task.taskName} in ${task.durationMs}ms"
+                metricsCollector.taskCompleted(task)
+                break
+
+            case TASK_FAILED:
+                def task = event.taskEvent
+                println "Task failed: ${task.taskName} - ${task.error}"
+                alertOps(task)
+                break
+
+            case GRAPH_COMPLETED:
+                println "Workflow completed in ${event.durationMs}ms"
+                metricsCollector.workflowCompleted(event)
+                break
+        }
+    }
+})
+
+// Execute workflow
+workflow.start()
+----
+
+=== Typed Event Handlers
+
+[source,groovy]
+----
+// Register handlers for specific event types
+workflow.on(TaskStartedEvent.class) { event ->
+    println "Task ${event.taskName} started"
+    startTimer(event.taskName)
+}
+
+workflow.on(TaskCompletedEvent.class) { event ->
+    println "Task ${event.taskName} completed in ${event.durationMs}ms"
+    stopTimer(event.taskName)
+    recordMetric(event.taskName, event.durationMs)
+}
+
+workflow.on(TaskFailedEvent.class) { event ->
+    log.error("Task ${event.taskName} failed", event.error)
+    incrementFailureCounter(event.taskName)
+    if (event.critical) {
+        alertOps(event)
+    }
+}
+
+workflow.on(CircuitBreakerEvent.class) { event ->
+    log.warn("Circuit breaker ${event.state} for task ${event.taskName}")
+    updateCircuitBreakerMetric(event.taskName, event.state)
+}
+----
+
+=== Async Event Processing
+
+[source,groovy]
+----
+// Process events asynchronously to avoid blocking workflow
+def eventQueue = new LinkedBlockingQueue<GraphEvent>()
+def eventProcessor = ExecutorPoolFactory.newSingleThreadExecutor()
+
+workflow.addListener { event ->
+    // Queue event for async processing
+    eventQueue.offer(event)
+}
+
+// Process events in background
+eventProcessor.submit {
+    while (true) {
+        def event = eventQueue.take()
+        processEvent(event)
+    }
+}
+----
+
+=== Event Filtering
+
+[source,groovy]
+----
+// Filter events before processing
+workflow.addListener(new FilteredEventListener() {
+    @Override
+    boolean accept(GraphEvent event) {
+        // Only process errors and warnings
+        return event.severity in [SEVERITY.ERROR, SEVERITY.WARN]
+    }
+
+    @Override
+    void onEvent(GraphEvent event) {
+        handleCriticalEvent(event)
+    }
+})
+
+// Task-specific filtering
+workflow.addListener(new TaskEventFilter("critical-task")) {
+    @Override
+    void onEvent(TaskEvent event) {
+        // Only events from "critical-task"
+        monitorCriticalTask(event)
+    }
+}
+----
+
+== Execution Snapshots
+
+Capture workflow state at any point in time.
+
+=== Creating Snapshots
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("task-a") { action { "A" } }
+    task("task-b") {
+        dependsOn "task-a"
+        action { "B" }
+    }
+    task("task-c") {
+        dependsOn "task-b"
+        action { "C" }
+    }
+}
+
+// Start workflow async
+def promise = workflow.start()
+
+// Capture snapshot while running
+Thread.sleep(100)
+def snapshot = workflow.snapshot()
+
+println "Snapshot at ${snapshot.timestamp}:"
+println "  Status: ${snapshot.status}"
+println "  Completed tasks: ${snapshot.completedTasks}"
+println "  Running tasks: ${snapshot.runningTasks}"
+println "  Pending tasks: ${snapshot.pendingTasks}"
+println "  Progress: ${snapshot.progressPercentage}%"
+
+// Wait for completion
+promise.get()
+----
+
+=== ExecutionSnapshot API
+
+[source,groovy]
+----
+interface ExecutionSnapshot {
+    // Timestamp
+    Instant getTimestamp()
+
+    // Overall status
+    ExecutionStatus getStatus()  // RUNNING, COMPLETED, FAILED, PAUSED
+
+    // Task counts
+    int getTotalTaskCount()
+    int getCompletedTaskCount()
+    int getRunningTaskCount()
+    int getPendingTaskCount()
+    int getFailedTaskCount()
+    int getSkippedTaskCount()
+
+    // Progress
+    double getProgressPercentage()
+    Duration getElapsedTime()
+    Duration getEstimatedRemainingTime()
+
+    // Task details
+    List<TaskSnapshot> getTaskSnapshots()
+    TaskSnapshot getTaskSnapshot(String taskId)
+
+    // Resource usage
+    ResourceUsage getResourceUsage()
+
+    // Export
+    String toJson()
+    Map<String, Object> toMap()
+}
+----
+
+=== Periodic Snapshots
+
+[source,groovy]
+----
+def workflow = buildComplexWorkflow()
+
+// Capture snapshots periodically
+def snapshotScheduler = Executors.newScheduledThreadPool(1)
+def snapshots = []
+
+snapshotScheduler.scheduleAtFixedRate(
+    {
+        def snapshot = workflow.snapshot()
+        snapshots.add(snapshot)
+
+        println "Progress: ${snapshot.progressPercentage}%"
+        println "Running: ${snapshot.runningTasks.join(', ')}"
+
+        // Send to monitoring system
+        metricsCollector.recordSnapshot(snapshot)
+    },
+    0,
+    1,  // Every second
+    TimeUnit.SECONDS
+)
+
+// Execute workflow
+workflow.start().get()
+
+// Stop snapshot collection
+snapshotScheduler.shutdown()
+
+// Analyze execution history
+analyzeSnapshots(snapshots)
+----
+
+=== Snapshot Comparison
+
+[source,groovy]
+----
+def snapshot1 = workflow.snapshot()
+Thread.sleep(5000)
+def snapshot2 = workflow.snapshot()
+
+// Compare snapshots
+def delta = snapshot2.compareTo(snapshot1)
+
+println "Changes in last 5 seconds:"
+println "  Tasks completed: ${delta.completedTasks}"
+println "  Tasks started: ${delta.startedTasks}"
+println "  Progress: +${delta.progressPercentage}%"
+println "  Memory change: +${delta.memoryUsageMB} MB"
+----
+
+== Health Monitoring
+
+Monitor workflow and task health.
+
+=== HealthStatus API
+
+[source,groovy]
+----
+def workflow = buildWorkflow()
+
+// Check overall health
+def health = workflow.health()
+
+println "Workflow health: ${health.status}"  // HEALTHY, DEGRADED, UNHEALTHY
+
+if (!health.healthy) {
+    println "Issues:"
+    health.issues.each { issue ->
+        println "  - ${issue.severity}: ${issue.message}"
+    }
+}
+
+// Task-level health
+def taskHealth = workflow.getTask("my-task").health()
+if (taskHealth.circuitBreakerOpen) {
+    println "Circuit breaker open for my-task"
+}
+
+if (taskHealth.errorRate > 0.1) {
+    println "High error rate: ${taskHealth.errorRate * 100}%"
+}
+----
+
+=== Health Checks
+
+[source,groovy]
+----
+// Define custom health checks
+workflow.addHealthCheck(new HealthCheck() {
+    String getName() { "database-connectivity" }
+
+    HealthCheckResult check() {
+        try {
+            def conn = dataSource.connection
+            conn.close()
+            return HealthCheckResult.healthy()
+        } catch (Exception e) {
+            return HealthCheckResult.unhealthy("Database unavailable: ${e.message}")
+        }
+    }
+})
+
+workflow.addHealthCheck(new HealthCheck() {
+    String getName() { "external-api-reachability" }
+
+    HealthCheckResult check() {
+        try {
+            def response = httpClient.get("https://api.example.com/health")
+            if (response.statusCode == 200) {
+                return HealthCheckResult.healthy()
+            } else {
+                return HealthCheckResult.degraded("API returned ${response.statusCode}")
+            }
+        } catch (Exception e) {
+            return HealthCheckResult.unhealthy("API unreachable: ${e.message}")
+        }
+    }
+})
+
+// Execute health checks
+def overallHealth = workflow.runHealthChecks()
+println "Overall health: ${overallHealth.status}"
+overallHealth.results.each { name, result ->
+    println "  ${name}: ${result.status}"
+}
+----
+
+=== Health Endpoints
+
+[source,groovy]
+----
+// Expose health endpoint (for load balancers, monitoring)
+def healthEndpoint = new HealthEndpoint(workflow)
+
+// HTTP endpoint
+server.get("/health") { req, res ->
+    def health = healthEndpoint.check()
+
+    res.status(health.healthy ? 200 : 503)
+    res.json([
+        status: health.status,
+        timestamp: new Date(),
+        checks: health.results
+    ])
+}
+
+// Liveness probe (is it running?)
+server.get("/health/live") { req, res ->
+    res.status(workflow.isRunning() ? 200 : 503)
+    res.json([alive: workflow.isRunning()])
+}
+
+// Readiness probe (ready to accept work?)
+server.get("/health/ready") { req, res ->
+    def ready = workflow.isReady() &&
+                !workflow.isPaused() &&
+                workflow.health().healthy
+
+    res.status(ready ? 200 : 503)
+    res.json([ready: ready])
+}
+----
+
+== Metrics Collection
+
+Collect and export metrics about workflow execution.
+
+=== Built-in Metrics
+
+[source,groovy]
+----
+def workflow = buildWorkflow()
+
+// Enable metrics collection
+workflow.enableMetrics()
+
+// Execute workflow
+workflow.start().get()
+
+// Access metrics
+def metrics = workflow.getMetrics()
+
+println "Execution Metrics:"
+println "  Total duration: ${metrics.totalDurationMs}ms"
+println "  Task count: ${metrics.totalTaskCount}"
+println "  Success rate: ${metrics.successRate * 100}%"
+println "  Average task duration: ${metrics.avgTaskDurationMs}ms"
+println "  Max task duration: ${metrics.maxTaskDurationMs}ms"
+println "  Parallel execution factor: ${metrics.parallelExecutionFactor}"
+
+// Task-specific metrics
+metrics.taskMetrics.each { taskId, taskMetrics ->
+    println "\nTask: ${taskId}"
+    println "  Executions: ${taskMetrics.executionCount}"
+    println "  Failures: ${taskMetrics.failureCount}"
+    println "  Avg duration: ${taskMetrics.avgDurationMs}ms"
+    println "  Error rate: ${taskMetrics.errorRate * 100}%"
+}
+----
+
+=== Custom Metrics
+
+[source,groovy]
+----
+// Record custom metrics
+task("process-data") {
+    action { ctx ->
+        def startTime = System.currentTimeMillis()
+        def data = fetchData()
+
+        // Record custom metrics
+        ctx.recordMetric("data.fetch.count", data.size())
+        ctx.recordMetric("data.fetch.duration", System.currentTimeMillis() - startTime)
+
+        def processed = processData(data)
+
+        ctx.recordMetric("data.process.count", processed.size())
+
+        return processed
+    }
+}
+
+// Access custom metrics
+def customMetrics = workflow.getCustomMetrics()
+println "Data fetched: ${customMetrics['data.fetch.count'].sum()}"
+println "Avg fetch time: ${customMetrics['data.fetch.duration'].average()}ms"
+----
+
+=== Prometheus Integration
+
+[source,groovy]
+----
+import io.prometheus.client.*
+
+// Define Prometheus metrics
+def workflowDuration = Histogram.build()
+    .name("taskgraph_workflow_duration_seconds")
+    .help("Workflow execution duration")
+    .labelNames("workflow_id", "status")
+    .register()
+
+def taskDuration = Histogram.build()
+    .name("taskgraph_task_duration_seconds")
+    .help("Task execution duration")
+    .labelNames("workflow_id", "task_id", "status")
+    .register()
+
+def taskFailures = Counter.build()
+    .name("taskgraph_task_failures_total")
+    .help("Total task failures")
+    .labelNames("workflow_id", "task_id")
+    .register()
+
+// Export metrics via event listener
+workflow.addListener(new PrometheusExporter() {
+    @Override
+    void onEvent(GraphEvent event) {
+        switch (event.type) {
+            case GRAPH_COMPLETED:
+            case GRAPH_FAILED:
+                workflowDuration
+                    .labels(event.graphId, event.status.toString())
+                    .observe(event.durationMs / 1000.0)
+                break
+
+            case TASK_COMPLETED:
+            case TASK_FAILED:
+                def task = event.taskEvent
+                taskDuration
+                    .labels(event.graphId, task.taskName, task.status.toString())
+                    .observe(task.durationMs / 1000.0)
+
+                if (event.type == TASK_FAILED) {
+                    taskFailures
+                        .labels(event.graphId, task.taskName)
+                        .inc()
+                }
+                break
+        }
+    }
+})
+
+// Expose metrics endpoint
+server.get("/metrics") { req, res ->
+    res.contentType("text/plain; version=0.0.4")
+    res.send(io.prometheus.client.exporter.common.TextFormat.write004(
+        CollectorRegistry.defaultRegistry.metricFamilySamples()
+    ))
+}
+----
+
+== Distributed Tracing
+
+Integrate with distributed tracing systems.
+
+=== OpenTelemetry Integration
+
+[source,groovy]
+----
+import io.opentelemetry.api.trace.*
+
+def workflow = TaskGraph.build {
+    // Enable tracing
+    tracingConfig {
+        enabled true
+        serviceName "taskgraph-workflow"
+        tracerProvider openTelemetryTracer
+    }
+
+    task("fetch-data") {
+        action { ctx ->
+            // Automatically creates span
+            fetchData()
+        }
+    }
+
+    task("process-data") {
+        dependsOn "fetch-data"
+
+        action { ctx ->
+            // Span includes dependency info
+            processData(ctx.prev)
+        }
+    }
+}
+
+// Traces show:
+// Workflow Execution Trace
+//   ├─ fetch-data (50ms)
+//   └─ process-data (100ms)
+//      └─ dependency on fetch-data
+----
+
+=== Jaeger Integration
+
+[source,groovy]
+----
+// Configure Jaeger tracer
+def jaegerTracer = Configuration.fromEnv("taskgraph-workflow")
+    .getTracer()
+
+def workflow = TaskGraph.build {
+    tracingConfig {
+        tracer jaegerTracer
+        sampleRate 1.0  // Sample all traces
+    }
+
+    // Workflow execution automatically traced
+    task("api-call") {
+        action { callAPI() }
+    }
+}
+
+// View traces in Jaeger UI
+// http://localhost:16686
+----
+
+=== Custom Span Attributes
+
+[source,groovy]
+----
+task("process") {
+    action { ctx ->
+        // Add custom attributes to span
+        ctx.currentSpan().setAttribute("user.id", ctx.global("userId"))
+        ctx.currentSpan().setAttribute("batch.size", data.size())
+
+        processData(data)
+    }
+}
+----
+
+== Logging Integration
+
+Integrate with logging frameworks.
+
+=== Structured Logging
+
+[source,groovy]
+----
+import org.slf4j.LoggerFactory
+import net.logstash.logback.argument.StructuredArguments.*
+
+def logger = LoggerFactory.getLogger("TaskGraph")
+
+workflow.addListener { event ->
+    logger.info("workflow.event",
+        keyValue("event_type", event.type),
+        keyValue("workflow_id", event.graphId),
+        keyValue("timestamp", event.timestamp),
+        keyValue("duration_ms", event.durationMs)
+    )
+}
+----
+
+=== MDC (Mapped Diagnostic Context)
+
+[source,groovy]
+----
+import org.slf4j.MDC
+
+workflow.addListener { event ->
+    // Set MDC for all log messages
+    MDC.put("workflow_id", event.graphId)
+    MDC.put("task_id", event.taskEvent?.taskName)
+
+    try {
+        processEvent(event)
+    } finally {
+        MDC.clear()
+    }
+}
+
+// All logs now include workflow_id and task_id
+task("process") {
+    action {
+        log.info("Processing data")  // Includes workflow_id in log
+    }
+}
+----
+
+=== ELK Stack Integration
+
+[source,groovy]
+----
+// Ship logs to Elasticsearch
+def esClient = new RestHighLevelClient(/*...*/)
+
+workflow.addListener { event ->
+    def doc = [
+        "@timestamp": event.timestamp,
+        event_type: event.type,
+        workflow_id: event.graphId,
+        duration_ms: event.durationMs,
+        status: event.status
+    ]
+
+    if (event.taskEvent) {
+        doc.task_id = event.taskEvent.taskName
+        doc.task_status = event.taskEvent.status
+    }
+
+    // Index in Elasticsearch
+    esClient.index(
+        new IndexRequest("taskgraph-events")
+            .source(doc, XContentType.JSON)
+    )
+}
+
+// Query with Kibana
+// event_type:TASK_FAILED AND workflow_id:"daily-etl"
+----
+
+== Monitoring Dashboards
+
+Create monitoring dashboards for workflows.
+
+=== Grafana Dashboard
+
+[source,json]
+----
+{
+  "dashboard": {
+    "title": "TaskGraph Monitoring",
+    "panels": [
+      {
+        "title": "Workflow Execution Rate",
+        "targets": [{
+          "expr": "rate(taskgraph_workflow_duration_seconds_count[5m])"
+        }]
+      },
+      {
+        "title": "Average Workflow Duration",
+        "targets": [{
+          "expr": "avg(taskgraph_workflow_duration_seconds_sum / taskgraph_workflow_duration_seconds_count)"
+        }]
+      },
+      {
+        "title": "Task Failure Rate",
+        "targets": [{
+          "expr": "rate(taskgraph_task_failures_total[5m])"
+        }]
+      },
+      {
+        "title": "Active Workflows",
+        "targets": [{
+          "expr": "taskgraph_active_workflows"
+        }]
+      }
+    ]
+  }
+}
+----
+
+=== Custom Dashboard
+
+[source,groovy]
+----
+// Build custom dashboard
+class WorkflowDashboard {
+    def workflow
+
+    Map<String, Object> getStatus() {
+        def snapshot = workflow.snapshot()
+        def health = workflow.health()
+        def metrics = workflow.getMetrics()
+
+        return [
+            status: snapshot.status,
+            health: health.status,
+            progress: snapshot.progressPercentage,
+            tasks: [
+                total: snapshot.totalTaskCount,
+                completed: snapshot.completedTaskCount,
+                running: snapshot.runningTaskCount,
+                failed: snapshot.failedTaskCount
+            ],
+            performance: [
+                duration: metrics.totalDurationMs,
+                avgTaskDuration: metrics.avgTaskDurationMs,
+                successRate: metrics.successRate
+            ],
+            runningTasks: snapshot.runningTasks.collect { task ->
+                [
+                    id: task.id,
+                    duration: task.elapsedTimeMs,
+                    status: task.status
+                ]
+            }
+        ]
+    }
+}
+
+// Serve dashboard
+def dashboard = new WorkflowDashboard(workflow: workflow)
+
+server.get("/dashboard") { req, res ->
+    res.json(dashboard.getStatus())
+}
+
+// Auto-refresh dashboard
+server.get("/dashboard/sse") { req, res ->
+    res.contentType("text/event-stream")
+
+    while (workflow.isRunning()) {
+        def status = dashboard.getStatus()
+        res.write("data: ${JsonOutput.toJson(status)}\n\n")
+        res.flush()
+        Thread.sleep(1000)
+    }
+}
+----
+
+== Alerting
+
+Configure alerts for critical events.
+
+=== Alert Rules
+
+[source,groovy]
+----
+// Define alert rules
+workflow.alerting {
+    rule("high-failure-rate") {
+        condition { metrics ->
+            metrics.errorRate > 0.1  // > 10% error rate
+        }
+        severity CRITICAL
+        notify(["ops@example.com", "slack:alerts"])
+        message { "Workflow failure rate: ${it.errorRate * 100}%" }
+    }
+
+    rule("long-running-workflow") {
+        condition { snapshot ->
+            snapshot.elapsedTime.toMinutes() > 60  // > 1 hour
+        }
+        severity WARNING
+        notify(["ops@example.com"])
+        message { "Workflow running for ${it.elapsedTime.toMinutes()} minutes" }
+    }
+
+    rule("circuit-breaker-open") {
+        condition { event ->
+            event instanceof CircuitBreakerEvent &&
+            event.state == OPEN
+        }
+        severity ERROR
+        notify(["ops@example.com", "pagerduty:oncall"])
+        message { "Circuit breaker open for task: ${it.taskName}" }
+    }
+}
+----
+
+=== Alert Channels
+
+[source,groovy]
+----
+// Configure alert channels
+AlertingConfig.configure {
+    // Email
+    email {
+        smtp {
+            host "smtp.example.com"
+            port 587
+            username "alerts@example.com"
+            password credential("smtp-password")
+        }
+    }
+
+    // Slack
+    slack {
+        webhookUrl credential("slack-webhook-url")
+        channel "#alerts"
+        username "TaskGraph Bot"
+    }
+
+    // PagerDuty
+    pagerduty {
+        apiKey credential("pagerduty-api-key")
+        serviceKey "taskgraph-service"
+    }
+
+    // Custom webhook
+    webhook {
+        url "https://monitoring.example.com/webhook"
+        headers {
+            "Authorization": "Bearer ${credential('webhook-token')}"
+        }
+    }
+}
+----
+
+## Summary
+
+TaskGraph provides comprehensive observability:
+
+* ✅ **Event system** - Real-time workflow events
+* ✅ **Execution snapshots** - Point-in-time state capture
+* ✅ **Health monitoring** - Workflow and task health checks
+* ✅ **Metrics collection** - Performance and resource metrics
+* ✅ **Distributed tracing** - OpenTelemetry/Jaeger integration
+* ✅ **Logging integration** - Structured logging, ELK stack
+* ✅ **Monitoring dashboards** - Prometheus, Grafana
+* ✅ **Alerting** - Configurable alert rules and channels
+
+With these observability features, you have complete visibility into your workflow execution.
+
+== Next Steps
+
+* **Chapter 8** - Test observability features
+* **Chapter 7** - Observe example workflows
+* **Appendix** - Complete observability reference

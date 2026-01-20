@@ -1,0 +1,1349 @@
+= Architectural Layers: From Tasks to TaskGraph
+
+[abstract]
+--
+This chapter explores the three architectural layers of the TaskGraph framework: Tasks (individual units of work), TaskCollections (logical groupings), and TaskGraph (complete workflow orchestration). Understanding these layers is essential for building effective workflows.
+--
+
+== Overview
+
+TaskGraph is built in three progressive layers, each adding capabilities:
+
+1. **Task Layer** - Individual units of work with execution logic
+2. **TaskCollection Layer** - Logical grouping and shared configuration
+3. **TaskGraph Layer** - Complete workflow with dependency management and orchestration
+
+[ditaa, layers-diagram]
+....
+                    +---------------------------+
+                    |      TaskGraph Layer      |
+                    |  +-----------------------+|
+                    |  | Dependency Management ||
+                    |  | Scheduling            ||
+                    |  | Lifecycle Control     ||
+                    |  | Event Emission        ||
+                    |  +-----------------------+|
+                    +---------------------------+
+                               |
+                    +---------------------------+
+                    |   TaskCollection Layer    |
+                    |  +-----------------------+|
+                    |  | Logical Grouping      ||
+                    |  | Shared Configuration  ||
+                    |  | Collective Operations ||
+                    |  +-----------------------+|
+                    +---------------------------+
+                               |
+                    +---------------------------+
+                    |        Task Layer         |
+                    |  +-----------------------+|
+                    |  | Execution Logic       ||
+                    |  | Retry/Circuit Breaker ||
+                    |  | Timeout Handling      ||
+                    |  | Result Management     ||
+                    |  +-----------------------+|
+                    +---------------------------+
+....
+
+== Layer 1: Task
+
+The Task layer represents individual units of work.
+
+=== Task Hierarchy
+
+[plantuml, task-hierarchy, svg]
+....
+@startuml
+abstract class TaskBase<T> {
+    - String id
+    - String name
+    - TaskContext context
+    - RetryPolicy retryPolicy
+    - CircuitBreaker circuitBreaker
+    - List<TaskBase> predecessors
+    - List<TaskBase> successors
+    + Promise<T> start()
+    # abstract T performTask(Object prev)
+}
+
+abstract class ServiceTask extends TaskBase {
+    - Closure action
+    # Object performTask(Object prev)
+}
+
+class ScriptTask extends TaskBase {
+    - String script
+    - String language
+    - boolean sandboxed
+    - Class scriptBaseClass
+}
+
+class HttpTask extends TaskBase {
+    - String url
+    - HttpMethod method
+    - Map headers
+    - Object body
+}
+
+class SqlTask extends TaskBase {
+    - String query
+    - List parameters
+    - DataSource datasource
+}
+
+class FileTask extends TaskBase {
+    - List sources
+    - String operation
+    - SecurityConfig security
+}
+
+TaskBase <|-- ServiceTask
+TaskBase <|-- ScriptTask
+TaskBase <|-- HttpTask
+TaskBase <|-- SqlTask
+TaskBase <|-- FileTask
+@enduml
+....
+
+=== TaskBase: The Foundation
+
+Every task extends `TaskBase`, which provides:
+
+==== Core Properties
+
+[source,groovy]
+----
+abstract class TaskBase<T> {
+    // Identity
+    String id              // Unique identifier
+    String name            // Human-readable name
+    String description     // Optional description
+
+    // Execution context
+    TaskContext context    // Shared execution context
+
+    // Dependencies
+    List<TaskBase> predecessors  // Tasks that must complete first
+    List<TaskBase> successors    // Tasks that depend on this
+
+    // Resilience
+    RetryPolicy retryPolicy           // Retry configuration
+    CircuitBreaker circuitBreaker     // Circuit breaker
+    TimeoutPolicy timeoutPolicy       // Timeout handling
+    IdempotencyPolicy idempotency     // Idempotency control
+
+    // State
+    TaskState state        // Current execution state
+    DataflowVariable result  // Async result container
+
+    // Metrics
+    long startTime
+    long endTime
+    int attemptCount
+}
+----
+
+==== Lifecycle Methods
+
+[source,groovy]
+----
+abstract class TaskBase<T> {
+    // Main execution entry point
+    Promise<T> start() {
+        // 1. Validate preconditions
+        // 2. Wait for dependencies
+        // 3. Check conditions
+        // 4. Execute with retry/circuit breaker
+        // 5. Publish result
+        // 6. Notify successors
+    }
+
+    // Template method - subclasses implement
+    protected abstract T performTask(Object previousValue)
+
+    // Lifecycle hooks
+    protected void beforeExecute() { }
+    protected void afterExecute(T result) { }
+    protected void onError(Throwable error) { }
+    protected void onRetry(int attempt, Throwable error) { }
+}
+----
+
+==== Cross-Cutting Concerns
+
+TaskBase provides cross-cutting concerns for all tasks:
+
+**1. Retry Logic**
+[source,groovy]
+----
+task("flaky-operation") {
+    retryPolicy {
+        maxAttempts 3
+        delay 1000
+        exponentialBackoff true
+        retryOn(IOException, TimeoutException)
+    }
+}
+----
+
+**2. Circuit Breaker**
+[source,groovy]
+----
+task("external-service") {
+    circuitBreaker {
+        failureThreshold 5      // Open after 5 failures
+        timeout 30000           // Consider failure after 30s
+        halfOpenAfter 60000     // Try again after 60s
+        successThreshold 2      // Close after 2 successes
+    }
+}
+----
+
+**3. Timeout Control**
+[source,groovy]
+----
+task("long-running") {
+    timeout 60000  // Fail if not complete in 60s
+}
+----
+
+**4. Idempotency**
+[source,groovy]
+----
+task("idempotent-write") {
+    idempotencyPolicy {
+        enabled true
+        keyExtractor { ctx -> "write-${ctx.global('userId')}" }
+        ttl 3600  // Cache for 1 hour
+    }
+}
+----
+
+**5. Conditional Execution**
+[source,groovy]
+----
+task("conditional") {
+    condition { ctx ->
+        ctx.global("environment") == "production"
+    }
+    action { /* only runs in production */ }
+}
+----
+
+=== Task Types
+
+TaskGraph provides 15+ concrete task types:
+
+==== ServiceTask - Generic Action
+
+Execute arbitrary code:
+
+[source,groovy]
+----
+task("custom-logic") {
+    action { ctx ->
+        def input = ctx.prev
+        // Your logic here
+        return processData(input)
+    }
+}
+----
+
+==== ScriptTask - Embedded Scripts
+
+Execute dynamic scripts (sandboxed by default):
+
+[source,groovy]
+----
+scriptTask("process") {
+    language "groovy"
+    sandboxed true
+    script '''
+        def data = bindings.data
+        return data.collect { it * 2 }
+    '''
+    bindings([data: [1, 2, 3, 4, 5]])
+}
+----
+
+==== HttpTask - REST APIs
+
+Make HTTP/REST calls:
+
+[source,groovy]
+----
+httpTask("fetch-users") {
+    url "https://api.example.com/users"
+    method GET
+    header "Authorization", "Bearer ${token}"
+    timeout 30000
+    validateSSL true
+}
+----
+
+==== SqlTask - Database Operations
+
+Execute SQL queries:
+
+[source,groovy]
+----
+sqlTask("load-users") {
+    datasource myDataSource
+    query """
+        INSERT INTO users (name, email, created)
+        VALUES (?, ?, NOW())
+    """
+    parameters { ctx ->
+        def user = ctx.prev
+        [user.name, user.email]
+    }
+}
+----
+
+==== FileTask - File Operations
+
+Read, write, copy, or move files:
+
+[source,groovy]
+----
+fileTask("process-files") {
+    operation READ
+    sources(["/data/input.txt"])
+    securityConfig {
+        allowedDirectories(["/data"])
+        maxFileSize 10 * 1024 * 1024  // 10 MB
+    }
+}
+----
+
+=== Task State Machine
+
+Tasks progress through well-defined states:
+
+[plantuml, task-states, svg]
+....
+@startuml
+[*] --> NOT_STARTED
+
+NOT_STARTED --> SCHEDULED : schedule()
+SCHEDULED --> SKIPPED : condition = false
+SCHEDULED --> WAITING_DEPENDENCIES : has dependencies
+
+WAITING_DEPENDENCIES --> READY : dependencies complete
+READY --> RUNNING : start()
+
+RUNNING --> RETRYING : failure + retry
+RETRYING --> RUNNING : retry attempt
+
+RUNNING --> CIRCUIT_OPEN : circuit breaker opens
+CIRCUIT_OPEN --> RUNNING : half-open attempt
+
+RUNNING --> COMPLETED : success
+RUNNING --> FAILED : failure (no retry)
+
+COMPLETED --> [*]
+FAILED --> [*]
+SKIPPED --> [*]
+@enduml
+....
+
+=== Task Execution Model
+
+==== Synchronous Execution
+
+Block until complete:
+
+[source,groovy]
+----
+def task = new ServiceTask("my-task", ctx) {
+    action { "result" }
+}
+
+def result = task.start().get()  // Blocks
+println "Result: $result"
+----
+
+==== Asynchronous Execution
+
+Non-blocking with callbacks:
+
+[source,groovy]
+----
+task.start()
+    .then { result ->
+        println "Success: $result"
+    }
+    .onError { error ->
+        log.error("Failed", error)
+    }
+----
+
+==== Dependency-Driven Execution
+
+Automatic coordination:
+
+[source,groovy]
+----
+def task1 = new ServiceTask("task1", ctx) { action { 1 } }
+def task2 = new ServiceTask("task2", ctx) { action { 2 } }
+def task3 = new ServiceTask("task3", ctx) {
+    action { ctx ->
+        // Automatically waits for task1 and task2
+        ctx.taskResult("task1") + ctx.taskResult("task2")
+    }
+}
+
+task3.addPredecessor(task1)
+task3.addPredecessor(task2)
+
+def result = task3.start().get()  // Returns 3
+----
+
+== Layer 2: TaskCollection
+
+TaskCollection provides logical grouping and collective operations.
+
+=== Purpose
+
+TaskCollections serve several purposes:
+
+1. **Logical grouping** - Group related tasks
+2. **Shared configuration** - Apply config to multiple tasks
+3. **Collective operations** - Operate on groups
+4. **Namespace isolation** - Avoid task ID collisions
+
+=== Creating Collections
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    // Define a collection
+    collection("data-extraction") {
+        task("extract-users") { /* ... */ }
+        task("extract-orders") { /* ... */ }
+        task("extract-products") { /* ... */ }
+    }
+
+    // Another collection
+    collection("data-transformation") {
+        task("transform-users") { /* ... */ }
+        task("transform-orders") { /* ... */ }
+        task("transform-products") { /* ... */ }
+    }
+}
+----
+
+=== Shared Configuration
+
+Apply configuration to all tasks in a collection:
+
+[source,groovy]
+----
+collection("api-calls") {
+    // Shared config for all tasks
+    defaults {
+        timeout 30000
+        retryPolicy {
+            maxAttempts 3
+            delay 1000
+        }
+        header "Authorization", "Bearer ${token}"
+    }
+
+    httpTask("fetch-users") {
+        url "https://api.example.com/users"
+        // Inherits timeout, retry, and auth header
+    }
+
+    httpTask("fetch-orders") {
+        url "https://api.example.com/orders"
+        // Inherits timeout, retry, and auth header
+    }
+}
+----
+
+=== Collection Operations
+
+==== Start All Tasks
+
+[source,groovy]
+----
+def collection = workflow.getCollection("data-extraction")
+
+// Start all tasks in parallel
+def promises = collection.startAll()
+
+// Wait for all
+Promises.all(promises).then { results ->
+    println "All extraction tasks complete: $results"
+}
+----
+
+==== Query Collection State
+
+[source,groovy]
+----
+def collection = workflow.getCollection("data-extraction")
+
+println "Total tasks: ${collection.taskCount}"
+println "Completed: ${collection.completedTaskCount}"
+println "Failed: ${collection.failedTaskCount}"
+println "Running: ${collection.runningTaskCount}"
+
+if (collection.allComplete) {
+    println "Collection complete!"
+}
+----
+
+==== Iterate Tasks
+
+[source,groovy]
+----
+def collection = workflow.getCollection("data-extraction")
+
+collection.tasks.each { task ->
+    println "Task: ${task.id} - State: ${task.state}"
+}
+----
+
+=== Collection Dependencies
+
+Collections can depend on other collections:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    collection("extract") {
+        task("extract-users") { /* ... */ }
+        task("extract-orders") { /* ... */ }
+    }
+
+    collection("transform") {
+        // All tasks in 'transform' depend on all tasks in 'extract'
+        dependsOn collection("extract")
+
+        task("transform-users") { /* ... */ }
+        task("transform-orders") { /* ... */ }
+    }
+}
+----
+
+=== Nested Collections
+
+Collections can be nested:
+
+[source,groovy]
+----
+collection("data-pipeline") {
+    collection("extract") {
+        task("extract-users") { /* ... */ }
+        task("extract-orders") { /* ... */ }
+    }
+
+    collection("transform") {
+        dependsOn collection("extract")
+        task("transform-users") { /* ... */ }
+        task("transform-orders") { /* ... */ }
+    }
+
+    collection("load") {
+        dependsOn collection("transform")
+        task("load-warehouse") { /* ... */ }
+    }
+}
+----
+
+=== Use Cases
+
+==== Parallel Processing by Domain
+
+[source,groovy]
+----
+collection("user-domain") {
+    task("fetch-user-profile") { /* ... */ }
+    task("fetch-user-orders") { /* ... */ }
+    task("fetch-user-preferences") { /* ... */ }
+}
+
+collection("product-domain") {
+    task("fetch-product-catalog") { /* ... */ }
+    task("fetch-product-inventory") { /* ... */ }
+    task("fetch-product-reviews") { /* ... */ }
+}
+----
+
+==== ETL Pipeline Stages
+
+[source,groovy]
+----
+collection("extract") {
+    defaults {
+        timeout 60000
+        retryPolicy { maxAttempts 5 }
+    }
+    // Extraction tasks
+}
+
+collection("transform") {
+    dependsOn collection("extract")
+    defaults {
+        maxConcurrency 10
+    }
+    // Transformation tasks
+}
+
+collection("load") {
+    dependsOn collection("transform")
+    defaults {
+        idempotencyPolicy { enabled true }
+    }
+    // Loading tasks
+}
+----
+
+==== Environment-Specific Tasks
+
+[source,groovy]
+----
+if (environment == "production") {
+    collection("monitoring") {
+        task("send-metrics") { /* ... */ }
+        task("update-dashboard") { /* ... */ }
+        task("send-alerts") { /* ... */ }
+    }
+}
+----
+
+== Layer 3: TaskGraph
+
+TaskGraph is the top layer providing complete workflow orchestration.
+
+=== Core Responsibilities
+
+The TaskGraph layer handles:
+
+1. **Dependency resolution** - Build and validate DAG
+2. **Scheduling** - Determine execution order
+3. **Concurrency control** - Manage parallel execution
+4. **Lifecycle management** - Start, pause, cancel, resume
+5. **Event emission** - Publish lifecycle events
+6. **Error handling** - Graph-level error strategies
+7. **Result aggregation** - Collect and report results
+
+=== Graph Structure
+
+==== Directed Acyclic Graph (DAG)
+
+TaskGraph represents workflows as DAGs:
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    task("A") { action { "A" } }
+    task("B") { action { "B" } }
+
+    task("C") {
+        dependsOn "A", "B"
+        action { "C" }
+    }
+
+    task("D") {
+        dependsOn "C"
+        action { "D" }
+    }
+}
+----
+
+Visual representation:
+
+....
+     A     B
+      \   /
+       \ /
+        C
+        |
+        D
+....
+
+==== Cycle Detection
+
+TaskGraph validates the DAG at build time:
+
+[source,groovy]
+----
+// ❌ This will throw CyclicDependencyException
+def invalid = TaskGraph.build {
+    task("A") {
+        dependsOn "B"  // A depends on B
+    }
+    task("B") {
+        dependsOn "A"  // B depends on A - CYCLE!
+    }
+}
+----
+
+==== Missing Dependency Detection
+
+[source,groovy]
+----
+// ❌ This will throw MissingTaskException
+def invalid = TaskGraph.build {
+    task("A") {
+        dependsOn "B"  // B doesn't exist!
+    }
+}
+----
+
+=== Graph Configuration
+
+==== Basic Configuration
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    id "my-workflow-v1"
+    description "Data processing pipeline"
+
+    maxConcurrency 20        // Max parallel tasks
+    failFast true           // Stop on first failure
+    continueOnError false   // Opposite of failFast
+
+    executorPool myCustomPool  // Custom thread pool
+}
+----
+
+==== Execution Strategies
+
+**Fail-Fast (default)**
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    failFast true  // Stop immediately on first failure
+}
+----
+
+**Continue on Error**
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    continueOnError true  // Complete all possible tasks
+}
+----
+
+**Partial Execution**
+[source,groovy]
+----
+// Execute only specific subgraph
+def workflow = TaskGraph.build { /* ... */ }
+
+workflow.start(
+    startTasks: ["task-A", "task-B"],  // Entry points
+    endTasks: ["task-X"]                // Exit points
+)
+----
+
+=== Dependency Patterns
+
+==== Sequential Pipeline
+
+[source,groovy]
+----
+TaskGraph.build {
+    task("step1") { action { 1 } }
+    task("step2") {
+        dependsOn "step1"
+        action { ctx -> ctx.prev + 1 }
+    }
+    task("step3") {
+        dependsOn "step2"
+        action { ctx -> ctx.prev + 1 }
+    }
+}
+// Executes: step1 → step2 → step3
+----
+
+==== Fan-Out / Fan-In
+
+[source,groovy]
+----
+TaskGraph.build {
+    task("source") { action { fetchData() } }
+
+    // Fan-out: parallel processing
+    task("process-A") {
+        dependsOn "source"
+        action { ctx -> processA(ctx.prev) }
+    }
+    task("process-B") {
+        dependsOn "source"
+        action { ctx -> processB(ctx.prev) }
+    }
+    task("process-C") {
+        dependsOn "source"
+        action { ctx -> processC(ctx.prev) }
+    }
+
+    // Fan-in: aggregate results
+    task("aggregate") {
+        dependsOn "process-A", "process-B", "process-C"
+        action { ctx ->
+            [
+                ctx.taskResult("process-A"),
+                ctx.taskResult("process-B"),
+                ctx.taskResult("process-C")
+            ]
+        }
+    }
+}
+----
+
+Visual:
+
+....
+         source
+         /  |  \
+        /   |   \
+       A    B    C
+        \   |   /
+         \  |  /
+        aggregate
+....
+
+==== Diamond Pattern
+
+[source,groovy]
+----
+TaskGraph.build {
+    task("start") { action { "data" } }
+
+    task("left") {
+        dependsOn "start"
+        action { ctx -> processLeft(ctx.prev) }
+    }
+
+    task("right") {
+        dependsOn "start"
+        action { ctx -> processRight(ctx.prev) }
+    }
+
+    task("end") {
+        dependsOn "left", "right"
+        action { ctx ->
+            merge(
+                ctx.taskResult("left"),
+                ctx.taskResult("right")
+            )
+        }
+    }
+}
+----
+
+Visual:
+
+....
+       start
+       /   \
+      /     \
+    left   right
+      \     /
+       \   /
+        end
+....
+
+==== Parallel Independent Paths
+
+[source,groovy]
+----
+TaskGraph.build {
+    // Path 1: User processing
+    task("fetch-users") { action { fetchUsers() } }
+    task("process-users") {
+        dependsOn "fetch-users"
+        action { ctx -> processUsers(ctx.prev) }
+    }
+
+    // Path 2: Order processing (independent)
+    task("fetch-orders") { action { fetchOrders() } }
+    task("process-orders") {
+        dependsOn "fetch-orders"
+        action { ctx -> processOrders(ctx.prev) }
+    }
+
+    // Both paths run in parallel
+}
+----
+
+Visual:
+
+....
+    fetch-users      fetch-orders
+         |                |
+    process-users    process-orders
+....
+
+=== Execution Control
+
+==== Starting Execution
+
+[source,groovy]
+----
+def workflow = TaskGraph.build { /* ... */ }
+
+// Async execution (returns Promise)
+def promise = workflow.start()
+
+promise.then { result ->
+    println "Workflow completed"
+    println "Results: ${result.taskResults}"
+    println "Duration: ${result.durationMs}ms"
+}
+
+// Or block for result
+def result = workflow.start().get()
+----
+
+==== Pausing and Resuming
+
+[source,groovy]
+----
+def workflow = TaskGraph.build { /* ... */ }
+
+def promise = workflow.start()
+
+// Pause after 5 seconds
+Thread.start {
+    Thread.sleep(5000)
+    workflow.pause()
+    println "Workflow paused"
+
+    Thread.sleep(10000)
+    workflow.resume()
+    println "Workflow resumed"
+}
+
+promise.get()
+----
+
+==== Cancellation
+
+[source,groovy]
+----
+def workflow = TaskGraph.build { /* ... */ }
+
+def promise = workflow.start()
+
+// Cancel after 5 seconds
+Thread.start {
+    Thread.sleep(5000)
+    workflow.cancel()
+    println "Workflow cancelled"
+}
+
+promise.onError { error ->
+    if (error instanceof CancellationException) {
+        println "Workflow was cancelled"
+    }
+}
+----
+
+==== Partial Execution
+
+[source,groovy]
+----
+// Execute only part of the graph
+def result = workflow.start(
+    startFrom: ["task-C"],     // Start from task-C (skip A, B)
+    stopAt: ["task-E"]         // Stop at task-E (don't execute F, G)
+).get()
+----
+
+=== Result Handling
+
+==== GraphResult
+
+Workflow execution returns a `GraphResult`:
+
+[source,groovy]
+----
+def result = workflow.start().get()
+
+println "Status: ${result.status}"  // SUCCESS, FAILED, PARTIAL
+println "Duration: ${result.durationMs}ms"
+println "Tasks executed: ${result.executedTaskCount}"
+println "Tasks failed: ${result.failedTaskCount}"
+println "Tasks skipped: ${result.skippedTaskCount}"
+
+// Access task results
+result.taskResults.each { taskId, taskResult ->
+    println "$taskId: ${taskResult.value}"
+}
+
+// Check specific task
+def taskResult = result.getTaskResult("my-task")
+if (taskResult.isSuccess()) {
+    println "Task succeeded: ${taskResult.value}"
+} else {
+    println "Task failed: ${taskResult.error}"
+}
+----
+
+==== Accessing Intermediate Results
+
+[source,groovy]
+----
+def workflow = TaskGraph.build { /* ... */ }
+
+workflow.start().then { result ->
+    // Get result from specific task
+    def userData = result.getTaskResult("fetch-users").value
+    def orderData = result.getTaskResult("fetch-orders").value
+
+    // Process results
+    processData(userData, orderData)
+}
+----
+
+=== Event Handling
+
+==== Graph-Level Events
+
+Listen to workflow lifecycle events:
+
+[source,groovy]
+----
+workflow.addListener(new GraphEventListener() {
+    void onEvent(GraphEvent event) {
+        switch (event.type) {
+            case GRAPH_STARTED:
+                println "Workflow started"
+                break
+
+            case GRAPH_COMPLETED:
+                println "Workflow completed in ${event.durationMs}ms"
+                break
+
+            case GRAPH_FAILED:
+                println "Workflow failed: ${event.error}"
+                break
+
+            case TASK_STARTED:
+                println "Task started: ${event.taskEvent.taskName}"
+                break
+
+            case TASK_COMPLETED:
+                println "Task completed: ${event.taskEvent.taskName} in ${event.taskEvent.durationMs}ms"
+                break
+
+            case TASK_FAILED:
+                println "Task failed: ${event.taskEvent.taskName} - ${event.taskEvent.error}"
+                break
+        }
+    }
+})
+----
+
+==== Filtering Events
+
+[source,groovy]
+----
+// Only listen to task completion events
+workflow.addListener { event ->
+    if (event.type == TASK_COMPLETED) {
+        def task = event.taskEvent
+        println "${task.taskName}: ${task.durationMs}ms"
+    }
+}
+----
+
+=== Concurrency Control
+
+==== Graph-Level Limits
+
+[source,groovy]
+----
+def workflow = TaskGraph.build {
+    maxConcurrency 10  // Max 10 tasks running simultaneously
+
+    // Define 100 tasks
+    (1..100).each { i ->
+        task("task-$i") {
+            action { performWork(i) }
+        }
+    }
+}
+// Only 10 run at once, others queued
+----
+
+==== Task-Level Limits
+
+[source,groovy]
+----
+task("database-task") {
+    concurrencyLimit 5  // Max 5 instances of this task
+    action { queryDatabase() }
+}
+----
+
+==== Resource Semaphores
+
+[source,groovy]
+----
+TaskGraph.build {
+    // Multiple tasks share a resource pool
+    task("db-query-1") {
+        resource "database-pool", max: 10
+        action { query1() }
+    }
+
+    task("db-query-2") {
+        resource "database-pool", max: 10
+        action { query2() }
+    }
+
+    task("db-query-3") {
+        resource "database-pool", max: 10
+        action { query3() }
+    }
+}
+// All three tasks share 10 database connections
+----
+
+=== Graph Composition
+
+==== SubGraphs
+
+Embed one graph in another:
+
+[source,groovy]
+----
+// Define reusable subgraph
+def dataExtractionGraph = TaskGraph.build {
+    task("extract-users") { /* ... */ }
+    task("extract-orders") { /* ... */ }
+    task("extract-products") { /* ... */ }
+}
+
+// Embed in parent graph
+def mainWorkflow = TaskGraph.build {
+    task("validate-credentials") { /* ... */ }
+
+    // Embed subgraph
+    subgraph("extract-data", dataExtractionGraph) {
+        dependsOn "validate-credentials"
+    }
+
+    task("process-data") {
+        dependsOn "extract-data"
+        action { /* ... */ }
+    }
+}
+----
+
+==== Graph Factories
+
+[source,groovy]
+----
+// Factory for creating similar workflows
+class WorkflowFactory {
+    static TaskGraph createDataPipeline(String source, String target) {
+        return TaskGraph.build {
+            task("extract-from-$source") { /* ... */ }
+            task("transform") {
+                dependsOn "extract-from-$source"
+            }
+            task("load-to-$target") {
+                dependsOn "transform"
+            }
+        }
+    }
+}
+
+// Use factory
+def s3ToPostgres = WorkflowFactory.createDataPipeline("s3", "postgres")
+def kafkaToElastic = WorkflowFactory.createDataPipeline("kafka", "elasticsearch")
+----
+
+=== Performance Optimization
+
+==== Parallel Execution
+
+Maximize parallelism by minimizing dependencies:
+
+[source,groovy]
+----
+// ❌ Unnecessarily sequential
+task("A") { action { fetchA() } }
+task("B") {
+    dependsOn "A"  // B doesn't actually need A's result!
+    action { fetchB() }
+}
+
+// ✅ Parallel execution
+task("A") { action { fetchA() } }
+task("B") { action { fetchB() } }  // No dependency, runs in parallel
+----
+
+==== Lazy Task Creation
+
+Create tasks dynamically only when needed:
+
+[source,groovy]
+----
+TaskGraph.build {
+    task("fetch-config") {
+        action { fetchConfiguration() }
+    }
+
+    task("process") {
+        dependsOn "fetch-config"
+        action { ctx ->
+            def config = ctx.prev
+
+            // Dynamically add tasks based on config
+            config.regions.each { region ->
+                def regionalTask = new ServiceTask("process-$region", ctx) {
+                    action { processRegion(region) }
+                }
+                graph.addTask(regionalTask)
+            }
+        }
+    }
+}
+----
+
+==== Result Cleanup
+
+Clean up intermediate results to save memory:
+
+[source,groovy]
+----
+task("large-dataset") {
+    cleanupResults true  // Clear result after successors consume it
+    action { fetchLargeDataset() }
+}
+----
+
+=== Debugging and Visualization
+
+==== Graph Structure Inspection
+
+[source,groovy]
+----
+def workflow = TaskGraph.build { /* ... */ }
+
+println "Total tasks: ${workflow.taskCount}"
+println "Root tasks: ${workflow.rootTasks}"
+println "Leaf tasks: ${workflow.leafTasks}"
+
+// Find task by ID
+def task = workflow.getTask("my-task")
+println "Predecessors: ${task.predecessors}"
+println "Successors: ${task.successors}"
+
+// Topological sort (execution order)
+def executionOrder = workflow.topologicalSort()
+println "Execution order: $executionOrder"
+----
+
+==== Visualization Export
+
+[source,groovy]
+----
+// Export to GraphViz DOT format
+def dot = workflow.toDot()
+File("workflow.dot").text = dot
+
+// Export to PlantUML
+def plantuml = workflow.toPlantUML()
+File("workflow.puml").text = plantuml
+
+// Export to Mermaid
+def mermaid = workflow.toMermaid()
+File("workflow.mmd").text = mermaid
+----
+
+== Layer Integration Example
+
+Complete example showing all three layers:
+
+[source,groovy]
+----
+import org.softwood.dag.*
+import org.softwood.pool.*
+import org.softwood.promise.*
+
+// Layer 1: Individual tasks (can be used standalone)
+def pool = ExecutorPoolFactory.defaultPool()
+def ctx = new TaskContext()
+
+def task1 = new ServiceTask("fetch", ctx) {
+    action { fetchData() }
+}
+
+def result = task1.start().get()  // Standalone execution
+println "Task result: $result"
+
+// Layer 2: Task collections (logical grouping)
+def workflow = TaskGraph.build {
+    collection("extraction") {
+        defaults {
+            timeout 30000
+            retryPolicy { maxAttempts 3 }
+        }
+
+        task("fetch-users") {
+            action { fetchUsers() }
+        }
+        task("fetch-orders") {
+            action { fetchOrders() }
+        }
+    }
+
+    collection("processing") {
+        dependsOn collection("extraction")
+
+        task("process-users") {
+            dependsOn "fetch-users"
+            action { ctx -> processUsers(ctx.prev) }
+        }
+        task("process-orders") {
+            dependsOn "fetch-orders"
+            action { ctx -> processOrders(ctx.prev) }
+        }
+    }
+}
+
+// Layer 3: TaskGraph orchestration
+def graphResult = workflow.start()
+    .timeout(300, TimeUnit.SECONDS)
+    .then { result ->
+        println "Workflow complete!"
+        println "Executed ${result.executedTaskCount} tasks in ${result.durationMs}ms"
+        return result
+    }
+    .onError { error ->
+        log.error("Workflow failed", error)
+        notifyOps(error)
+    }
+    .get()
+----
+
+== Summary
+
+The three-layer architecture provides:
+
+* ✅ **Task Layer** - Individual units with cross-cutting concerns
+* ✅ **TaskCollection Layer** - Logical grouping and shared config
+* ✅ **TaskGraph Layer** - Complete workflow orchestration
+* ✅ **Flexibility** - Use any layer independently
+* ✅ **Composability** - Build complex from simple
+* ✅ **Separation of concerns** - Clear responsibilities
+
+Each layer builds on the previous one, providing progressively more powerful workflow capabilities.
+
+== Next Steps
+
+* **Chapter 5** - Learn about extensibility through SPI
+* **Chapter 6** - Deep dive into TaskContext
+* **Chapter 11** - Complete TaskBase reference
+* **Chapter 13** - All concrete task types

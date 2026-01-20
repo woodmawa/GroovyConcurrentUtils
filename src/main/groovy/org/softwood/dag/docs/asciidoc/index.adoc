@@ -51,6 +51,8 @@ include::chapters/02-dsl-approach.adoc[]
 
 include::chapters/03-foundation-libraries.adoc[]
 
+include::chapters/03a-simple-task-execution.adoc[]
+
 include::chapters/04-layers.adoc[]
 
 include::chapters/05-extensibility.adoc[]
@@ -62,6 +64,8 @@ include::chapters/06-task-context.adoc[]
 include::chapters/07-examples.adoc[]
 
 include::chapters/08-test-harness.adoc[]
+
+include::chapters/14-taskgraph-spec.adoc[]
 
 == Part III: Operations
 

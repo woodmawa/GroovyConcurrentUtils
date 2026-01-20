@@ -1,0 +1,1128 @@
+= TaskGraphSpec Testing Framework
+
+[abstract]
+--
+This chapter introduces TaskGraphSpec, a fluent, Spock-inspired testing framework for TaskGraph workflows. Learn how to write clean, expressive tests with minimal boilerplate using the given-when-then pattern.
+--
+
+== Overview
+
+TaskGraphSpec provides a dedicated base class for testing TaskGraph workflows with a clean, expressive API inspired by Spock Framework. It eliminates common testing boilerplate and provides powerful verification capabilities.
+
+=== Key Features
+
+* **Fluent execution API** - Chain configuration methods for readable tests
+* **Automatic task tracking** - No manual instrumentation required
+* **Clean async handling** - No Awaitility or manual promise management
+* **Execution order verification** - Assert task dependencies and parallelism
+* **Input/output inspection** - Examine data flow through tasks
+* **Timing verification** - Measure and assert execution performance
+* **Mock support** - Stub task behavior for isolated testing
+* **Failure testing** - Test error paths with `expectFailure()`
+
+=== Design Philosophy
+
+TaskGraphSpec follows these principles:
+
+1. **Spock-style fluency** - Use given-when-then for clear test structure
+2. **Minimal boilerplate** - Focus on what you're testing, not test infrastructure
+3. **Type-safe** - Leverage Groovy's type system for compile-time safety
+4. **JUnit Jupiter compatible** - Works with standard JUnit 5 tooling
+
+== Getting Started
+
+=== Setting Up Your Test Class
+
+Extend `TaskGraphSpec` to get access to all testing capabilities:
+
+[source,groovy]
+----
+import org.junit.jupiter.api.Test
+import org.softwood.dag.test.TaskGraphSpec
+import static org.junit.jupiter.api.Assertions.*
+
+class MyWorkflowTest extends TaskGraphSpec {
+
+    @Test
+    void "should process data successfully"() {
+        // given: A workflow
+        def workflow = TaskGraph.build {
+            serviceTask("process") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        [result: prev * 2]
+                    }
+                }
+            }
+        }
+
+        // when: Workflow executes
+        def result = execute(workflow)
+            .with(10)
+            .await()
+
+        // then: Result is correct
+        assertEquals(20, result.result)
+        verifyTaskExecuted("process")
+    }
+}
+----
+
+=== Automatic Setup
+
+TaskGraphSpec automatically provides:
+
+* **`ctx`** - Fresh TaskContext for each test (via `@BeforeEach`)
+* **`verifier`** - TaskGraphVerifier for assertions
+* **`currentExecution`** - Execution wrapper for the current workflow
+
+No manual setup or teardown required!
+
+== Fluent Execution API
+
+=== Basic Execution Pattern
+
+The core pattern is: `execute(workflow).with(input).await()`
+
+[source,groovy]
+----
+@Test
+void "demonstrate basic execution"() {
+    given: "a simple workflow"
+    def workflow = createMyWorkflow()
+
+    when: "workflow executes with input"
+    def result = execute(workflow)
+        .with([value: 42])
+        .await()
+
+    then: "result is returned"
+    assertNotNull(result)
+}
+----
+
+=== Configuration Options
+
+Chain configuration methods before calling `await()`:
+
+[source,groovy]
+----
+@Test
+void "configure execution"() {
+    def result = execute(workflow)
+        .with(inputData)           // Set input
+        .timeout(10000)            // Set timeout (ms)
+        .await()                   // Execute and wait
+}
+
+// Alternative timeout syntax
+def result2 = execute(workflow)
+    .with(inputData)
+    .timeout(10, TimeUnit.SECONDS)
+    .await()
+----
+
+=== Expecting Failures
+
+Test error handling paths cleanly:
+
+[source,groovy]
+----
+@Test
+void "handle expected failures"() {
+    given: "a workflow that validates input"
+    def workflow = createValidationWorkflow()
+
+    when: "invalid input provided"
+    def result = execute(workflow)
+        .with(null)
+        .expectFailure()
+        .await()
+
+    then: "failure is captured"
+    assertTrue(result.failed)
+    assertNotNull(result.error)
+    assertEquals("NullPointerException", result.error.type)
+}
+----
+
+The result map for failures contains:
+
+* **`failed`** - Boolean flag (always true)
+* **`error.message`** - Error message string
+* **`error.type`** - Exception class simple name
+* **`error.exception`** - The actual exception object
+* **`executedTasks`** - List of task IDs that ran
+* **`totalTime`** - Execution duration in milliseconds
+
+=== Convenience Methods
+
+For simple cases, use `executeAndAwait()`:
+
+[source,groovy]
+----
+@Test
+void "use convenience method"() {
+    // One-liner execution
+    def result = executeAndAwait(workflow, inputData)
+
+    // Equivalent to:
+    // def result = execute(workflow).with(inputData).await()
+}
+----
+
+== Verification API
+
+=== Execution Order Verification
+
+Verify tasks executed in the expected sequence:
+
+[source,groovy]
+----
+@Test
+void "verify execution order"() {
+    given:
+    def workflow = TaskGraph.build {
+        serviceTask("step-1") {
+            action { ctx, prev -> ctx.promiseFactory.executeAsync { "A" } }
+        }
+        serviceTask("step-2") {
+            action { ctx, prev -> ctx.promiseFactory.executeAsync { "B" } }
+        }
+        serviceTask("step-3") {
+            action { ctx, prev -> ctx.promiseFactory.executeAsync { "C" } }
+        }
+
+        chainVia("step-1", "step-2", "step-3")
+    }
+
+    when:
+    execute(workflow).await()
+
+    then: "tasks executed in chain order"
+    verifyExecutionOrder("step-1", "step-2", "step-3")
+}
+----
+
+=== Task Execution Checks
+
+Verify which tasks ran or didn't run:
+
+[source,groovy]
+----
+@Test
+void "verify conditional execution"() {
+    given:
+    def workflow = createConditionalWorkflow()
+
+    when:
+    execute(workflow).with([condition: true]).await()
+
+    then: "only expected path executed"
+    verifyTaskExecuted("main-path")
+    verifyTaskNotExecuted("alternate-path")
+}
+
+@Test
+void "check all executed tasks"() {
+    when:
+    execute(workflow).await()
+
+    then:
+    def executedTasks = getExecutedTasks()
+    assertEquals(5, executedTasks.size())
+    assertTrue(executedTasks.contains("task-a"))
+}
+----
+
+=== Task State Verification
+
+Assert specific task completion states:
+
+[source,groovy]
+----
+@Test
+void "verify task states"() {
+    when:
+    execute(workflow).await()
+
+    then: "all tasks completed successfully"
+    assertTaskSucceeded("task-1")
+    assertTaskSucceeded("task-2")
+    assertTaskSucceeded("task-3")
+}
+
+@Test
+void "verify partial failure"() {
+    when:
+    execute(workflow).with(invalidInput).expectFailure().await()
+
+    then: "first task succeeded, second failed"
+    assertTaskSucceeded("validate")
+    assertTaskFailed("process")
+}
+----
+
+=== Workflow Success/Failure
+
+Check overall workflow outcome:
+
+[source,groovy]
+----
+@Test
+void "verify overall success"() {
+    when:
+    execute(workflow).with(validInput).await()
+
+    then:
+    verifySuccess()
+}
+
+@Test
+void "verify overall failure"() {
+    when:
+    execute(workflow).with(invalidInput).expectFailure().await()
+
+    then:
+    verifyFailure()
+}
+----
+
+== Input/Output Inspection
+
+=== Task Output Verification
+
+Examine data produced by each task:
+
+[source,groovy]
+----
+@Test
+void "verify task outputs"() {
+    given:
+    def workflow = TaskGraph.build {
+        serviceTask("double") {
+            action { ctx, prev ->
+                ctx.promiseFactory.executeAsync {
+                    [value: prev * 2]
+                }
+            }
+        }
+        serviceTask("add-ten") {
+            action { ctx, prev ->
+                ctx.promiseFactory.executeAsync {
+                    [value: prev.value + 10]
+                }
+            }
+        }
+        chainVia("double", "add-ten")
+    }
+
+    when:
+    execute(workflow).with(5).await()
+
+    then: "can inspect each task's output"
+    def doubleOutput = taskOutput("double")
+    assertEquals(10, doubleOutput.value)
+
+    def addOutput = taskOutput("add-ten")
+    assertEquals(20, addOutput.value)
+}
+----
+
+=== Task Input Inspection
+
+Check what data each task received:
+
+[source,groovy]
+----
+@Test
+void "inspect task inputs"() {
+    when:
+    execute(workflow).with([id: 123, name: "test"]).await()
+
+    then:
+    def taskInput = taskInput("process-user")
+    assertEquals(123, taskInput.id)
+    assertEquals("test", taskInput.name)
+}
+----
+
+=== Result Field Assertions
+
+Helper methods for common result checks:
+
+[source,groovy]
+----
+@Test
+void "assert result fields"() {
+    when:
+    def result = execute(workflow).with(input).await()
+
+    then: "result has expected fields"
+    assertResultHasField(result, "userId")
+    assertResultHasField(result, "processed")
+
+    and: "fields have expected values"
+    assertResultHas(result, "userId", 123)
+    assertResultHas(result, "processed", true)
+}
+----
+
+== Timing and Performance
+
+=== Task Execution Time
+
+Measure individual task performance:
+
+[source,groovy]
+----
+@Test
+void "measure task performance"() {
+    when:
+    execute(workflow).await()
+
+    then: "fast task completes quickly"
+    def fastTime = getTaskExecutionTime("fast-task")
+    assertTrue(fastTime < 100, "Fast task took ${fastTime}ms")
+
+    and: "slow task takes expected time"
+    def slowTime = getTaskExecutionTime("slow-task")
+    assertTrue(slowTime >= 1000, "Slow task took ${slowTime}ms")
+}
+----
+
+=== Total Execution Time
+
+Verify overall workflow performance:
+
+[source,groovy]
+----
+@Test
+void "verify total execution time"() {
+    when:
+    execute(workflow).await()
+
+    then: "completes within SLA"
+    def totalTime = getTotalExecutionTime()
+    assertTrue(totalTime < 5000,
+        "Workflow took ${totalTime}ms, exceeds 5s SLA")
+}
+----
+
+=== Timeout Testing
+
+Test timeout behavior:
+
+[source,groovy]
+----
+@Test
+void "test custom timeout"() {
+    given: "a workflow with long-running tasks"
+    def workflow = createSlowWorkflow()
+
+    when: "executed with generous timeout"
+    def result = execute(workflow)
+        .timeout(30, TimeUnit.SECONDS)
+        .await()
+
+    then: "completes successfully"
+    assertNotNull(result)
+}
+
+@Test
+void "test timeout failure"() {
+    given: "a very slow workflow"
+    def workflow = createVerySlowWorkflow()
+
+    when: "executed with short timeout"
+    execute(workflow)
+        .timeout(100)  // 100ms
+        .await()
+
+    then: "timeout exception thrown"
+    thrown(AssertionError)  // Wrapped TimeoutException
+}
+----
+
+== Mock Support
+
+=== Mocking Task Results
+
+Stub task behavior for isolated testing:
+
+[source,groovy]
+----
+@Test
+void "mock external service call"() {
+    given:
+    def workflow = buildWorkflowWithExternalAPI()
+
+    // Mock the external API task
+    mockTask("fetch-from-api", [
+        status: "success",
+        data: [id: 1, name: "Test"]
+    ])
+
+    when:
+    def result = execute(workflow).await()
+
+    then: "uses mocked data"
+    assertEquals("success", result.status)
+    assertEquals(1, result.data.id)
+}
+----
+
+=== Mocking Task Failures
+
+Test error handling by mocking failures:
+
+[source,groovy]
+----
+@Test
+void "mock task failure"() {
+    given:
+    def workflow = buildWorkflowWithRetry()
+
+    // Make external call fail
+    mockTaskFailure("external-api",
+        new IOException("Network timeout"))
+
+    when:
+    def result = execute(workflow)
+        .expectFailure()
+        .await()
+
+    then: "error handled gracefully"
+    assertTrue(result.failed)
+    assertTrue(result.error.message.contains("Network timeout"))
+}
+----
+
+=== Mock Storage
+
+Mocks are stored in the TaskContext globals:
+
+* **`ctx.globals['__mocks__']`** - Map of taskId → mock result
+* **`ctx.globals['__mockFailures__']`** - Map of taskId → exception
+
+This allows tasks to check for mocks during execution if designed to support it.
+
+== Test Data Builders
+
+=== Fluent Input Builder
+
+Build test input data fluently:
+
+[source,groovy]
+----
+@Test
+void "use input builder"() {
+    given:
+    def testData = input()
+        .with("userId", 123)
+        .with("action", "process")
+        .with("timestamp", System.currentTimeMillis())
+        .build()
+
+    when:
+    def result = execute(workflow).with(testData).await()
+
+    then:
+    assertNotNull(result)
+}
+
+// Can also use call() syntax
+@Test
+void "builder with call syntax"() {
+    def testData = input()
+        .with("key", "value")
+        .call()  // Same as .build()
+}
+----
+
+=== Custom Test Data Builders
+
+Create domain-specific builders:
+
+[source,groovy]
+----
+class CustomerWorkflowTest extends TaskGraphSpec {
+
+    static class CustomerBuilder {
+        private Map data = [:]
+
+        CustomerBuilder withId(String id) {
+            data.customerId = id
+            return this
+        }
+
+        CustomerBuilder withName(String name) {
+            data.customerName = name
+            return this
+        }
+
+        CustomerBuilder withStatus(String status) {
+            data.status = status
+            return this
+        }
+
+        Map build() { return data }
+    }
+
+    static CustomerBuilder customer() {
+        return new CustomerBuilder()
+    }
+
+    @Test
+    void "use custom builder"() {
+        given:
+        def customer = customer()
+            .withId("C123")
+            .withName("John Doe")
+            .withStatus("active")
+            .build()
+
+        when:
+        def result = execute(customerWorkflow)
+            .with(customer)
+            .await()
+
+        then:
+        assertEquals("active", result.status)
+    }
+}
+----
+
+== Complete Examples
+
+=== Example 1: Validation Workflow
+
+[source,groovy]
+----
+class ValidationWorkflowTest extends TaskGraphSpec {
+
+    static TaskGraph createValidationWorkflow() {
+        TaskGraph.build {
+            serviceTask("validate-not-null") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        def valid = prev != null
+                        [valid: valid, value: prev, step: "null-check"]
+                    }
+                }
+            }
+
+            serviceTask("validate-range") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        def number = prev.value as Double
+                        def inRange = number >= 0 && number <= 100
+                        [valid: inRange, value: number, step: "range-check"]
+                    }
+                }
+            }
+
+            chainVia("validate-not-null", "validate-range")
+        }
+    }
+
+    @Test
+    void "validate successful input"() {
+        given:
+        def workflow = createValidationWorkflow()
+
+        when:
+        def result = execute(workflow).with("50").await()
+
+        then:
+        assertTrue(result.valid)
+        assertEquals(50.0, result.value)
+        assertEquals("range-check", result.step)
+    }
+
+    @Test
+    void "validate out of range input"() {
+        given:
+        def workflow = createValidationWorkflow()
+
+        when:
+        def result = execute(workflow).with("150").await()
+
+        then:
+        assertFalse(result.valid)
+        assertEquals(150.0, result.value)
+    }
+
+    @Test
+    void "validate null input"() {
+        given:
+        def workflow = createValidationWorkflow()
+
+        when:
+        def result = execute(workflow).with(null).await()
+
+        then:
+        assertFalse(result.valid)
+    }
+}
+----
+
+=== Example 2: Transformation Pipeline
+
+[source,groovy]
+----
+class TransformPipelineTest extends TaskGraphSpec {
+
+    static TaskGraph createTransformWorkflow() {
+        TaskGraph.build {
+            serviceTask("parse") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        def value = prev instanceof Map ? prev.value : prev
+                        [value: Double.parseDouble(value.toString()),
+                         step: "parsed"]
+                    }
+                }
+            }
+
+            serviceTask("double-it") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        [value: prev.value * 2, step: "doubled"]
+                    }
+                }
+            }
+
+            serviceTask("add-ten") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        [value: prev.value + 10, step: "added"]
+                    }
+                }
+            }
+
+            serviceTask("format") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        [result: "Result: ${prev.value}", step: "formatted"]
+                    }
+                }
+            }
+
+            chainVia("parse", "double-it", "add-ten", "format")
+        }
+    }
+
+    @Test
+    void "transform value through pipeline"() {
+        given:
+        def workflow = createTransformWorkflow()
+
+        when:
+        def result = execute(workflow).with("10").await()
+
+        then: "final result is correct"
+        assertEquals("Result: 30.0", result.result.toString())
+
+        and: "tasks executed in order"
+        verifyExecutionOrder("parse", "double-it", "add-ten", "format")
+    }
+
+    @Test
+    void "track intermediate values"() {
+        given:
+        def workflow = createTransformWorkflow()
+
+        when:
+        execute(workflow).with("5").await()
+
+        then: "can verify each transformation"
+        assertEquals(5.0, taskOutput("parse").value)
+        assertEquals(10.0, taskOutput("double-it").value)
+        assertEquals(20.0, taskOutput("add-ten").value)
+        assertEquals("Result: 20.0", taskOutput("format").result.toString())
+    }
+
+    @Test
+    void "handle invalid input"() {
+        given:
+        def workflow = createTransformWorkflow()
+
+        when:
+        def result = execute(workflow)
+            .with("not-a-number")
+            .expectFailure()
+            .await()
+
+        then:
+        assertTrue(result.failed)
+        assertTrue(result.error.message.contains("NumberFormat") ||
+                   result.error.type.contains("NumberFormat"))
+    }
+}
+----
+
+=== Example 3: Conditional Workflow
+
+[source,groovy]
+----
+class ConditionalWorkflowTest extends TaskGraphSpec {
+
+    static TaskGraph createConditionalWorkflow() {
+        TaskGraph.build {
+            serviceTask("classify") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        def value = prev instanceof Number ?
+                            prev : Double.parseDouble(prev.toString())
+                        def category = value < 50 ? "small" :
+                                     value < 100 ? "medium" : "large"
+                        [value: value, category: category]
+                    }
+                }
+            }
+
+            serviceTask("process") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.executeAsync {
+                        def category = prev['category']
+                        [result: "${category.capitalize()}: ${prev['value']}",
+                         category: category,
+                         processed: true]
+                    }
+                }
+            }
+
+            chainVia("classify", "process")
+        }
+    }
+
+    @Test
+    void "classify small value"() {
+        given:
+        def workflow = createConditionalWorkflow()
+
+        when:
+        def result = execute(workflow).with(25.0).await()
+
+        then:
+        assertEquals("small", result.category)
+        assertEquals("Small: 25.0", result.result)
+    }
+
+    @Test
+    void "classify medium value"() {
+        given:
+        def workflow = createConditionalWorkflow()
+
+        when:
+        def result = execute(workflow).with(75.0).await()
+
+        then:
+        assertEquals("medium", result.category)
+        assertTrue(result.processed)
+    }
+
+    @Test
+    void "classify large value"() {
+        given:
+        def workflow = createConditionalWorkflow()
+
+        when:
+        def result = execute(workflow).with(150.0).await()
+
+        then:
+        assertEquals("large", result.category)
+        verifyTaskExecuted("classify")
+        verifyTaskExecuted("process")
+    }
+}
+----
+
+== Best Practices
+
+=== Write Focused Tests
+
+Each test should verify one specific behavior:
+
+[source,groovy]
+----
+// ✅ Good - focused test
+@Test
+void "should validate email format"() {
+    // Test email validation only
+}
+
+@Test
+void "should save user to database"() {
+    // Test database save only
+}
+
+// ❌ Bad - testing too much
+@Test
+void "should validate and save user and send email and log event"() {
+    // Testing 4 different things
+}
+----
+
+=== Use Descriptive Test Names
+
+Test names should describe the behavior being tested:
+
+[source,groovy]
+----
+// ✅ Good - clear intent
+@Test
+void "should retry up to 3 times on network error"() { }
+
+@Test
+void "should skip optional task when input is null"() { }
+
+@Test
+void "should execute parallel tasks concurrently"() { }
+
+// ❌ Bad - unclear intent
+@Test
+void "test1"() { }
+
+@Test
+void "testWorkflow"() { }
+----
+
+=== Organize Tests with given-when-then
+
+Structure tests for readability:
+
+[source,groovy]
+----
+@Test
+void "example test structure"() {
+    given: "setup context and preconditions"
+    def workflow = buildWorkflow()
+    def input = prepareTestData()
+
+    when: "perform the action being tested"
+    def result = execute(workflow).with(input).await()
+
+    then: "verify the expected outcome"
+    assertEquals(expectedValue, result.someField)
+    verifyTaskExecuted("some-task")
+
+    and: "additional verifications"
+    assertTrue(result.someCondition)
+}
+----
+
+=== Isolate External Dependencies
+
+Mock external services and APIs:
+
+[source,groovy]
+----
+@Test
+void "mock external dependencies"() {
+    given:
+    def workflow = buildWorkflowWithExternalCalls()
+
+    // Mock all external dependencies
+    mockTask("fetch-from-api", mockApiResponse)
+    mockTask("query-database", mockDbResult)
+    mockTask("send-email", [sent: true])
+
+    when:
+    def result = execute(workflow).await()
+
+    then:
+    // Test workflow logic without actual external calls
+    assertNotNull(result)
+}
+----
+
+=== Test Both Success and Failure Paths
+
+Always test error handling:
+
+[source,groovy]
+----
+@Test
+void "handle valid input successfully"() {
+    when:
+    def result = execute(workflow).with(validInput).await()
+
+    then:
+    verifySuccess()
+}
+
+@Test
+void "handle invalid input gracefully"() {
+    when:
+    def result = execute(workflow)
+        .with(invalidInput)
+        .expectFailure()
+        .await()
+
+    then:
+    verifyFailure()
+}
+----
+
+=== Use Test Data Builders
+
+Create reusable test data builders:
+
+[source,groovy]
+----
+class WorkflowTestBase extends TaskGraphSpec {
+
+    protected static Map validCustomer() {
+        return [
+            id: "C123",
+            name: "John Doe",
+            email: "john@example.com",
+            status: "active"
+        ]
+    }
+
+    protected static Map invalidCustomer() {
+        return [
+            id: null,
+            name: "",
+            email: "invalid-email"
+        ]
+    }
+}
+----
+
+== Troubleshooting
+
+=== Common Issues
+
+==== Timeout Errors
+
+If tests timeout unexpectedly:
+
+[source,groovy]
+----
+// Increase timeout for slow workflows
+execute(workflow)
+    .timeout(30, TimeUnit.SECONDS)  // Default is 5 seconds
+    .await()
+----
+
+==== Task Not Executed
+
+If `verifyTaskExecuted()` fails:
+
+1. Check that task ID matches exactly (case-sensitive)
+2. Verify task dependencies are satisfied
+3. Check task condition evaluates to true
+4. Use `getExecutedTasks()` to see which tasks actually ran
+
+[source,groovy]
+----
+when:
+execute(workflow).await()
+
+then:
+def executed = getExecutedTasks()
+println "Executed tasks: ${executed}"  // Debug output
+----
+
+==== Input Not Propagating
+
+If task input is null or incorrect:
+
+1. Verify workflow has root tasks (no predecessors)
+2. Check that tasks properly pass output to successors
+3. Inspect intermediate outputs with `taskOutput()`
+
+[source,groovy]
+----
+then:
+def firstOutput = taskOutput("first-task")
+println "First task output: ${firstOutput}"
+
+def secondInput = taskInput("second-task")
+println "Second task input: ${secondInput}"
+----
+
+== API Reference
+
+=== TaskGraphSpec Methods
+
+==== Execution Methods
+
+* **`execute(workflow)`** - Start fluent execution
+* **`executeAndAwait(workflow, input)`** - Convenience method
+
+==== Verification Methods
+
+* **`verifyExecutionOrder(taskIds...)`** - Assert task execution order
+* **`verifyTaskExecuted(taskId)`** - Assert task ran
+* **`verifyTaskNotExecuted(taskId)`** - Assert task didn't run
+* **`verifySuccess()`** - Assert workflow succeeded
+* **`verifyFailure()`** - Assert workflow failed
+
+==== Inspection Methods
+
+* **`taskInput(taskId)`** - Get task input
+* **`taskOutput(taskId)`** - Get task output
+* **`getTask(taskId)`** - Get task instance
+* **`getExecutedTasks()`** - Get list of executed task IDs
+
+==== Timing Methods
+
+* **`getTaskExecutionTime(taskId)`** - Get task duration (ms)
+* **`getTotalExecutionTime()`** - Get workflow duration (ms)
+
+==== Assertion Helpers
+
+* **`assertResultHas(result, field, value)`** - Assert result field equals value
+* **`assertResultHasField(result, field)`** - Assert result has field
+* **`assertTaskSucceeded(taskId)`** - Assert task completed
+* **`assertTaskFailed(taskId)`** - Assert task failed
+
+==== Mock Methods
+
+* **`mockTask(taskId, result)`** - Mock task success
+* **`mockTaskFailure(taskId, exception)`** - Mock task failure
+
+==== Test Data Methods
+
+* **`input()`** - Create fluent input builder
+
+=== TaskGraphExecution Methods
+
+* **`with(input)`** - Set workflow input
+* **`timeout(ms)`** - Set timeout in milliseconds
+* **`timeout(value, unit)`** - Set timeout with TimeUnit
+* **`expectFailure()`** - Expect workflow to fail
+* **`await()`** - Execute and wait for result
+* **`start()`** - Execute without waiting (returns Promise)
+
+== Summary
+
+TaskGraphSpec provides a powerful, expressive testing framework for TaskGraph workflows:
+
+* ✅ **Fluent API** - Chain configuration for readable tests
+* ✅ **Automatic tracking** - No manual instrumentation
+* ✅ **Clean async** - No boilerplate promise handling
+* ✅ **Comprehensive verification** - Order, state, timing, I/O
+* ✅ **Mock support** - Isolate dependencies
+* ✅ **Failure testing** - Test error paths easily
+* ✅ **Spock-inspired** - Familiar given-when-then style
+* ✅ **JUnit compatible** - Works with standard tooling
+
+With TaskGraphSpec, you can write tests that are:
+
+* **Readable** - Clear intent and structure
+* **Maintainable** - Minimal boilerplate
+* **Reliable** - Comprehensive verification
+* **Fast** - No external dependencies required
+
+== Next Steps
+
+* **Chapter 7** - Study workflow examples to test
+* **Chapter 8** - Compare with full test harness capabilities
+* **Chapter 12** - Test gateway routing logic
+* **Chapter 13** - Test different task types

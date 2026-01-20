@@ -96,15 +96,36 @@ class ScriptTask extends TaskBase<Object> {
 
     /**
      * Enable sandboxed execution (secure mode).
-     * When true, uses SecureScriptBase to restrict dangerous operations.
+     * When true, uses SecureScriptBase (or customScriptBaseClass if provided).
      * Default: true (secure by default)
      */
     boolean sandboxed = true
-    
+
+    /**
+     * Custom script base class for advanced security models.
+     * Allows library consumers to provide their own security restrictions.
+     *
+     * When specified:
+     * - Must extend groovy.lang.Script
+     * - Overrides default SecureScriptBase
+     * - User is responsible for implementing security controls
+     *
+     * Example:
+     * <pre>
+     * scriptTask("custom-secure") {
+     *     customScriptBaseClass = MyCompanyScriptBase.class
+     *     script '''
+     *         // Runs with MyCompanyScriptBase restrictions
+     *     '''
+     * }
+     * </pre>
+     */
+    Class<? extends Script> customScriptBaseClass = null
+
     // =========================================================================
     // Internal State
     // =========================================================================
-    
+
     /** Cached compiled Groovy script */
     private Script compiledGroovyScript
     
@@ -158,6 +179,48 @@ class ScriptTask extends TaskBase<Object> {
             log.warn("  - FOR TRUSTED SCRIPTS ONLY")
             log.warn("=" * 80)
         }
+    }
+
+    /**
+     * Set a custom script base class for advanced security models.
+     *
+     * This allows library consumers to implement their own security restrictions
+     * that are specific to their organizational security policies.
+     *
+     * <h3>Requirements:</h3>
+     * <ul>
+     *   <li>Must extend groovy.lang.Script</li>
+     *   <li>Should implement security controls (override invokeMethod, getProperty, etc.)</li>
+     *   <li>Automatically enables sandboxed=true</li>
+     * </ul>
+     *
+     * <h3>Example:</h3>
+     * <pre>
+     * scriptTask("enterprise-secure") {
+     *     customScriptBaseClass MyCompanyScriptBase  // DSL-friendly
+     *     script '''
+     *         // Your security model applies here
+     *     '''
+     * }
+     * </pre>
+     *
+     * @param baseClass Custom script base class extending Script
+     */
+    void customScriptBaseClass(Class<? extends Script> baseClass) {
+        if (!baseClass) {
+            throw new IllegalArgumentException("customScriptBaseClass cannot be null")
+        }
+
+        if (!Script.class.isAssignableFrom(baseClass)) {
+            throw new IllegalArgumentException(
+                "customScriptBaseClass must extend groovy.lang.Script, got: ${baseClass.name}"
+            )
+        }
+
+        this.customScriptBaseClass = baseClass
+        this.sandboxed = true  // Custom base class implies sandboxing
+
+        log.info("ScriptTask(${id}): Using custom script base class: ${baseClass.simpleName}")
     }
     
     /**
@@ -216,21 +279,29 @@ class ScriptTask extends TaskBase<Object> {
      */
     private Object executeGroovyOptimized(Map<String, Object> bindings) {
 
-        log.debug("ScriptTask($id): executing Groovy script (optimized, sandboxed=${sandboxed})")
+        log.debug("ScriptTask($id): executing Groovy script (optimized, sandboxed=${sandboxed}, customBase=${customScriptBaseClass?.simpleName ?: 'none'})")
 
         // Compile script once and cache it
         if (!compiledGroovyScript) {
             log.debug("ScriptTask($id): compiling Groovy script")
 
             if (sandboxed) {
-                // SECURE: Use custom script base class that restricts dangerous operations
+                // SECURE: Use custom script base class or default SecureScriptBase
                 def config = new org.codehaus.groovy.control.CompilerConfiguration()
-                config.scriptBaseClass = SecureScriptBase.class.name
+
+                if (customScriptBaseClass) {
+                    // User-provided custom security model
+                    config.scriptBaseClass = customScriptBaseClass.name
+                    log.debug("ScriptTask($id): compiled with custom script base: ${customScriptBaseClass.simpleName}")
+                } else {
+                    // Default library-provided security model
+                    config.scriptBaseClass = SecureScriptBase.class.name
+                    log.debug("ScriptTask($id): compiled with SecureScriptBase (default sandboxed mode)")
+                }
 
                 def shell = new GroovyShell(this.class.classLoader, new Binding(), config)
                 compiledGroovyScript = shell.parse(script)
 
-                log.debug("ScriptTask($id): compiled with SecureScriptBase (sandboxed mode)")
             } else {
                 // INSECURE: Direct execution without restrictions
                 def shell = new GroovyShell()

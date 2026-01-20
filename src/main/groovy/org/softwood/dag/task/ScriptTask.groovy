@@ -81,18 +81,25 @@ class ScriptTask extends TaskBase<Object> {
     // =========================================================================
     // Configuration
     // =========================================================================
-    
+
     /** Script language (default: groovy) */
     String language = "groovy"
-    
+
     /** Script source code */
     String script
-    
+
     /** Closure to provide variable bindings to script */
     Closure bindingsProvider
-    
+
     /** Script execution timeout (optional) */
     Duration scriptTimeout
+
+    /**
+     * Enable sandboxed execution (secure mode).
+     * When true, uses SecureScriptBase to restrict dangerous operations.
+     * Default: true (secure by default)
+     */
+    boolean sandboxed = true
     
     // =========================================================================
     // Internal State
@@ -124,6 +131,33 @@ class ScriptTask extends TaskBase<Object> {
      */
     void script(String code) {
         this.script = code
+    }
+
+    /**
+     * Enable or disable sandboxed execution.
+     * Sandboxed mode (default) restricts dangerous operations.
+     *
+     * SECURITY WARNING: Only disable sandboxing if you fully trust the script source.
+     */
+    void sandboxed(boolean enabled) {
+        this.sandboxed = enabled
+        if (!enabled) {
+            def env = System.getenv('ENVIRONMENT') ?: System.getProperty('environment') ?: ''
+            if (env.toLowerCase() in ['production', 'prod', 'live', 'staging']) {
+                throw new SecurityException(
+                    "Unsandboxed script execution is not allowed in production environment. " +
+                    "ENVIRONMENT=${env}. Scripts must run in sandboxed mode."
+                )
+            }
+            log.warn("=" * 80)
+            log.warn("⚠️  SECURITY WARNING: ScriptTask sandboxing DISABLED")
+            log.warn("  - Arbitrary code execution: ENABLED")
+            log.warn("  - File system access: UNRESTRICTED")
+            log.warn("  - Network access: UNRESTRICTED")
+            log.warn("  - Task: ${id}")
+            log.warn("  - FOR TRUSTED SCRIPTS ONLY")
+            log.warn("=" * 80)
+        }
     }
     
     /**
@@ -181,24 +215,42 @@ class ScriptTask extends TaskBase<Object> {
      * Execute Groovy script with optimization (no ScriptEngine overhead).
      */
     private Object executeGroovyOptimized(Map<String, Object> bindings) {
-        
-        log.debug("ScriptTask($id): executing Groovy script (optimized)")
-        
+
+        log.debug("ScriptTask($id): executing Groovy script (optimized, sandboxed=${sandboxed})")
+
         // Compile script once and cache it
         if (!compiledGroovyScript) {
             log.debug("ScriptTask($id): compiling Groovy script")
-            def shell = new GroovyShell()
-            compiledGroovyScript = shell.parse(script)
+
+            if (sandboxed) {
+                // SECURE: Use custom script base class that restricts dangerous operations
+                def config = new org.codehaus.groovy.control.CompilerConfiguration()
+                config.scriptBaseClass = SecureScriptBase.class.name
+
+                def shell = new GroovyShell(this.class.classLoader, new Binding(), config)
+                compiledGroovyScript = shell.parse(script)
+
+                log.debug("ScriptTask($id): compiled with SecureScriptBase (sandboxed mode)")
+            } else {
+                // INSECURE: Direct execution without restrictions
+                def shell = new GroovyShell()
+                compiledGroovyScript = shell.parse(script)
+
+                log.warn("ScriptTask($id): compiled without sandboxing - SECURITY RISK")
+            }
         }
-        
+
         // Set bindings
         bindings.each { key, value ->
             compiledGroovyScript.binding.setVariable(key, value)
         }
-        
+
         // Execute
         try {
             return compiledGroovyScript.run()
+        } catch (SecurityException e) {
+            log.error("ScriptTask($id): Script attempted forbidden operation: ${e.message}")
+            throw new ScriptExecutionException("Script security violation: ${e.message}", e)
         } catch (Exception e) {
             log.error("ScriptTask($id): Groovy script execution failed", e)
             throw new ScriptExecutionException("Groovy script execution failed: ${e.message}", e)

@@ -1,5 +1,26 @@
 # Base Configuration (Defaults for all environments)
 # This file provides sensible defaults that can be overridden by profile-specific configs
+#
+# ============================================================================
+# SECURITY NOTICE - CREDENTIAL MANAGEMENT
+# ============================================================================
+# ALL CREDENTIALS must be provided via environment variables or secret managers.
+# Never hardcode passwords, API keys, tokens, or other sensitive data in config files.
+#
+# ConfigLoader merges values from multiple sources (priority order):
+# 1. System properties (-Dkey=value)
+# 2. Environment variables
+# 3. External vault/secrets manager (via SecretsResolver)
+# 4. This configuration file
+#
+# For credentials, use environment variables:
+# - Database: POSTGRES_PASSWORD, MONGODB_PASSWORD, ARANGODB_PASSWORD
+# - AWS: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or use IAM roles)
+# - Azure: AZURE_STORAGE_KEY, AZURE_COSMOSDB_KEY (or use managed identity)
+# - GCP: GCP_CREDENTIALS_PATH (or use application default credentials)
+# - Messaging: RABBITMQ_PASSWORD, ACTIVEMQ_PASSWORD
+# - Object Storage: MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+# ============================================================================
 
 # Actor System
 actor:
@@ -43,7 +64,7 @@ database:
     port: 5432
     database: postgres
     username: postgres
-    password: postgres
+    password: ""  # Must be set via POSTGRES_PASSWORD environment variable
     schema: public
     poolSize: 1
     maxPoolSize: 10
@@ -146,7 +167,7 @@ messaging:
     host: localhost
     port: 5672
     username: guest
-    password: guest
+    password: ""  # Must be set via RABBITMQ_PASSWORD environment variable
     virtualHost: /
     exchange: ""
     exchangeType: direct  # direct, fanout, topic, headers
@@ -196,7 +217,7 @@ messaging:
   activemq:
     brokerUrl: tcp://localhost:61616
     username: admin
-    password: admin
+    password: ""  # Must be set via ACTIVEMQ_PASSWORD environment variable
     queueName: ""
     topicName: ""
     persistent: true
@@ -258,11 +279,11 @@ objectstorage:
     connectionTimeout: 30000
     requestTimeout: 60000
   
-  # MinIO (S3-compatible)
+  # MinIO (S3-compatible) - For local development/testing only
   minio:
     endpoint: http://localhost:9000
-    accessKey: minioadmin
-    secretKey: minioadmin
+    accessKey: ""  # Must be set via MINIO_ACCESS_KEY environment variable
+    secretKey: ""  # Must be set via MINIO_SECRET_KEY environment variable
     region: us-east-1
     pathStyleAccess: true
     connectionTimeout: 10000

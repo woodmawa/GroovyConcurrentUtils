@@ -100,7 +100,7 @@ database {
         port = 5432
         database = 'postgres'
         username = 'postgres'
-        password = 'postgres'
+        password = SecretsResolver.resolve('POSTGRES_PASSWORD', '')
         schema = 'public'
     }
     
@@ -186,7 +186,7 @@ messaging {
         host = 'localhost'
         port = 5672
         username = 'guest'
-        password = 'guest'
+        password = SecretsResolver.resolve('RABBITMQ_PASSWORD', '')
         virtualHost = '/'
         exchange = ''
         exchangeType = 'direct'  // direct, fanout, topic, headers
@@ -241,7 +241,7 @@ messaging {
     activemq {
         brokerUrl = 'tcp://localhost:61616'
         username = 'admin'
-        password = 'admin'
+        password = SecretsResolver.resolve('ACTIVEMQ_PASSWORD', '')
         queueName = ''
         topicName = ''
         persistent = true
@@ -297,11 +297,11 @@ objectstorage {
         requestTimeout = 60000
     }
     
-    // MinIO (S3-compatible)
+    // MinIO (S3-compatible) - For local development/testing only
     minio {
         endpoint = 'http://localhost:9000'
-        accessKey = 'minioadmin'
-        secretKey = 'minioadmin'
+        accessKey = SecretsResolver.resolve('MINIO_ACCESS_KEY', '')
+        secretKey = SecretsResolver.resolve('MINIO_SECRET_KEY', '')
         region = 'us-east-1'
         pathStyleAccess = true
         connectionTimeout = 10000

@@ -150,7 +150,8 @@ class TaskResolver {
             return
         }
         ctx.globals[key] = value
-        log.trace("Global set: ${key} = ${value}")
+        // SECURITY: Never log values - they may contain sensitive data
+        log.trace("Global set: ${key}")
     }
     
     /**

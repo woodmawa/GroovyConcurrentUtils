@@ -1,6 +1,7 @@
 package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
+import org.softwood.dag.task.manualtask.*
 import org.softwood.promise.Promise
 import org.softwood.promise.Promises
 
@@ -38,6 +39,8 @@ import java.util.TimerTask as JTimerTask
  *   <li>Priority levels (LOW, NORMAL, HIGH, URGENT)</li>
  *   <li>Due dates with timeout handling</li>
  *   <li>Auto-action on timeout</li>
+ *   <li><b>Notifications</b> via email, Slack, webhook</li>
+ *   <li><b>Escalation rules</b> for automated reassignment</li>
  * </ul>
  *
  * <h3>DSL Example:</h3>
@@ -48,19 +51,35 @@ import java.util.TimerTask as JTimerTask
  *     assignee "john.doe@company.com"
  *     priority Priority.HIGH
  *     dueDate LocalDateTime.now().plusDays(2)
- *     
+ *
+ *     // Form fields
  *     form {
  *         field "approved", type: FieldType.BOOLEAN, required: true
  *         field "comments", type: FieldType.TEXTAREA, required: false
  *         field "quality_score", type: FieldType.NUMBER, min: 1, max: 10
  *     }
- *     
- *     timeout 48.hours, autoAction: CompletionOutcome.SKIP
- *     
+ *
+ *     // Notifications
+ *     notify {
+ *         email "john.doe@company.com"
+ *         slack "#code-reviews"
+ *         onAssignment true
+ *         onCompletion false
+ *     }
+ *
+ *     // Escalation
+ *     escalate {
+ *         after Duration.ofHours(24), to: "tech-lead@company.com"
+ *         after Duration.ofHours(48), to: "director@company.com"
+ *     }
+ *
+ *     // Timeout with auto-action
+ *     timeout 72.hours, autoAction: CompletionOutcome.SKIP
+ *
  *     onSuccess { ctx ->
  *         println "Approved by ${ctx.completedBy}"
  *     }
- *     
+ *
  *     onFailure { ctx ->
  *         println "Rejected: ${ctx.formData.comments}"
  *     }
@@ -105,9 +124,23 @@ class ManualTask extends TaskBase<Map> {
     // =========================================================================
     // Form Configuration
     // =========================================================================
-    
+
     /** Form fields for data collection */
     final Map<String, FormField> formFields = [:]
+
+    // =========================================================================
+    // Notification Configuration
+    // =========================================================================
+
+    /** Notification configuration */
+    NotificationConfig notificationConfig = new NotificationConfig()
+
+    // =========================================================================
+    // Escalation Configuration
+    // =========================================================================
+
+    /** Escalation policy */
+    EscalationPolicy escalationPolicy = new EscalationPolicy()
     
     // =========================================================================
     // Timeout Configuration
@@ -166,9 +199,15 @@ class ManualTask extends TaskBase<Map> {
     
     /** Timeout timer task */
     private Timer timeoutTimer
-    
+
+    /** Escalation timer task */
+    private Timer escalationTimer
+
     /** Flag to ensure complete() is called only once */
     private volatile boolean completed = false
+
+    /** Task start time (for escalation tracking) */
+    private LocalDateTime startTime
 
     ManualTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
@@ -224,7 +263,7 @@ class ManualTask extends TaskBase<Map> {
     
     /**
      * Configure form fields for data collection.
-     * 
+     *
      * @param config closure with form field definitions
      */
     void form(@DelegatesTo(FormBuilder) Closure config) {
@@ -233,7 +272,31 @@ class ManualTask extends TaskBase<Map> {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.call()
     }
-    
+
+    /**
+     * Configure notifications for this task.
+     *
+     * @param config closure with notification configuration
+     */
+    void notify(@DelegatesTo(NotificationBuilder) Closure config) {
+        def builder = new NotificationBuilder(this)
+        config.delegate = builder
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+
+    /**
+     * Configure escalation rules for this task.
+     *
+     * @param config closure with escalation rules
+     */
+    void escalate(@DelegatesTo(EscalationBuilder) Closure config) {
+        def builder = new EscalationBuilder(this)
+        config.delegate = builder
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+
     /**
      * Set timeout with auto-action.
      * 
@@ -279,18 +342,32 @@ class ManualTask extends TaskBase<Map> {
 
     @Override
     protected Promise<Map> runTask(TaskContext ctx, Object prevValue) {
-        
+
         log.debug("ManualTask($id): starting - waiting for external completion")
-        
+
+        // Record start time
+        this.startTime = LocalDateTime.now()
+
         // Set up timeout if configured
         if (timeout) {
             scheduleTimeout()
         }
-        
+
+        // Set up escalation if configured
+        if (escalationPolicy.hasRules()) {
+            escalationPolicy.activate()
+            scheduleEscalationChecks()
+        }
+
+        // Send assignment notification
+        if (notificationConfig.hasChannels() && notificationConfig.notifyOnAssignment) {
+            sendAssignmentNotification()
+        }
+
         // Log task information
         log.info("ManualTask($id): '$title' assigned to ${assignee ?: role ?: 'unassigned'} " +
                  "(priority: $priority, due: ${dueDate ?: 'none'})")
-        
+
         // Return the promise that was created in constructor
         // It will be resolved when complete() is called
         return completionResultPromise
@@ -320,10 +397,11 @@ class ManualTask extends TaskBase<Map> {
         }
         
         log.debug("ManualTask($id): completing with options: ${options.keySet()}")
-        
-        // Cancel timeout if active
+
+        // Cancel timeout and escalation if active
         cancelTimeout()
-        
+        cancelEscalation()
+
         // Extract and validate options
         this.outcome = options.outcome as CompletionOutcome
         if (!this.outcome) {
@@ -381,9 +459,14 @@ class ManualTask extends TaskBase<Map> {
             comments: comments
         ]
         
+        // Send completion notification
+        if (notificationConfig.hasChannels() && notificationConfig.notifyOnCompletion) {
+            sendCompletionNotification()
+        }
+
         // Mark as completed and resolve promise
         completed = true
-        
+
         if (outcome == CompletionOutcome.SUCCESS) {
             completionResultPromise.accept(result)
         } else if (outcome == CompletionOutcome.FAILURE) {
@@ -394,7 +477,7 @@ class ManualTask extends TaskBase<Map> {
             // SKIP - treat as success with skip indicator
             completionResultPromise.accept(result)
         }
-        
+
         log.debug("ManualTask($id): completion processing finished")
     }
 
@@ -431,6 +514,160 @@ class ManualTask extends TaskBase<Map> {
             completedBy: "SYSTEM_TIMEOUT",
             comments: autoActionReason
         )
+    }
+
+    // =========================================================================
+    // Escalation Handling
+    // =========================================================================
+
+    private void scheduleEscalationChecks() {
+        if (!escalationPolicy.hasRules()) {
+            return
+        }
+
+        log.debug("ManualTask($id): scheduling escalation checks")
+
+        escalationTimer = new Timer("ManualTask-${id}-Escalation", true)
+
+        // Check for escalations every 100ms for responsive escalation
+        escalationTimer.scheduleAtFixedRate(new JTimerTask() {
+            @Override
+            void run() {
+                checkAndTriggerEscalation()
+            }
+        }, 100L, 100L)  // Check every 100ms
+    }
+
+    private void cancelEscalation() {
+        if (escalationTimer) {
+            log.debug("ManualTask($id): cancelling escalation")
+            escalationTimer.cancel()
+            escalationTimer = null
+        }
+
+        if (escalationPolicy) {
+            escalationPolicy.deactivate()
+        }
+    }
+
+    private void checkAndTriggerEscalation() {
+        def rule = escalationPolicy.checkEscalation()
+
+        if (rule) {
+            log.info("ManualTask($id): escalating to level ${rule.level} - assigning to ${rule.escalateTo}")
+
+            // Update assignee
+            this.assignee = rule.escalateTo
+
+            // Send escalation notification
+            if (notificationConfig.hasChannels() && notificationConfig.notifyOnEscalation) {
+                sendEscalationNotification(rule)
+            }
+
+            // Call custom escalation action if provided
+            if (rule.onEscalate) {
+                try {
+                    rule.onEscalate.call(this, rule)
+                } catch (Exception e) {
+                    log.error("ManualTask($id): error in onEscalate callback", e)
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Notification Handling
+    // =========================================================================
+
+    private void sendAssignmentNotification() {
+        try {
+            def message = NotificationMessage.create(
+                recipient: assignee ?: role,
+                subject: "Task Assigned: ${title}",
+                body: buildAssignmentMessage(),
+                taskId: id,
+                taskTitle: title,
+                priority: priority?.toString(),
+                dueDate: dueDate,
+                type: NotificationType.ASSIGNMENT
+            )
+
+            notificationConfig.sendNotification(message)
+            log.debug("ManualTask($id): sent assignment notification to ${assignee ?: role}")
+        } catch (Exception e) {
+            log.error("ManualTask($id): failed to send assignment notification", e)
+        }
+    }
+
+    private void sendEscalationNotification(EscalationRule rule) {
+        try {
+            def message = NotificationMessage.create(
+                recipient: rule.escalateTo,
+                subject: "Task Escalated (Level ${rule.level}): ${title}",
+                body: buildEscalationMessage(rule),
+                taskId: id,
+                taskTitle: title,
+                priority: priority?.toString(),
+                dueDate: dueDate,
+                type: NotificationType.ESCALATION,
+                metadata: [escalationLevel: rule.level, previousAssignee: assignee]
+            )
+
+            notificationConfig.sendNotification(message)
+            log.debug("ManualTask($id): sent escalation notification to ${rule.escalateTo}")
+        } catch (Exception e) {
+            log.error("ManualTask($id): failed to send escalation notification", e)
+        }
+    }
+
+    private void sendCompletionNotification() {
+        try {
+            def message = NotificationMessage.create(
+                recipient: assignee ?: role,
+                subject: "Task Completed: ${title}",
+                body: buildCompletionMessage(),
+                taskId: id,
+                taskTitle: title,
+                priority: priority?.toString(),
+                dueDate: dueDate,
+                type: NotificationType.COMPLETION,
+                metadata: [outcome: outcome?.toString(), completedBy: completedBy]
+            )
+
+            notificationConfig.sendNotification(message)
+            log.debug("ManualTask($id): sent completion notification")
+        } catch (Exception e) {
+            log.error("ManualTask($id): failed to send completion notification", e)
+        }
+    }
+
+    private String buildAssignmentMessage() {
+        def msg = "A new task has been assigned to you:\n\n"
+        msg += "Task: ${title}\n"
+        if (description) msg += "Description: ${description}\n"
+        msg += "Priority: ${priority}\n"
+        if (dueDate) msg += "Due: ${dueDate}\n"
+        return msg
+    }
+
+    private String buildEscalationMessage(EscalationRule rule) {
+        def msg = "A task has been escalated to you (Level ${rule.level}):\n\n"
+        msg += "Task: ${title}\n"
+        if (description) msg += "Description: ${description}\n"
+        msg += "Priority: ${priority}\n"
+        if (dueDate) msg += "Due: ${dueDate}\n"
+        msg += "\nThis task was previously assigned but not completed within the expected timeframe."
+        return msg
+    }
+
+    private String buildCompletionMessage() {
+        def msg = "Task has been completed:\n\n"
+        msg += "Task: ${title}\n"
+        msg += "Outcome: ${outcome}\n"
+        msg += "Completed by: ${completedBy}\n"
+        msg += "Completed at: ${completedAt}\n"
+        if (comments) msg += "Comments: ${comments}\n"
+        return msg
     }
 
     // =========================================================================
@@ -498,11 +735,92 @@ class ManualTask extends TaskBase<Map> {
     }
     
     /**
+     * Builder for notification configuration.
+     */
+    static class NotificationBuilder {
+        private final ManualTask task
+
+        NotificationBuilder(ManualTask task) {
+            this.task = task
+        }
+
+        /**
+         * Add email notification channel.
+         */
+        void email(String emailAddress, Map config = [:]) {
+            def channel = new EmailNotificationChannel(config + [fromAddress: emailAddress])
+            task.notificationConfig.addChannel(channel)
+            task.log.debug("ManualTask(${task.id}): added email notification to ${emailAddress}")
+        }
+
+        /**
+         * Add Slack notification channel.
+         */
+        void slack(String channel, Map config = [:]) {
+            def slackChannel = new SlackNotificationChannel(config + [defaultChannel: channel])
+            task.notificationConfig.addChannel(slackChannel)
+            task.log.debug("ManualTask(${task.id}): added Slack notification to ${channel}")
+        }
+
+        /**
+         * Add webhook notification channel.
+         */
+        void webhook(String url, Map config = [:]) {
+            def webhookChannel = new WebhookNotificationChannel(config + [webhookUrl: url])
+            task.notificationConfig.addChannel(webhookChannel)
+            task.log.debug("ManualTask(${task.id}): added webhook notification to ${url}")
+        }
+
+        /**
+         * Configure whether to notify on assignment.
+         */
+        void onAssignment(boolean value) {
+            task.notificationConfig.notifyOnAssignment = value
+        }
+
+        /**
+         * Configure whether to notify on escalation.
+         */
+        void onEscalation(boolean value) {
+            task.notificationConfig.notifyOnEscalation = value
+        }
+
+        /**
+         * Configure whether to notify on completion.
+         */
+        void onCompletion(boolean value) {
+            task.notificationConfig.notifyOnCompletion = value
+        }
+    }
+
+    /**
+     * Builder for escalation configuration.
+     */
+    static class EscalationBuilder {
+        private final ManualTask task
+
+        EscalationBuilder(ManualTask task) {
+            this.task = task
+        }
+
+        /**
+         * Add an escalation rule.
+         *
+         * Usage:
+         *   after Duration.ofHours(24), to: "manager@company.com"
+         */
+        void after(Duration duration, Map params) {
+            task.escalationPolicy.after(duration, params)
+            task.log.debug("ManualTask(${task.id}): added escalation after ${duration} to ${params.to}")
+        }
+    }
+
+    /**
      * Exception thrown when ManualTask completes with FAILURE outcome
      */
     static class ManualTaskFailedException extends Exception {
         final Map completionData
-        
+
         ManualTaskFailedException(String message, Map data) {
             super(message)
             this.completionData = data

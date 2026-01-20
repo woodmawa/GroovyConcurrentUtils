@@ -756,11 +756,29 @@ abstract class TaskBase<T> implements ITask<T> {
             int attempt = 1
             long delay = retryPolicy.initialDelay.toMillis()
             Object prevValue = null  // Declare outside try block so it's accessible in catch
+            long taskStartTime = System.currentTimeMillis()  // Track task execution start
 
             while (true) {
+                long attemptStartTime = System.currentTimeMillis()  // Track individual attempt start
+
                 try {
                     state = TaskState.RUNNING
-                    emitEvent(TaskState.RUNNING)
+
+                    // Emit event with attempt number for retries
+                    if (attempt > 1) {
+                        // This is a retry - emit enhanced event
+                        def retryEvent = TaskEvent.builder(id, TaskState.RUNNING)
+                            .taskName(name)
+                            .attemptNumber(attempt)
+                            .graphId(ctx?.globals?.get('graphId'))
+                            .runId(ctx?.globals?.get('runId'))
+                            .build()
+                        if (eventDispatcher) {
+                            eventDispatcher.emit(retryEvent)
+                        }
+                    } else {
+                        emitEvent(TaskState.RUNNING)
+                    }
 
                     // Unwrap the promise to get the actual value
                     if (previousPromise != null) {
@@ -903,14 +921,32 @@ abstract class TaskBase<T> implements ITask<T> {
                     }
 
                     log.debug "Task ${id}: got result: $result"
-                    
+
                     // Store result in idempotency cache if enabled
                     if (idempotencyPolicy.enabled) {
                         storeInIdempotencyCache(prevValue, result)
                     }
 
+                    // Calculate execution time
+                    long executionTimeMs = System.currentTimeMillis() - attemptStartTime
+                    long totalTimeMs = System.currentTimeMillis() - taskStartTime
+
                     state = TaskState.COMPLETED
-                    emitEvent(TaskState.COMPLETED)
+
+                    // Emit enhanced completion event with timing
+                    def completionEvent = TaskEvent.builder(id, TaskState.COMPLETED)
+                        .taskName(name)
+                        .attemptNumber(attempt)
+                        .executionTimeMs(executionTimeMs)
+                        .graphId(ctx?.globals?.get('graphId'))
+                        .runId(ctx?.globals?.get('runId'))
+                        .addMetadata('totalTimeMs', totalTimeMs)
+                        .addMetadata('retriesUsed', attempt - 1)
+                        .build()
+                    if (eventDispatcher) {
+                        eventDispatcher.emit(completionEvent)
+                    }
+
                     return result
 
                 } catch (Throwable err) {
@@ -924,7 +960,21 @@ abstract class TaskBase<T> implements ITask<T> {
                     if (!isRetriable(err)) {
                         log.debug "Task ${id}: non-retriable error (${err.class.simpleName}), failing immediately"
                         state = TaskState.FAILED
-                        emitErrorEvent(err)
+
+                        // Emit enhanced failure event
+                        long executionTimeMs = System.currentTimeMillis() - attemptStartTime
+                        def failureEvent = TaskEvent.builder(id, TaskState.FAILED)
+                            .taskName(name)
+                            .attemptNumber(attempt)
+                            .executionTimeMs(executionTimeMs)
+                            .error(err)
+                            .graphId(ctx?.globals?.get('graphId'))
+                            .runId(ctx?.globals?.get('runId'))
+                            .build()
+                        if (eventDispatcher) {
+                            eventDispatcher.emit(failureEvent)
+                        }
+
                         throw err  // Throw original exception directly - no wrapping
                     }
 
@@ -933,20 +983,62 @@ abstract class TaskBase<T> implements ITask<T> {
                     if (retryPolicy.maxAttempts <= 1) {
                         // No retries configured - throw original exception
                         state = TaskState.FAILED
-                        emitErrorEvent(err)
+
+                        long executionTimeMs = System.currentTimeMillis() - attemptStartTime
+                        def failureEvent = TaskEvent.builder(id, TaskState.FAILED)
+                            .taskName(name)
+                            .attemptNumber(attempt)
+                            .executionTimeMs(executionTimeMs)
+                            .error(err)
+                            .graphId(ctx?.globals?.get('graphId'))
+                            .runId(ctx?.globals?.get('runId'))
+                            .build()
+                        if (eventDispatcher) {
+                            eventDispatcher.emit(failureEvent)
+                        }
+
                         throw err
                     }
-                    
+
                     if (attempt >= retryPolicy.maxAttempts) {
                         // Retries exhausted - wrap to indicate retry exhaustion
                         state = TaskState.FAILED
                         def exceeded = new RuntimeException("Task ${id}: exceeded retry attempts", err)
-                        emitErrorEvent(exceeded)
+
+                        long totalTimeMs = System.currentTimeMillis() - taskStartTime
+                        def failureEvent = TaskEvent.builder(id, TaskState.FAILED)
+                            .taskName(name)
+                            .attemptNumber(attempt)
+                            .error(exceeded)
+                            .graphId(ctx?.globals?.get('graphId'))
+                            .runId(ctx?.globals?.get('runId'))
+                            .addMetadata('totalTimeMs', totalTimeMs)
+                            .addMetadata('retriesExhausted', true)
+                            .build()
+                        if (eventDispatcher) {
+                            eventDispatcher.emit(failureEvent)
+                        }
+
                         throw exceeded
                     }
 
-                    // Retry with backoff
+                    // Will retry - emit TASK_RETRYING event
                     log.debug "Task ${id}: retrying after ${delay}ms (attempt $attempt)"
+
+                    // Map to custom TaskState for retry or use metadata
+                    def retryingEvent = TaskEvent.builder(id, TaskState.RUNNING)  // Use RUNNING as base state
+                        .taskName(name)
+                        .attemptNumber(attempt + 1)  // Next attempt number
+                        .graphId(ctx?.globals?.get('graphId'))
+                        .runId(ctx?.globals?.get('runId'))
+                        .addMetadata('isRetrying', true)
+                        .addMetadata('retryDelayMs', delay)
+                        .addMetadata('previousAttemptFailed', err.class.simpleName)
+                        .build()
+                    if (eventDispatcher) {
+                        eventDispatcher.emit(retryingEvent)
+                    }
+
                     Thread.sleep(delay)
                     delay = (long) (delay * retryPolicy.backoffMultiplier)
                     attempt++

@@ -178,7 +178,7 @@ class TaskGraph {
         log.debug "Task event: ${event.taskId} -> ${event.taskState}"
 
         // Convert TaskEvent to GraphEvent and broadcast
-        GraphEventType eventType = mapTaskStateToEventType(event.taskState)
+        GraphEventType eventType = mapTaskStateToEventType(event.taskState, event)
         if (eventType) {
             def graphEvent = new GraphEvent(eventType, this.id, this.runId, event)
             notifyListeners(graphEvent)
@@ -187,12 +187,17 @@ class TaskGraph {
 
     /**
      * Map TaskState to GraphEventType.
+     * Also checks metadata to distinguish retries from normal starts.
      */
-    private GraphEventType mapTaskStateToEventType(TaskState taskState) {
+    private GraphEventType mapTaskStateToEventType(TaskState taskState, TaskEvent event = null) {
         switch (taskState) {
             case TaskState.SCHEDULED:
                 return GraphEventType.TASK_SCHEDULED
             case TaskState.RUNNING:
+                // Check if this is a retry
+                if (event?.metadata?.get('isRetrying')) {
+                    return GraphEventType.TASK_RETRYING
+                }
                 return GraphEventType.TASK_STARTED
             case TaskState.COMPLETED:
                 return GraphEventType.TASK_COMPLETED
@@ -702,10 +707,23 @@ class TaskGraph {
                     // If any task failed, fail the graph promise with the first error
                     def firstFailure = failedTasks[0]
                     log.error "Graph execution failed due to task ${firstFailure.id}: ${firstFailure.error}"
-                    
+
+                    // Calculate execution time
+                    long executionTimeMs = startTime ?
+                        java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : 0
+
+                    // Emit GRAPH_FAILED event
+                    emitGraphEvent(GraphEventType.GRAPH_FAILED, [
+                        failedTaskId: firstFailure.id,
+                        failedTaskCount: failedTasks.size(),
+                        completedTaskCount: tasks.values().count { it.isCompleted() },
+                        totalTasks: totalTaskCount,
+                        executionTimeMs: executionTimeMs
+                    ])
+
                     // Finalize persistence with failure info
                     finalizePersistence(true, firstFailure.id, firstFailure.error)
-                    
+
                     // Update cluster graph state
                     if (clusteringEnabled && clusterGraphState != null) {
                         try {
@@ -720,7 +738,7 @@ class TaskGraph {
                             log.warn "Failed to update cluster graph state on failure", e
                         }
                     }
-                    
+
                     graphCompletionPromise.fail(firstFailure.error)
                 } else {
                     // All tasks completed successfully - collect results
@@ -729,9 +747,21 @@ class TaskGraph {
                         .collect { it.completionPromise?.get() }
                         .findAll { it != null }
 
+                    // Calculate execution time
+                    long executionTimeMs = startTime ?
+                        java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : 0
+
+                    // Emit GRAPH_COMPLETED event
+                    emitGraphEvent(GraphEventType.GRAPH_COMPLETED, [
+                        completedTaskCount: tasks.values().count { it.isCompleted() },
+                        skippedTaskCount: tasks.values().count { it.isSkipped() },
+                        totalTasks: totalTaskCount,
+                        executionTimeMs: executionTimeMs
+                    ])
+
                     // Finalize persistence with success
                     finalizePersistence(false)
-                    
+
                     // Update cluster graph state
                     if (clusteringEnabled && clusterGraphState != null) {
                         try {
@@ -746,11 +776,11 @@ class TaskGraph {
                             log.warn "Failed to update cluster graph state on completion", e
                         }
                     }
-                    
+
                     // Resolve the graph completion promise
                     def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
                     graphCompletionPromise.accept(result)
-                    
+
                     log.debug "Graph execution completed with result: $result"
                 }
             }

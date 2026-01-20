@@ -170,6 +170,134 @@ class GraphEventListenerTest {
         assertTrue(startEvent.metrics.containsKey('totalTasks'))
     }
 
+    @Test
+    void testCompleteLifecycleEvents() {
+        // Given: A workflow with lifecycle tracking
+        def events = new ConcurrentLinkedQueue<GraphEvent>()
+        def listener = new TestListener(events)
+
+        def workflow = TaskGraph.build {
+            serviceTask("task1") {
+                action { ctx, prev ->
+                    ctx.promiseFactory.createPromise("result")
+                }
+            }
+        }
+
+        workflow.addListener(listener)
+
+        // When: Workflow executes
+        workflow.start().get()
+
+        // Then: Should receive complete lifecycle
+        def graphStarted = events.find { it.type == GraphEventType.GRAPH_STARTED }
+        assertNotNull(graphStarted, "Should receive GRAPH_STARTED")
+
+        def taskStarted = events.find { it.type == GraphEventType.TASK_STARTED }
+        assertNotNull(taskStarted, "Should receive TASK_STARTED")
+
+        def taskCompleted = events.find { it.type == GraphEventType.TASK_COMPLETED }
+        assertNotNull(taskCompleted, "Should receive TASK_COMPLETED")
+        assertTrue(taskCompleted.isTaskEvent(), "Should be a task event")
+        // Verify enhanced TaskEvent fields exist
+        if (taskCompleted.taskEvent) {
+            assertNotNull(taskCompleted.taskEvent.executionTimeMs, "Should have execution time")
+            assertEquals(1, taskCompleted.taskEvent.attemptNumber, "First attempt should be 1")
+        }
+
+        def graphCompleted = events.find { it.type == GraphEventType.GRAPH_COMPLETED }
+        assertNotNull(graphCompleted, "Should receive GRAPH_COMPLETED")
+        assertTrue(graphCompleted.metrics.containsKey('executionTimeMs'))
+        assertTrue(graphCompleted.metrics.executionTimeMs > 0)
+    }
+
+    @Test
+    void testRetryEvents() {
+        // Given: A workflow with retries
+        def events = new ConcurrentLinkedQueue<GraphEvent>()
+        def listener = new TestListener(events)
+        def attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+
+        def workflow = TaskGraph.build {
+            serviceTask("flaky-task") {
+                retry {
+                    maxAttempts 3
+                    initialDelay java.time.Duration.ofMillis(10)
+                }
+                action { ctx, prev ->
+                    int attempt = attemptCount.incrementAndGet()
+                    if (attempt < 2) {
+                        throw new RuntimeException("Simulated failure")
+                    }
+                    ctx.promiseFactory.createPromise("success")
+                }
+            }
+        }
+
+        workflow.addListener(listener)
+
+        // When: Workflow executes with retries
+        workflow.start().get()
+
+        // Then: Should receive retry events
+        def retryingEvents = events.findAll { it.type == GraphEventType.TASK_RETRYING }
+        assertTrue(retryingEvents.size() > 0, "Should receive TASK_RETRYING events")
+
+        def retryEvent = retryingEvents[0]
+        assertTrue(retryEvent.isTaskEvent(), "Retry event should be a task event")
+        if (retryEvent.taskEvent) {
+            assertTrue(retryEvent.taskEvent.metadata.containsKey('isRetrying'))
+            assertTrue(retryEvent.taskEvent.metadata.containsKey('retryDelayMs'))
+        }
+
+        // Final completion should show retry count
+        def completedEvent = events.find { it.type == GraphEventType.TASK_COMPLETED }
+        assertNotNull(completedEvent)
+        assertTrue(completedEvent.isTaskEvent())
+        if (completedEvent.taskEvent) {
+            assertTrue(completedEvent.taskEvent.attemptNumber >= 2, "Should show multiple attempts")
+        }
+    }
+
+    @Test
+    void testFailureEvents() {
+        // Given: A workflow that will fail
+        def events = new ConcurrentLinkedQueue<GraphEvent>()
+        def listener = new TestListener(events)
+
+        def workflow = TaskGraph.build {
+            serviceTask("failing-task") {
+                action { ctx, prev ->
+                    throw new RuntimeException("Intentional failure")
+                }
+            }
+        }
+
+        workflow.addListener(listener)
+
+        // When: Workflow executes and fails
+        try {
+            workflow.start().get()
+            fail("Should have thrown exception")
+        } catch (Exception e) {
+            // Expected
+        }
+
+        // Then: Should receive failure events
+        def taskFailed = events.find { it.type == GraphEventType.TASK_FAILED }
+        assertNotNull(taskFailed, "Should receive TASK_FAILED")
+        assertTrue(taskFailed.isTaskEvent())
+        if (taskFailed.taskEvent) {
+            assertNotNull(taskFailed.taskEvent.error)
+            assertNotNull(taskFailed.taskEvent.executionTimeMs)
+        }
+
+        def graphFailed = events.find { it.type == GraphEventType.GRAPH_FAILED }
+        assertNotNull(graphFailed, "Should receive GRAPH_FAILED")
+        assertTrue(graphFailed.metrics.containsKey('failedTaskId'))
+        assertTrue(graphFailed.metrics.containsKey('executionTimeMs'))
+    }
+
     // Test listener implementation
     static class TestListener implements GraphEventListener {
         private final ConcurrentLinkedQueue<GraphEvent> events

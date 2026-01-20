@@ -58,7 +58,16 @@ class TaskGraph {
     
     /** Unique run ID (generated per execution) */
     private String runId
-    
+
+    /** Graph ID for observability */
+    String id
+
+    /** Graph start time */
+    private java.time.Instant startTime
+
+    /** Event listeners (thread-safe for concurrent registration) */
+    private final java.util.concurrent.CopyOnWriteArrayList<GraphEventListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>()
+
     /** Clustering support (optional) */
     private boolean clusteringEnabled = false
     private IMap<String, GraphExecutionState> clusterGraphState
@@ -161,11 +170,109 @@ class TaskGraph {
         routers << router
     }
 
-    // Add this method:
+    /**
+     * Notify task state change to all listeners.
+     * Called by DefaultTaskEventDispatcher.
+     */
     void notifyEvent(TaskEvent event) {
-        // Event notification for task state changes
         log.debug "Task event: ${event.taskId} -> ${event.taskState}"
-        // You can add event listeners here later if needed
+
+        // Convert TaskEvent to GraphEvent and broadcast
+        GraphEventType eventType = mapTaskStateToEventType(event.taskState)
+        if (eventType) {
+            def graphEvent = new GraphEvent(eventType, this.id, this.runId, event)
+            notifyListeners(graphEvent)
+        }
+    }
+
+    /**
+     * Map TaskState to GraphEventType.
+     */
+    private GraphEventType mapTaskStateToEventType(TaskState taskState) {
+        switch (taskState) {
+            case TaskState.SCHEDULED:
+                return GraphEventType.TASK_SCHEDULED
+            case TaskState.RUNNING:
+                return GraphEventType.TASK_STARTED
+            case TaskState.COMPLETED:
+                return GraphEventType.TASK_COMPLETED
+            case TaskState.FAILED:
+                return GraphEventType.TASK_FAILED
+            case TaskState.SKIPPED:
+                return GraphEventType.TASK_SKIPPED
+            default:
+                return null
+        }
+    }
+
+    /**
+     * Broadcast event to all registered listeners.
+     * Listener errors are caught and logged but don't interrupt execution.
+     */
+    private void notifyListeners(GraphEvent event) {
+        listeners.each { listener ->
+            try {
+                if (listener.accepts(event)) {
+                    listener.onEvent(event)
+                }
+            } catch (Exception e) {
+                log.error("Listener ${listener.getName()} failed on event ${event.type}", e)
+            }
+        }
+    }
+
+    /**
+     * Register an event listener.
+     * Thread-safe - can be called during graph execution.
+     *
+     * @param listener the listener to register
+     */
+    void addListener(GraphEventListener listener) {
+        if (listener) {
+            listeners.add(listener)
+            log.debug "Registered listener: ${listener.getName()}"
+        }
+    }
+
+    /**
+     * Remove an event listener.
+     *
+     * @param listener the listener to remove
+     * @return true if the listener was removed
+     */
+    boolean removeListener(GraphEventListener listener) {
+        boolean removed = listeners.remove(listener)
+        if (removed) {
+            log.debug "Removed listener: ${listener.getName()}"
+        }
+        return removed
+    }
+
+    /**
+     * Remove all event listeners.
+     */
+    void clearListeners() {
+        int count = listeners.size()
+        listeners.clear()
+        log.debug "Cleared ${count} listeners"
+    }
+
+    /**
+     * Get count of registered listeners.
+     */
+    int getListenerCount() {
+        return listeners.size()
+    }
+
+    /**
+     * Emit a graph-level event.
+     * Used internally to notify graph state changes.
+     */
+    private void emitGraphEvent(GraphEventType type, Map<String, Object> metrics = [:]) {
+        def event = GraphEvent.builder(type, this.id, this.runId)
+            .metrics(metrics)
+            .build()
+        notifyListeners(event)
     }
 
     /**
@@ -303,7 +410,18 @@ class TaskGraph {
 
         // Generate unique run ID
         runId = UUID.randomUUID().toString()
-        
+
+        // Set graph ID if not already set
+        if (!this.id) {
+            this.id = "graph-${runId.substring(0, 8)}"
+        }
+
+        // Record start time
+        this.startTime = java.time.Instant.now()
+
+        // Emit GRAPH_STARTED event
+        emitGraphEvent(GraphEventType.GRAPH_STARTED, [totalTasks: tasks.size()])
+
         // Initialize clustering if enabled
         initializeClusteredExecution()
         

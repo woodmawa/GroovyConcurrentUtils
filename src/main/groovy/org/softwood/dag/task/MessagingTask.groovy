@@ -34,11 +34,42 @@ import java.util.Arrays
  * }
  * </pre>
  * 
- * <h3>Receive Mode (Consumer):</h3>
+ * <h3>Receive Mode (Consumer) with Resilience Features:</h3>
  * <pre>
  * messagingTask("consume-orders") {
- *     consumer new InMemoryConsumer()
+ *     consumer new KafkaConsumer()
  *     subscribe "orders", "notifications"
+ *     
+ *     // Message filtering (NEW!)
+ *     filter { msg -> 
+ *         msg.payload.status == "pending" && msg.payload.amount > 100
+ *     }
+ *     
+ *     // Authentication (NEW!)
+ *     authenticate { msg ->
+ *         verifySignature(msg.headers["X-Signature"], msg.payload)
+ *     }
+ *     
+ *     // Idempotency (inherited from TaskBase)
+ *     idempotent {
+ *         ttl Duration.ofMinutes(30)
+ *         keyFrom { msg -> msg.payload.orderId }
+ *     }
+ *     
+ *     // Dead Letter Queue (inherited from TaskBase)
+ *     deadLetterQueue {
+ *         maxSize 1000
+ *         autoRetry true
+ *         maxRetries 3
+ *     }
+ *     
+ *     // Rate limiting (inherited from TaskBase)
+ *     rateLimit {
+ *         name "order-processor"
+ *         maxRate 100
+ *         period Duration.ofSeconds(1)
+ *     }
+ *     
  *     timeout Duration.ofSeconds(30)
  *     maxMessages 10
  *     
@@ -65,6 +96,10 @@ class MessagingTask extends TaskBase<Object> {
     private List<String> subscriptions = []
     private Duration pollTimeout = Duration.ofSeconds(5)
     private int maxMessages = 1
+    
+    // NEW: Filtering and authentication
+    private Closure messageFilter
+    private Closure messageAuthenticator
     
     MessagingTask(String id, String name, ctx) {
         super(id, name, ctx)
@@ -124,6 +159,41 @@ class MessagingTask extends TaskBase<Object> {
     void onMessage(Closure handler) {
         this.messageHandler = handler
         this.mode = MessagingMode.RECEIVE
+    }
+    
+    /**
+     * Configure message filtering.
+     * Messages that don't pass the filter are skipped.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * filter { msg ->
+     *     msg.payload.amount > 100 && msg.payload.status == "pending"
+     * }
+     * </pre>
+     * 
+     * @param predicate filter closure that returns boolean
+     */
+    void filter(Closure predicate) {
+        this.messageFilter = predicate
+    }
+    
+    /**
+     * Configure message authentication.
+     * Messages that fail authentication are rejected and optionally sent to DLQ.
+     * 
+     * <h3>Example:</h3>
+     * <pre>
+     * authenticate { msg ->
+     *     def signature = msg.headers["X-Message-Signature"]
+     *     return verifyHmac(msg.payload, signature, secretKey)
+     * }
+     * </pre>
+     * 
+     * @param validator authentication closure that returns boolean
+     */
+    void authenticate(Closure validator) {
+        this.messageAuthenticator = validator
     }
     
     // =========================================================================
@@ -188,6 +258,18 @@ class MessagingTask extends TaskBase<Object> {
             def results = []
             for (msg in messages) {
                 try {
+                    // Apply authentication if configured
+                    if (messageAuthenticator && !authenticateMessage(msg)) {
+                        log.warn("MessagingTask '{}': message authentication failed, skipping", id)
+                        continue
+                    }
+                    
+                    // Apply filter if configured
+                    if (messageFilter && !filterMessage(msg)) {
+                        log.debug("MessagingTask '{}': message filtered out, skipping", id)
+                        continue
+                    }
+                    
                     def result = messageHandler 
                         ? messageHandler.call(ctx, msg)
                         : msg.payload
@@ -197,11 +279,42 @@ class MessagingTask extends TaskBase<Object> {
                     
                 } catch (Exception e) {
                     log.error("MessagingTask '{}': error processing message", id, e)
+                    // Error will be caught by TaskBase and handled via DLQ if configured
                     throw e
                 }
             }
             
             return maxMessages == 1 && results.size() == 1 ? results[0] : results
+        }
+    }
+    
+    /**
+     * Authenticate a message using the configured authenticator.
+     * 
+     * @param msg message to authenticate
+     * @return true if authentication passed, false otherwise
+     */
+    private boolean authenticateMessage(IMessageConsumer.Message msg) {
+        try {
+            return messageAuthenticator.call(msg) as boolean
+        } catch (Exception e) {
+            log.error("MessagingTask '{}': authentication error", id, e)
+            return false
+        }
+    }
+    
+    /**
+     * Filter a message using the configured filter.
+     * 
+     * @param msg message to filter
+     * @return true if message passes filter, false otherwise
+     */
+    private boolean filterMessage(IMessageConsumer.Message msg) {
+        try {
+            return messageFilter.call(msg) as boolean
+        } catch (Exception e) {
+            log.error("MessagingTask '{}': filter error", id, e)
+            return false
         }
     }
     

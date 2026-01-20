@@ -64,24 +64,39 @@ import org.softwood.promise.Promise
  * }
  * </pre>
  *
- * <h3>DSL Example - Template Reference:</h3>
+ * <h3>DSL Example - Library Pattern (Recommended):</h3>
  * <pre>
- * // Define template once
- * def emailNotificationTemplate = TaskGraph.build {
- *     serviceTask("send-email") {
- *         action { ctx, prev ->
- *             def params = prev
- *             ctx.promiseFactory.executeAsync {
- *                 [emailSent: true, recipient: params.to]
+ * // Define reusable library (once)
+ * class WorkflowLibrary {
+ *     static TaskGraph validateData() {
+ *         TaskGraph.build {
+ *             serviceTask("check-format") {
+ *                 action { ctx, prev -> validateFormat(prev) }
  *             }
+ *             serviceTask("check-business-rules") {
+ *                 action { ctx, prev -> validateRules(prev) }
+ *             }
+ *             chainVia("check-format", "check-business-rules")
  *         }
  *     }
  * }
- * 
- * // Reuse template multiple times
- * task("notify-user", TaskType.SUBGRAPH) {
- *     template emailNotificationTemplate
- *     inputMapper { prev -> [to: prev.userEmail, subject: "Order Confirmed"] }
+ *
+ * // Reuse in multiple workflows with clean syntax
+ * subGraphTask("validate") {
+ *     graph WorkflowLibrary.validateData()
+ *     inputMapper { prev -> [data: prev.rawInput] }
+ *     outputExtractor { result -> result.validatedData }
+ * }
+ * </pre>
+ *
+ * <h3>DSL Example - Legacy Template Reference:</h3>
+ * <pre>
+ * // Also works with template() method
+ * def emailTemplate = TaskGraph.build { ... }
+ *
+ * task("notify", TaskType.SUBGRAPH) {
+ *     template emailTemplate
+ *     inputMapper { prev -> [to: prev.email] }
  * }
  * </pre>
  *
@@ -132,7 +147,20 @@ class SubGraphTask extends TaskBase<Object> {
     void template(TaskGraph graph) {
         this.subWorkflow = graph
     }
-    
+
+    /**
+     * Set a pre-built graph (cleaner syntax for library usage).
+     * This is an alias for template() with a more intuitive name.
+     *
+     * Usage:
+     *   subGraphTask("validate") {
+     *       graph ValidationLibrary.validateAndEnrich()
+     *   }
+     */
+    void graph(TaskGraph graph) {
+        this.subWorkflow = graph
+    }
+
     /**
      * Build sub-workflow inline using DSL.
      */

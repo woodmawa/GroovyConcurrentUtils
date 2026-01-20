@@ -134,7 +134,147 @@ class TaskGraph {
     Promise<?> run() {
         return start()
     }
-    
+
+    // --------------------------------------------------------------------
+    // Health & Observability API
+    // --------------------------------------------------------------------
+
+    /**
+     * Get current health status of the graph.
+     *
+     * Provides high-level overview of execution state, task counts,
+     * and resource usage. Lightweight - safe to call frequently.
+     *
+     * @return health status snapshot
+     */
+    HealthStatus getHealth() {
+        def currentState = determineGraphState()
+
+        // Count tasks by state
+        int completed = tasks.values().count { it.isCompleted() }
+        int failed = tasks.values().count { it.isFailed() }
+        int running = tasks.values().count { it.state == org.softwood.dag.task.TaskState.RUNNING }
+        int scheduled = tasks.values().count { it.state == org.softwood.dag.task.TaskState.SCHEDULED }
+        int skipped = tasks.values().count { it.isSkipped() }
+
+        // Calculate duration
+        Long duration = startTime ?
+            java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : null
+
+        // Build health status
+        def health = new HealthStatus(
+            graphId: this.id,
+            runId: this.runId,
+            state: currentState,
+            startTime: this.startTime,
+            durationMs: duration,
+            totalTasks: tasks.size(),
+            completedTasks: completed,
+            failedTasks: failed,
+            runningTasks: running,
+            scheduledTasks: scheduled,
+            skippedTasks: skipped,
+            resourceUsage: getResourceSnapshot()
+        )
+
+        return health
+    }
+
+    /**
+     * Get detailed execution snapshot.
+     *
+     * Provides complete view of all tasks and their states.
+     * More expensive than getHealth() - use for debugging/troubleshooting.
+     *
+     * @return execution snapshot
+     */
+    ExecutionSnapshot getSnapshot() {
+        def health = getHealth()
+
+        // Build task snapshots
+        def taskSnaps = tasks.collectEntries { id, task ->
+            [id, new TaskSnapshot(
+                id: task.id,
+                name: task.name,
+                state: task.state,
+                errorMessage: task.error?.message,
+                predecessors: task.predecessors,
+                successors: task.successors,
+                metadata: [:]  // Could be extended with task-specific metadata
+            )]
+        }
+
+        // Build dependency map
+        def dependencies = tasks.collectEntries { id, task ->
+            [id, task.predecessors]
+        }
+
+        // Build metrics
+        def metrics = [
+            totalTasks: tasks.size(),
+            hasStarted: hasStarted,
+            completionPercentage: health.getCompletionPercentage()
+        ]
+
+        return new ExecutionSnapshot(
+            health: health,
+            taskSnapshots: taskSnaps,
+            taskDependencies: dependencies,
+            metrics: metrics
+        )
+    }
+
+    /**
+     * Determine current graph state.
+     */
+    private GraphState determineGraphState() {
+        if (!hasStarted) return GraphState.NOT_STARTED
+
+        // Check if any task failed
+        if (tasks.values().any { it.isFailed() }) {
+            return GraphState.FAILED
+        }
+
+        // Check if all tasks completed
+        if (tasks.values().every { it.isCompleted() || it.isSkipped() }) {
+            return GraphState.COMPLETED
+        }
+
+        // Otherwise, still running
+        return GraphState.RUNNING
+    }
+
+    /**
+     * Get resource usage snapshot if monitoring is enabled.
+     */
+    private ResourceSnapshot getResourceSnapshot() {
+        if (!resourceMonitor) return null
+
+        // Get current memory usage
+        Runtime runtime = Runtime.getRuntime()
+        long usedMemoryMB = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+        long totalMemoryMB = runtime.totalMemory() / (1024 * 1024)
+        long freeMemoryMB = runtime.freeMemory() / (1024 * 1024)
+
+        // Get policy limits
+        int maxConcurrent = resourceLimitPolicy?.maxConcurrentTasks ?: 0
+        long maxMemory = resourceLimitPolicy?.maxMemoryMB ?: 0
+
+        // Count running/queued tasks
+        int running = tasks.values().count { it.state == org.softwood.dag.task.TaskState.RUNNING }
+        int queued = tasks.values().count { it.state == org.softwood.dag.task.TaskState.SCHEDULED }
+
+        return new ResourceSnapshot(
+            runningTasks: running,
+            queuedTasks: queued,
+            maxConcurrentTasks: maxConcurrent,
+            usedMemoryMB: usedMemoryMB,
+            maxMemoryMB: maxMemory,
+            totalMemoryMB: totalMemoryMB,
+            freeMemoryMB: freeMemoryMB
+        )
+    }
+
     /**
      * Wait for persistence to complete (if persistence is enabled).
      * This method blocks until the graph's persistence manager has finished writing all data.

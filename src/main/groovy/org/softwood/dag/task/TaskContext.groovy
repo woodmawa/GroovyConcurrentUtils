@@ -34,6 +34,9 @@ class TaskContext {
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
 
+    // Reference to the owning TaskGraph (set by TaskGraph when execution starts)
+    def graph = null
+
     //default empty constructor  - wont have a graph set, create a real ConcurrentPool
     TaskContext() {
         this.promiseFactory = new DataflowPromiseFactory()
@@ -164,4 +167,4 @@ class TaskContext {
         }
         return idempotencyCache
     }
-}
+}

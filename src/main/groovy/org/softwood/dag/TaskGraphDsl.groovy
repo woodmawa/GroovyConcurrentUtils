@@ -35,6 +35,27 @@ class TaskGraphDsl {
     }
 
     // ============================================================================
+    // Graph Properties - Exposed for DSL convenience
+    // ============================================================================
+    
+    /**
+     * Set the graph ID for observability and tracking.
+     * 
+     * Usage:
+     *   TaskGraph.build {
+     *       id = "my-workflow-123"
+     *       // ... tasks ...
+     *   }
+     */
+    void setId(String id) {
+        graph.id = id
+    }
+    
+    String getId() {
+        return graph.id
+    }
+
+    // ============================================================================
     // ENHANCED: Task Creation with TaskFactory
     // ============================================================================
 

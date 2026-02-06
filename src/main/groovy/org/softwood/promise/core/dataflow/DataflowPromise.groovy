@@ -450,24 +450,8 @@ class DataflowPromise<T> implements Promise<T> {
 
         this.onError { Throwable e -> next.fail(e) }
 
-        if (this.isCompleted()) {
-            try {
-                next.accept(fn.apply(variable.get()))
-            } catch (Throwable t) {
-                next.fail(t)
-            }
-        } else if (this.isCancelled()) {
-            next.cancel(false)
-        } else if (this.isDone()) {
-            Throwable err = variable.getError()
-            if (err != null) {
-                next.fail(err)
-            } else {
-                // State corruption: promise is done but has no error and isn't completed/cancelled
-                log.error("CRITICAL: Promise ${this} is done but has no error. State: ${state.get()}, variable.isBound(): ${variable.isBound()}, variable.hasError(): ${variable.hasError()}")
-                next.fail(new IllegalStateException("Promise state corruption: done but no error and not completed/cancelled"))
-            }
-        }
+        // Removed redundant state checks - callbacks handle all cases
+        // DataflowVariable.whenBound() fires immediately if already bound
 
         return next
     }
@@ -495,27 +479,8 @@ class DataflowPromise<T> implements Promise<T> {
             }
         }
 
-        // CRITICAL: Handle already-completed promises synchronously
-        if (this.isCompleted()) {
-            try {
-                next.accept((R)variable.get())
-            } catch (Throwable t) {
-                next.fail(t)
-            }
-        } else if (this.isCancelled()) {
-            next.cancel(false)
-        } else if (this.isDone()) {
-            // Already failed - apply recovery function synchronously
-            try {
-                next.accept(fn.apply(variable.getError()))
-            } catch (java.lang.reflect.UndeclaredThrowableException ute) {
-                // Unwrap UndeclaredThrowableException
-                Throwable cause = ute.cause ?: ute
-                next.fail(cause)
-            } catch (Throwable t) {
-                next.fail(t)
-            }
-        }
+        // Removed redundant state checks - callbacks handle all cases
+        // DataflowVariable.whenBound() fires immediately if already bound
 
         return next
     }

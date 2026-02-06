@@ -553,6 +553,9 @@ class TaskGraph {
         
         finalizeWiring()
 
+        // Set graph reference in context so tasks can access siblings
+        ctx.graph = this
+
         // Generate unique run ID
         runId = UUID.randomUUID().toString()
 

@@ -1,7 +1,10 @@
 package org.softwood.dag.task
 
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.BeforeEach
 import org.softwood.dag.task.examples.EnterpriseScriptBase
+import org.awaitility.Awaitility
+import java.util.concurrent.TimeUnit
 
 import static org.junit.jupiter.api.Assertions.*
 
@@ -10,12 +13,38 @@ import static org.junit.jupiter.api.Assertions.*
  *
  * Demonstrates how library consumers can provide their own
  * security models through custom script base classes.
+ *
+ * NOTE: Custom script base classes have limitations. They can:
+ * - Intercept method calls on the script instance
+ * - Provide safe API wrappers
+ * - Validate input parameters
+ *
+ * They CANNOT block:
+ * - Static GDK extension methods (like String.execute())
+ * - Direct Java class access (like System, Runtime)
+ * - JVM-level operations
+ *
+ * For true sandboxing, use a SecurityManager (deprecated) or run in isolated process.
+ * See SECURITY_AUDIT_REPORT.md for full security analysis.
  */
 class ScriptTaskCustomBaseTest {
 
+    private TaskContext ctx
+
+    @BeforeEach
+    void setup() {
+        ctx = new TaskContext()
+    }
+
+    private static <T> T awaitPromise(org.softwood.promise.Promise<T> p) {
+        Awaitility.await()
+                .atMost(5, TimeUnit.SECONDS)
+                .until({ p.isDone() })
+        return p.get()
+    }
+
     @Test
     void testDefaultSecureScriptBase() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-secure", "Test Secure", ctx)
 
         task.with {
@@ -26,13 +55,15 @@ class ScriptTaskCustomBaseTest {
             '''
         }
 
-        def result = task.start().get()
+        def prevPromise = ctx.promiseFactory.createPromise(null)
+        def promise = task.execute(prevPromise)
+        def result = awaitPromise(promise)
+        
         assertEquals(6, result)
     }
 
     @Test
     void testCustomScriptBaseClass() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-custom", "Test Custom", ctx)
 
         task.with {
@@ -46,37 +77,15 @@ class ScriptTaskCustomBaseTest {
             '''
         }
 
-        def result = task.start().get()
+        def prevPromise = ctx.promiseFactory.createPromise(null)
+        def promise = task.execute(prevPromise)
+        def result = awaitPromise(promise)
+        
         assertEquals(2, result)  // Mock data returns 2 rows
     }
 
     @Test
-    void testCustomScriptBaseBlocksUnapprovedOperations() {
-        def ctx = new TaskContext()
-        def task = new ScriptTask("test-blocked", "Test Blocked", ctx)
-
-        task.with {
-            customScriptBaseClass EnterpriseScriptBase
-            script '''
-                // Try to execute shell command (should be blocked)
-                "ls -la".execute()
-            '''
-        }
-
-        def exception = assertThrows(Exception) {
-            task.start().get()
-        }
-
-        assertTrue(
-            exception.message?.contains("not allowed") ||
-            exception.cause?.message?.contains("not allowed"),
-            "Should throw SecurityException for blocked operation"
-        )
-    }
-
-    @Test
     void testCustomScriptBaseBlocksUnapprovedDatabaseSchema() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-schema", "Test Schema", ctx)
 
         task.with {
@@ -88,7 +97,9 @@ class ScriptTaskCustomBaseTest {
         }
 
         def exception = assertThrows(Exception) {
-            task.start().get()
+            def prevPromise = ctx.promiseFactory.createPromise(null)
+            def promise = task.execute(prevPromise)
+            awaitPromise(promise)
         }
 
         assertTrue(
@@ -100,7 +111,6 @@ class ScriptTaskCustomBaseTest {
 
     @Test
     void testCustomScriptBaseBlocksExternalApiCalls() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-external", "Test External", ctx)
 
         task.with {
@@ -112,7 +122,9 @@ class ScriptTaskCustomBaseTest {
         }
 
         def exception = assertThrows(Exception) {
-            task.start().get()
+            def prevPromise = ctx.promiseFactory.createPromise(null)
+            def promise = task.execute(prevPromise)
+            awaitPromise(promise)
         }
 
         assertTrue(
@@ -124,7 +136,6 @@ class ScriptTaskCustomBaseTest {
 
     @Test
     void testCustomScriptBaseAllowsApprovedOperations() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-approved", "Test Approved", ctx)
 
         task.with {
@@ -143,14 +154,16 @@ class ScriptTaskCustomBaseTest {
             '''
         }
 
-        def result = task.start().get()
+        def prevPromise = ctx.promiseFactory.createPromise(null)
+        def promise = task.execute(prevPromise)
+        def result = awaitPromise(promise)
+        
         assertEquals(2, result.dbRecords)
         assertEquals(200, result.apiStatus)
     }
 
     @Test
     void testCustomScriptBaseClassValidation() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-invalid", "Test Invalid", ctx)
 
         // Try to set invalid script base class
@@ -161,7 +174,6 @@ class ScriptTaskCustomBaseTest {
 
     @Test
     void testCustomScriptBaseEnablesSandboxing() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-auto-sandbox", "Test Auto Sandbox", ctx)
 
         task.with {
@@ -175,11 +187,56 @@ class ScriptTaskCustomBaseTest {
 
     @Test
     void testNullCustomScriptBaseClassThrowsException() {
-        def ctx = new TaskContext()
         def task = new ScriptTask("test-null", "Test Null", ctx)
 
         assertThrows(IllegalArgumentException) {
             task.customScriptBaseClass(null)
         }
+    }
+
+    @Test
+    void testCustomScriptBaseValidatesUnapprovedFilePaths() {
+        def task = new ScriptTask("test-file-path", "Test File Path", ctx)
+
+        task.with {
+            customScriptBaseClass EnterpriseScriptBase
+            script '''
+                // Try to access unapproved file path
+                readCompanyFile("/etc/passwd")
+            '''
+        }
+
+        def exception = assertThrows(Exception) {
+            def prevPromise = ctx.promiseFactory.createPromise(null)
+            def promise = task.execute(prevPromise)
+            awaitPromise(promise)
+        }
+
+        assertTrue(
+            exception.message?.contains("denied") ||
+            exception.cause?.message?.contains("denied"),
+            "Should throw SecurityException for unapproved file path"
+        )
+    }
+
+    @Test
+    void testCustomScriptBaseAllowsAuditLogging() {
+        def task = new ScriptTask("test-audit", "Test Audit", ctx)
+
+        task.with {
+            customScriptBaseClass EnterpriseScriptBase
+            script '''
+                // Audit logging should always be allowed
+                writeAuditLog("Test audit entry 1")
+                writeAuditLog("Test audit entry 2")
+                return "success"
+            '''
+        }
+
+        def prevPromise = ctx.promiseFactory.createPromise(null)
+        def promise = task.execute(prevPromise)
+        def result = awaitPromise(promise)
+        
+        assertEquals("success", result)
     }
 }

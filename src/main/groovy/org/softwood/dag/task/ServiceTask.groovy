@@ -6,6 +6,11 @@ import org.softwood.promise.Promise
 /**
  * ServiceTask executes a user-defined action closure.
  * The action receives the task context and the previous task's output value.
+ * 
+ * Smart closure calling:
+ * - 0 params: action()
+ * - 1 param:  action(prevValue)     // User wants just the result
+ * - 2 params: action(ctx, prevValue) // User wants context + result
  */
 @Slf4j
 class ServiceTask extends TaskBase<Object> {
@@ -41,8 +46,8 @@ class ServiceTask extends TaskBase<Object> {
             println "ServiceTask.runTask: about to call serviceAction for task $id"
             println "ServiceTask.runTask: prevVal = $prevVal"
 
-            // Call the user's action with context and previous value
-            Promise result = action.call(ctx, prevVal)
+            // Smart closure calling based on parameter count
+            Promise result = callActionClosure(action, ctx, prevVal)
 
             println "ServiceTask.runTask: serviceAction returned: $result"
 
@@ -61,6 +66,41 @@ class ServiceTask extends TaskBase<Object> {
                     throw raceErr
                 }
             }
+        }
+    }
+    
+    /**
+     * Call the action closure with appropriate parameters based on what it expects.
+     * 
+     * This provides user-friendly behavior:
+     * - { -> ... }           gets nothing (static result)
+     * - { result -> ... }    gets previous result only
+     * - { ctx, prev -> ... } gets context and previous result
+     * 
+     * @param action The closure to call
+     * @param ctx The task context
+     * @param prevValue The previous task's result
+     * @return The Promise returned by the closure
+     */
+    private Promise callActionClosure(Closure action, TaskContext ctx, Object prevValue) {
+        int paramCount = action.maximumNumberOfParameters
+        
+        log.debug "Task ${id}: action closure has ${paramCount} parameter(s)"
+        
+        switch (paramCount) {
+            case 0:
+                // No parameters - closure doesn't need context or previous value
+                return action.call()
+                
+            case 1:
+                // One parameter - user wants just the previous result
+                // (More intuitive than getting the context)
+                return action.call(prevValue)
+                
+            case 2:
+            default:
+                // Two or more parameters - provide context and previous result
+                return action.call(ctx, prevValue)
         }
     }
 }

@@ -199,10 +199,10 @@ class GraphEventListenerTest {
         def taskCompleted = events.find { it.type == GraphEventType.TASK_COMPLETED }
         assertNotNull(taskCompleted, "Should receive TASK_COMPLETED")
         assertTrue(taskCompleted.isTaskEvent(), "Should be a task event")
-        // Verify enhanced TaskEvent fields exist
-        if (taskCompleted.taskEvent) {
-            assertNotNull(taskCompleted.taskEvent.executionTimeMs, "Should have execution time")
-            assertEquals(1, taskCompleted.taskEvent.attemptNumber, "First attempt should be 1")
+        // Verify enhanced TaskEvent fields exist - use .@taskEvent to access field directly
+        if (taskCompleted.@taskEvent) {
+            assertNotNull(taskCompleted.@taskEvent.executionTimeMs, "Should have execution time")
+            assertEquals(1, taskCompleted.@taskEvent.attemptNumber, "First attempt should be 1")
         }
 
         def graphCompleted = events.find { it.type == GraphEventType.GRAPH_COMPLETED }
@@ -245,17 +245,19 @@ class GraphEventListenerTest {
 
         def retryEvent = retryingEvents[0]
         assertTrue(retryEvent.isTaskEvent(), "Retry event should be a task event")
-        if (retryEvent.taskEvent) {
-            assertTrue(retryEvent.taskEvent.metadata.containsKey('isRetrying'))
-            assertTrue(retryEvent.taskEvent.metadata.containsKey('retryDelayMs'))
+        // Use .@taskEvent to access field directly
+        if (retryEvent.@taskEvent) {
+            assertTrue(retryEvent.@taskEvent.metadata.containsKey('isRetrying'))
+            assertTrue(retryEvent.@taskEvent.metadata.containsKey('retryDelayMs'))
         }
 
         // Final completion should show retry count
         def completedEvent = events.find { it.type == GraphEventType.TASK_COMPLETED }
         assertNotNull(completedEvent)
         assertTrue(completedEvent.isTaskEvent())
-        if (completedEvent.taskEvent) {
-            assertTrue(completedEvent.taskEvent.attemptNumber >= 2, "Should show multiple attempts")
+        // Use .@taskEvent to access field directly
+        if (completedEvent.@taskEvent) {
+            assertTrue(completedEvent.@taskEvent.attemptNumber >= 2, "Should show multiple attempts")
         }
     }
 
@@ -287,9 +289,10 @@ class GraphEventListenerTest {
         def taskFailed = events.find { it.type == GraphEventType.TASK_FAILED }
         assertNotNull(taskFailed, "Should receive TASK_FAILED")
         assertTrue(taskFailed.isTaskEvent())
-        if (taskFailed.taskEvent) {
-            assertNotNull(taskFailed.taskEvent.error)
-            assertNotNull(taskFailed.taskEvent.executionTimeMs)
+        // Use .@taskEvent to access field directly
+        if (taskFailed.@taskEvent) {
+            assertNotNull(taskFailed.@taskEvent.error)
+            assertNotNull(taskFailed.@taskEvent.executionTimeMs)
         }
 
         def graphFailed = events.find { it.type == GraphEventType.GRAPH_FAILED }

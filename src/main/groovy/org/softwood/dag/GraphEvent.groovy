@@ -81,6 +81,14 @@ class GraphEvent {
     }
 
     /**
+     * Explicit getter for taskEvent to avoid Groovy property convention collision.
+     * Without this, event.taskEvent would call isTaskEvent() due to Groovy's property naming rules.
+     */
+    TaskEvent getTaskEvent() {
+        return taskEvent
+    }
+
+    /**
      * Check if this is a graph-level event.
      */
     boolean isGraphEvent() {

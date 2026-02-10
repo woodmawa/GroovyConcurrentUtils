@@ -651,6 +651,62 @@ abstract class TaskBase<T> implements ITask<T> {
     // Subclasses implement the core promise-returning action
     // This receives the UNWRAPPED value (Optional<?>), not the promise
     // ----------------------------------------------------
+    /**
+     * Execute the core task logic and return a Promise containing the result.
+     *
+     * <p><strong>⚠️ CRITICAL THREADING WARNING:</strong></p>
+     * <p>This method is already executing inside an async context created by
+     * {@link #runAttempt(Promise)}. The calling thread is managed by the
+     * promise factory's executor pool.</p>
+     *
+     * <p><strong>DO NOT</strong> wrap your entire implementation in
+     * {@code ctx.promiseFactory.executeAsync{}} — doing so creates a redundant
+     * nested async layer. Instead, either:</p>
+     *
+     * <p><strong>Pattern A — Return a pending promise from user code:</strong></p>
+     * <pre>{@code
+     * protected Promise<MyResult> runTask(TaskContext ctx, Object prevValue) {
+     *     // The action/work itself uses executeAsync — return that promise directly.
+     *     // This allows executeTaskWithRetry() to apply timeouts via promise.get(timeout).
+     *     return ctx.promiseFactory.executeAsync { doExpensiveWork(prevValue) }
+     * }
+     * }</pre>
+     *
+     * <p><strong>Pattern B — Synchronous work, return resolved promise:</strong></p>
+     * <pre>{@code
+     * protected Promise<MyResult> runTask(TaskContext ctx, Object prevValue) {
+     *     def result = doQuickWork(prevValue)
+     *     return Promises.newPromise(result)
+     * }
+     * }</pre>
+     *
+     * <p><strong>WRONG pattern (double-wrapping — will waste threads):</strong></p>
+     * <pre>{@code
+     * protected Promise<MyResult> runTask(TaskContext ctx, Object prevValue) {
+     *     return ctx.promiseFactory.executeAsync {    // ❌ outer wrapper
+     *         def p = someAction.call(ctx, prevValue) // returns a Promise
+     *         return p.get()                          // ❌ blocks thread waiting for inner
+     *     }
+     * }
+     * }</pre>
+     *
+     * <p><strong>Note on timeouts:</strong> If the task has a timeout configured,
+     * {@code executeTaskWithRetry()} calls {@code promise.get(timeout)} on the
+     * returned promise. For timeouts to work, the returned promise must still be
+     * <em>pending</em> (Pattern A). If you return an already-resolved promise
+     * (Pattern B), timeouts cannot fire because {@code get()} returns immediately.</p>
+     *
+     * <p><strong>Note:</strong> {@link ServiceTask} legitimately uses a single
+     * {@code executeAsync} because it wraps arbitrary user closures that may block
+     * (e.g. {@code Thread.sleep}). This is the correct pattern for task types
+     * that need timeout support for blocking work. The anti-pattern is
+     * <em>double-wrapping</em>: using {@code executeAsync} and then calling
+     * {@code innerPromise.get()} inside it.</p>
+     *
+     * @param ctx       the shared task context
+     * @param prevValue the unwrapped result from predecessor tasks (may be null)
+     * @return a Promise containing the task result
+     */
     protected abstract Promise<T> runTask(TaskContext ctx, Object prevValue)
 
     // ----------------------------------------------------
@@ -665,27 +721,29 @@ abstract class TaskBase<T> implements ITask<T> {
         log.debug "Task ${id}: execute() called with prevPromise present: $previousPromise"
 
         Promise<T> attemptPromise = runAttempt(previousPromise)
-        completionPromise = attemptPromise
 
         log.debug "Task ${id}: execute() got attemptPromise"
 
-        return attemptPromise.then { T result ->
+        // Build the full chained promise with completion/error callbacks.
+        // IMPORTANT: completionPromise must be set to the CHAINED promise (not the raw attemptPromise)
+        // so that successor tasks (which read completionPromise via buildPrevPromise()) only start
+        // after completion callbacks have fired and task state is fully updated.
+        def chainedPromise = attemptPromise.then { T result ->
             log.debug "Task ${id}: completed with result: $result"
             state = TaskState.COMPLETED
             emitEvent(TaskState.COMPLETED)
             result
         }.recover { Throwable err ->
-            // Only handle actual errors - skip if err is null
-            if (err != null) {
-                log.error "Task ${id}: failed with error: ${err.message}"
-                lastError = err
-                state = TaskState.FAILED
-                emitErrorEvent(err)
-                throw err
-            }
-            // If err is null, this is likely the success path - do nothing
-            log.debug "Task ${id}: recover called with null error, ignoring"
+            log.error "Task ${id}: failed with error: ${err.message}"
+            lastError = err
+            state = TaskState.FAILED
+            emitErrorEvent(err)
+            throw err
         }
+
+        completionPromise = chainedPromise
+
+        return chainedPromise
     }
 
     // ----------------------------------------------------
@@ -906,14 +964,32 @@ abstract class TaskBase<T> implements ITask<T> {
                             )
                         }
                     } else {
+                        // No explicit timeout configured — use a safety timeout to detect
+                        // potential nested-promise deadlocks (see runTask() javadoc warning).
+                        // 5 minutes is generous; most tasks should complete well within this.
+                        long safetyTimeoutMs = 300_000L
                         try {
-                            result = promise.get()
+                            result = promise.get(safetyTimeoutMs, TimeUnit.MILLISECONDS)
+                        } catch (TimeoutException safetyTimeout) {
+                            // Distinguish: did the SAFETY net time out, or did the task's own
+                            // timeout mechanism fail the promise with a TimeoutException?
+                            // If the promise is done (failed), it's the task's own error — re-throw it.
+                            if (promise.isDone()) {
+                                throw safetyTimeout  // Task's own TimeoutException, propagate as-is
+                            }
+                            // Otherwise this is genuinely the safety net firing — likely a deadlock
+                            throw new RuntimeException(
+                                "Task '${id}' timed out after ${(long)(safetyTimeoutMs/1000)}s waiting for runTask() promise. " +
+                                "This is often caused by using ctx.promiseFactory.executeAsync{} inside runTask(), " +
+                                "which creates a nested-promise deadlock. See TaskBase.runTask() javadoc for the correct pattern.",
+                                safetyTimeout
+                            )
                         } catch (java.lang.IllegalStateException raceErr) {
                             // DataflowPromise race condition: error state detected but error value not yet set
                             // Wait a moment and try again to get the actual error
                             if (raceErr.message?.contains("Error state detected but error value is null")) {
                                 Thread.sleep(10)  // Brief delay to let error propagate
-                                result = promise.get()
+                                result = promise.get(safetyTimeoutMs, TimeUnit.MILLISECONDS)
                             } else {
                                 throw raceErr
                             }

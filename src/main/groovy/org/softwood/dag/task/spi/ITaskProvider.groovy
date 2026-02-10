@@ -23,6 +23,11 @@ interface ITaskProvider {
      */
     ITask createTask(String id, String name, TaskContext ctx)
     
+    /** Create task for a specific type string. Override for multi-type providers. */
+    default ITask createTask(String typeString, String id, String name, TaskContext ctx) {
+        return createTask(id, name, ctx)
+    }
+    
     /**
      * Check if this provider supports the given type string.
      */

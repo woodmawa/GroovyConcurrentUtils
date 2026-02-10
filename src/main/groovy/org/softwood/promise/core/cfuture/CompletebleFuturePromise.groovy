@@ -8,6 +8,7 @@ import org.softwood.promise.core.PromiseState
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
@@ -128,11 +129,15 @@ class CompletableFuturePromise<T> implements Promise<T> {
     }
 
     @Override
-    T get(long timeout, TimeUnit unit) throws TimeoutException {
+    T get(long timeout, TimeUnit unit) throws TimeoutException, Exception {
         try {
             return future.get(timeout, unit)
         } catch (TimeoutException te) {
             throw te
+        } catch (ExecutionException e) {
+            Throwable c = e.cause ?: e
+            if (c instanceof Exception) throw (Exception)c
+            throw new RuntimeException(c)
         }
     }
 

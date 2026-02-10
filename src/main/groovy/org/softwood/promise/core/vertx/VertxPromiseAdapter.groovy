@@ -372,7 +372,7 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
      * @throws TimeoutException if timeout reached
      */
     @Override
-    T get(long timeout, TimeUnit unit) throws TimeoutException {
+    T get(long timeout, TimeUnit unit) throws TimeoutException, Exception {
         CountDownLatch latch = new CountDownLatch(1)
         AtomicReference<T> result = new AtomicReference<>()
         AtomicReference<Throwable> err = new AtomicReference<>()
@@ -390,7 +390,11 @@ class VertxPromiseAdapter<T> implements SoftPromise<T> {
             throw new TimeoutException("Promise timed out after $timeout $unit")
         }
 
-        if (err.get() != null) throw new RuntimeException(err.get())
+        if (err.get() != null) {
+            Throwable c = err.get()
+            if (c instanceof Exception) throw (Exception)c
+            throw new RuntimeException(c)
+        }
         return result.get()
     }
 

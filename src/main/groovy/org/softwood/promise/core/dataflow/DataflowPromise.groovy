@@ -284,7 +284,7 @@ class DataflowPromise<T> implements Promise<T> {
     }
 
     @Override
-    T get(long timeout, TimeUnit unit) throws TimeoutException {
+    T get(long timeout, TimeUnit unit) throws TimeoutException, Exception {
         CompletableFuture<T> f = variable.toFuture()
         try {
             return f.get(timeout, unit)
@@ -292,7 +292,7 @@ class DataflowPromise<T> implements Promise<T> {
             throw e
         } catch (ExecutionException e) {
             Throwable c = e.cause ?: e
-            if (c instanceof RuntimeException) throw (RuntimeException)c
+            if (c instanceof Exception) throw (Exception)c
             throw new RuntimeException(c)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()

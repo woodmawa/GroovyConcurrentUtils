@@ -592,7 +592,7 @@ class TaskFactory {
         if (provider) {
             log.debug("Creating custom task: type='{}', provider='{}', id='{}', name='{}'", 
                      typeString, provider.class.simpleName, id, name)
-            return provider.createTask(id, name, ctx)
+            return provider.createTask(typeString, id, name, ctx)
         }
         
         // Neither built-in nor custom provider found

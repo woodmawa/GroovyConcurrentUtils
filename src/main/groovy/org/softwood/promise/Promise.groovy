@@ -93,7 +93,7 @@ interface Promise<T> {
     T get() throws Exception
 
     /** Block until this promise completes or timeout expires. */
-    T get(long timeout, TimeUnit unit) throws TimeoutException
+    T get(long timeout, TimeUnit unit) throws TimeoutException, Exception
 
     /** Whether the promise is complete (success or error). */
     boolean isDone()

@@ -7,6 +7,7 @@ import org.softwood.dag.task.TaskFactory
 import org.softwood.dag.task.TaskType
 import org.softwood.dag.task.ServiceTask
 import org.softwood.dag.task.ITask
+import org.softwood.dag.task.spi.TaskProviderRegistry
 
 /**
  * DSL builder for TaskGraph.
@@ -646,5 +647,56 @@ class TaskGraphDsl {
         deferredForks.each { forkDsl ->
             forkDsl.build()
         }
+    }
+
+    // ============================================================================
+    // SPI Extension Point - Auto-discover DSL methods from TaskProviderRegistry
+    // ============================================================================
+
+    /**
+     * Enables SPI-registered task types to be used as DSL methods automatically.
+     * 
+     * <p>When a method like {@code assessorTask("id") { ... }} or 
+     * {@code assessor("id") { ... }} is called and no explicit method exists,
+     * this method strips any "Task" suffix and looks up the type name in
+     * {@link org.softwood.dag.task.spi.TaskProviderRegistry}.</p>
+     * 
+     * <p>If a matching provider is found, the call is delegated to 
+     * {@link #task(String, String, Closure)}. This means any task type 
+     * registered via Java's ServiceLoader SPI automatically gets DSL syntax.</p>
+     *
+     * <h3>Usage (after registering an SPI provider for "assessor"):</h3>
+     * <pre>
+     * TaskGraph.build {
+     *     assessorTask("analyze") {
+     *         requirementsText = "Build a REST API"
+     *         taskComplexity = "SIMPLE"
+     *     }
+     *     // or equivalently:
+     *     assessor("analyze") { ... }
+     * }
+     * </pre>
+     *
+     * @param name method name (e.g. "assessorTask", "assessor", "codeBuilder")
+     * @param args arguments - expects (String id, Closure config)
+     * @return the created ITask
+     * @throws MissingMethodException if no matching SPI provider found
+     */
+    def methodMissing(String name, def args) {
+        // Expect exactly 2 args: (String id, Closure config)
+        if (args == null || args.length != 2 || !(args[0] instanceof String) || !(args[1] instanceof Closure)) {
+            throw new MissingMethodException(name, this.class, args as Object[])
+        }
+
+        // Strip "Task" suffix if present: "assessorTask" → "assessor"
+        String typeName = name.endsWith("Task") ? name[0..-5] : name
+
+        // Check if the SPI registry has a provider for this type
+        if (TaskProviderRegistry.hasProvider(typeName)) {
+            return task(args[0] as String, typeName, args[1] as Closure)
+        }
+
+        // No provider found - throw the standard MissingMethodException
+        throw new MissingMethodException(name, this.class, args as Object[])
     }
 }

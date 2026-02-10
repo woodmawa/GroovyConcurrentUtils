@@ -2,6 +2,7 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.promise.Promises
 
 /**
  * ServiceTask executes a user-defined action closure.
@@ -37,35 +38,41 @@ class ServiceTask extends TaskBase<Object> {
             throw new IllegalStateException("ServiceTask ${id}: no action defined")
         }
 
+        // Wrap the action in executeAsync so that:
+        // 1. The action runs on its own thread (enabling timeouts in executeTaskWithRetry)
+        // 2. Long-running action closures (e.g. with Thread.sleep) don't block runAttempt's thread
+        //
+        // The action closure typically returns a Promise (from executeAsync). We unwrap it
+        // here via result.get() so that the OUTER promise (returned from this method)
+        // represents the final resolved value. This is a single executeAsync — NOT double-wrapping.
         return ctx.promiseFactory.executeAsync {
 
-            // prevOpt already contains the unwrapped VALUE, not a Promise
             Object prevVal = prevValue
 
-            println "ServiceTask.runTask: about to call serviceAction for task $id"
-            println "ServiceTask.runTask: about to call serviceAction for task $id"
-            println "ServiceTask.runTask: prevVal = $prevVal"
+            log.debug "ServiceTask ${id}: calling action closure with prevVal=$prevVal"
 
             // Smart closure calling based on parameter count
-            Promise result = callActionClosure(action, ctx, prevVal)
+            def result = callActionClosure(action, ctx, prevVal)
 
-            println "ServiceTask.runTask: serviceAction returned: $result"
+            log.debug "ServiceTask ${id}: action returned: $result"
 
-            log.debug "Task ${id}: runTask() returned promise, waiting for result"
-
-            // The action should return a Promise, so we wait for it
-            // Handle DataflowPromise race condition where error state is set before error value
-            try {
-                return result.get()
-            } catch (java.lang.IllegalStateException raceErr) {
-                // DataflowPromise race condition: error state detected but error value not yet set
-                if (raceErr.message?.contains("Error state detected but error value is null")) {
-                    Thread.sleep(10)  // Brief delay to let error propagate
-                    return result.get()  // Retry to get actual error
-                } else {
-                    throw raceErr
+            // If the action returned a Promise, unwrap it to get the actual value
+            if (result instanceof Promise) {
+                try {
+                    return ((Promise) result).get()
+                } catch (java.lang.IllegalStateException raceErr) {
+                    // DataflowPromise race condition: error state detected but error value not yet set
+                    if (raceErr.message?.contains("Error state detected but error value is null")) {
+                        Thread.sleep(10)
+                        return ((Promise) result).get()
+                    } else {
+                        throw raceErr
+                    }
                 }
             }
+
+            // Action returned a plain value
+            return result
         }
     }
     

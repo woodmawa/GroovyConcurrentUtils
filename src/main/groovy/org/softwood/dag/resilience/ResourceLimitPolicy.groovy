@@ -81,7 +81,7 @@ class ResourceLimitPolicy {
                 onLimitExceeded.call(resourceType, currentValue, limitValue)
             } catch (Exception e) {
                 // Don't let callback errors break resource limiting
-                println "Error in onLimitExceeded callback: ${e.message}"
+                System.err.println "Error in onLimitExceeded callback: ${e.message}"
             }
         }
     }

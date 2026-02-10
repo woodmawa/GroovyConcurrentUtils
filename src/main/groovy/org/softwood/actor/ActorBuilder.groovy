@@ -213,7 +213,7 @@ class ActorBuilder {
             if (defaultHandler) {
                 return defaultHandler.call(msg, ctx)
             } else {
-                println "[$name] No handler matched for message: ${msg?.class?.simpleName}"
+                System.err.println "[$name] No handler matched for message: ${msg?.class?.simpleName}"
             }
         }
     }

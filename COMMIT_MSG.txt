@@ -1,0 +1,18 @@
+fix: route diagnostic output to stderr for MCP STDIO transport safety
+
+When the library is used inside an MCP server that communicates via
+STDIO (stdin/stdout JSON-RPC), any println output to stdout corrupts
+the protocol stream. This caused intermittent parse errors in the
+mcp-agentic-workflow project during TaskGraph execution.
+
+Changed all remaining println calls to System.err.println in three files:
+
+ActorBuilder.groovy
+  - "No handler matched" warning now goes to stderr
+
+ResourceLimitPolicy.groovy
+  - onLimitExceeded callback error message now goes to stderr
+
+SecureScriptBase.groovy
+  - Script log() and log(level, message) methods now route to stderr
+  - Updated javadoc to document the STDIO transport rationale

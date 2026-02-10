@@ -61,17 +61,17 @@ abstract class SecureScriptBase extends Script {
 
     /**
      * Logger instance for scripts.
-     * Safer than direct System.out/err access.
+     * Routes to stderr to avoid polluting stdout in STDIO-based MCP transports.
      */
     void log(String message) {
-        println "[ScriptTask] ${message}"
+        System.err.println "[ScriptTask] ${message}"
     }
 
     /**
      * Log with level.
      */
     void log(String level, String message) {
-        println "[ScriptTask/${level.toUpperCase()}] ${message}"
+        System.err.println "[ScriptTask/${level.toUpperCase()}] ${message}"
     }
 
     // =========================================================================

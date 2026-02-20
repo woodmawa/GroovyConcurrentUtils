@@ -11,10 +11,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * ConcurrentPool – a thin abstraction over executors with support for:
@@ -108,14 +110,15 @@ class ConcurrentPool implements ExecutorPool {
             errors << "Virtual threads not available: ${e.message}".toString()
         }
 
-        // Shared scheduled executor - uses platform threads for the scheduling mechanism.
-        // Actual scheduled tasks may themselves run on virtual threads if they internally
-        // use a virtual-thread executor.
+        // Shared scheduled executor - uses daemon platform threads so the JVM can exit
+        // cleanly when all user threads finish (e.g. after tests complete).
         try {
             int size = Math.max(1, Runtime.getRuntime().availableProcessors() / 4) as int
-            sharedScheduledExecutor = Executors.newScheduledThreadPool(size)
+            ThreadFactory daemonSchedulerFactory = daemonThreadFactory('gcu-scheduler')
+            sharedScheduledExecutor = Executors.newScheduledThreadPool(size, daemonSchedulerFactory)
         } catch (Exception e) {
-            sharedScheduledExecutor = Executors.newSingleThreadScheduledExecutor()
+            ThreadFactory daemonSchedulerFactory = daemonThreadFactory('gcu-scheduler-fallback')
+            sharedScheduledExecutor = Executors.newSingleThreadScheduledExecutor(daemonSchedulerFactory)
             errors << "Failed to initialize scheduled executor: ${e.message}".toString()
         }
     }
@@ -560,9 +563,30 @@ class ConcurrentPool implements ExecutorPool {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
+    // 
+    // Thread factory helpers
+    // 
+
+    /**
+     * Creates a ThreadFactory that produces named daemon threads.
+     * Daemon threads do not prevent JVM shutdown, which is critical for
+     * test processes and short-lived applications.
+     *
+     * @param namePrefix prefix for thread names, e.g. 'gcu-scheduler'
+     * @return a ThreadFactory producing daemon threads
+     */
+    private static ThreadFactory daemonThreadFactory(String namePrefix) {
+        AtomicInteger counter = new AtomicInteger(0)
+        return { Runnable r ->
+            Thread t = new Thread(r, "${namePrefix}-${counter.incrementAndGet()}")
+            t.daemon = true
+            t
+        } as ThreadFactory
+    }
+
+    // 
     // Shutdown & lifecycle
-    // ─────────────────────────────────────────────────────────────
+    // 
 
     /**
      * Initiates an orderly shutdown of executors owned by this instance.

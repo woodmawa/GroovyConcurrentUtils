@@ -87,8 +87,9 @@ class DataflowExpression<T> {
     /** Asynchronous listeners invoked on the pool (legacy alias). */
     private final List<Closure> asyncWhenBoundListeners = new CopyOnWriteArrayList<Closure>()
 
-    /** Error collection for listener failures (static, application-wide). */
+    /** Error collection for listener failures (static, application-wide). Capped to avoid unbounded growth. */
     private static final ConcurrentLinkedQueue<String> listenerErrors = new ConcurrentLinkedQueue<>()
+    private static final int MAX_LISTENER_ERRORS = 100
 
     /**
      * Create a new expression backed by the given pool.
@@ -96,10 +97,9 @@ class DataflowExpression<T> {
      * @param pool worker pool used for listener execution
      */
     DataflowExpression(ExecutorPool pool) {
+        // Null guard lives in the canonical two-arg constructor below.
+        // Do NOT repeat it here - the this() call already enforces it.
         this(pool, (Class<T>) Object)
-        if (pool == null) {
-            throw new IllegalArgumentException("DataflowExpression requires a non-null ExecutorPool")
-        }
     }
 
     /**
@@ -160,7 +160,10 @@ class DataflowExpression<T> {
      * @param errorMsg the error message to collect
      */
     protected static void collectListenerError(String errorMsg) {
-        listenerErrors.offer(errorMsg)
+        // Cap the queue to avoid unbounded growth in long-running processes
+        if (listenerErrors.size() < MAX_LISTENER_ERRORS) {
+            listenerErrors.offer(errorMsg)
+        }
     }
 
     // --------------------------------------------------------------------------------------------
@@ -452,9 +455,18 @@ class DataflowExpression<T> {
      * Schedule a listener on the backing pool.
      */
     private void scheduleListener(Closure listener, T value, String message) {
-        pool.executor.execute({
-            invokeListener(listener, value, message)
-        } as Runnable)
+        // Use pool.execute() not pool.executor.execute() so pool lifecycle checks
+        // (closed state, admission control, metrics) are respected.
+        try {
+            pool.execute({
+                invokeListener(listener, value, message)
+            } as Runnable)
+        } catch (Exception e) {
+            // Pool may be closed/shutting down - log and record but don't throw
+            String errorMsg = "Failed to schedule ${message} listener (pool unavailable): ${e.message}"
+            log.warn(errorMsg)
+            collectListenerError(errorMsg)
+        }
     }
 
     /**

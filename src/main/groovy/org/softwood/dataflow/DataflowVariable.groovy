@@ -152,13 +152,11 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      *
      * <p>If timeout elapses, a {@link TimeoutException} is thrown.</p>
      */
-    T get(long timeout, TimeUnit unit) {
-        try {
-            return (T) getValue(timeout, unit)
-        } catch (TimeoutException te) {
-            bindError(te)
-            return null
-        }
+    T get(long timeout, TimeUnit unit) throws TimeoutException {
+        // NOTE: TimeoutException is NOT bound as an error on this DFV.
+        // A timeout is caller-local - it must not permanently corrupt the DFV state.
+        // The DFV remains PENDING and can still be bound later by its producer.
+        return (T) getValue(timeout, unit)
     }
 
     /** Duration-based timeout version. */
@@ -205,14 +203,19 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Closure<T> closure) {
-        pool.executor.submit {
-            try {
-                T result = closure.call()
-                this.setValue(result)
-            } catch (Throwable e) {
-                this.bindError(e)
-                log.error("DataflowVariable.task(Closure): execution failed", e)
+        try {
+            pool.execute {
+                try {
+                    T result = closure.call()
+                    this.setValue(result)
+                } catch (Throwable e) {
+                    this.bindError(e)
+                    log.error("DataflowVariable.task(Closure): execution failed", e)
+                }
             }
+        } catch (IllegalStateException e) {
+            this.bindError(e)
+            log.error("DataflowVariable.task(Closure): pool is closed", e)
         }
         return this
     }
@@ -233,14 +236,19 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Callable<T> callable) {
-        pool.executor.submit {
-            try {
-                T result = callable.call()
-                this.setValue(result)
-            } catch (Throwable e) {
-                this.bindError(e)
-                log.error("DataflowVariable.task(Callable): execution failed", e)
+        try {
+            pool.execute {
+                try {
+                    T result = callable.call()
+                    this.setValue(result)
+                } catch (Throwable e) {
+                    this.bindError(e)
+                    log.error("DataflowVariable.task(Callable): execution failed", e)
+                }
             }
+        } catch (IllegalStateException e) {
+            this.bindError(e)
+            log.error("DataflowVariable.task(Callable): pool is closed", e)
         }
         return this
     }
@@ -261,14 +269,19 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Supplier<T> supplier) {
-        pool.executor.submit {
-            try {
-                T result = supplier.get()
-                this.setValue(result)
-            } catch (Throwable e) {
-                this.bindError(e)
-                log.error("DataflowVariable.task(Supplier): execution failed", e)
+        try {
+            pool.execute {
+                try {
+                    T result = supplier.get()
+                    this.setValue(result)
+                } catch (Throwable e) {
+                    this.bindError(e)
+                    log.error("DataflowVariable.task(Supplier): execution failed", e)
+                }
             }
+        } catch (IllegalStateException e) {
+            this.bindError(e)
+            log.error("DataflowVariable.task(Supplier): pool is closed", e)
         }
         return this
     }

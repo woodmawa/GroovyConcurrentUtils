@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
  *   <li>Easy to mock for testing</li>
  *   <li>Supports both sync and async execution patterns</li>
  *   <li>Compatible with standard Java executor semantics</li>
+ *   <li>Timeout-aware execution for safety-critical tasks</li>
  * </ul>
  */
 interface ExecutorPool {
@@ -37,9 +38,22 @@ interface ExecutorPool {
     CompletableFuture execute(Closure task, Object[] args)
     boolean tryExecute(Closure task)
 
-    // --- NEW Java-friendly overloads ---
+    // --- Java-friendly overloads ---
     CompletableFuture execute(Callable task)
-    CompletableFuture execute(Runnable task)   // runnable returning no result
+    CompletableFuture execute(Runnable task)
+
+    // --- Timeout-aware execution ---
+    /**
+     * Executes a task with a timeout. If the task does not complete within the
+     * given time, it is cancelled (with interrupt) and the returned future
+     * completes exceptionally with {@link java.util.concurrent.TimeoutException}.
+     */
+    CompletableFuture executeWithTimeout(Closure task, long timeout, TimeUnit unit)
+
+    /**
+     * Executes a Callable task with a timeout.
+     */
+    CompletableFuture executeWithTimeout(Callable task, long timeout, TimeUnit unit)
 
     // -------------------------------------------------------------------------
     // Scheduled Execution

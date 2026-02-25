@@ -329,7 +329,23 @@ class FakePool implements ExecutorPool {
     }
 
     // -----------------------------------------------
-    // Synchronous schedule methods
+
+    // -----------------------------------------------
+    // Timeout-aware execution (sync mock: just execute)
+    // -----------------------------------------------
+
+    @Override
+    CompletableFuture executeWithTimeout(Closure task, long timeout, TimeUnit unit) {
+        submitted << "timeout-closure"
+        return runSync { task.call() }
+    }
+
+    @Override
+    CompletableFuture executeWithTimeout(Callable task, long timeout, TimeUnit unit) {
+        submitted << "timeout-callable"
+        return runSync { task.call() }
+    }
+
     // -----------------------------------------------
 
     @Override

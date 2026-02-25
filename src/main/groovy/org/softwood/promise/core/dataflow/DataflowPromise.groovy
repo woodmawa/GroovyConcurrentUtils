@@ -2,6 +2,7 @@ package org.softwood.promise.core.dataflow
 
 import groovy.util.logging.Slf4j
 import org.softwood.dataflow.DataflowVariable
+import org.softwood.pool.ConcurrentPool
 import org.softwood.promise.Promise
 import org.softwood.promise.core.PromiseState
 
@@ -226,40 +227,24 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     Promise<T> fail(Throwable error) {
-        log.debug("fail() called with error: ${error.class.simpleName}: ${error.message}, current state: ${state.get()}")
-
         if (error instanceof CancellationException) {
             cancel(false)
             return this
         }
 
-        // Always try to transition to FAILED state
-        boolean transitioned = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-
-        if (transitioned) {
-            // We transitioned from PENDING → FAILED
+        // CAS PENDING -> FAILED. If already in a terminal state, ignore silently -
+        // single-assignment semantics: first writer wins. Never forcibly overwrite COMPLETED.
+        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
             try {
                 variable.bindError(error)
             } catch (IllegalStateException e) {
+                // Variable was already bound (race with another thread) - state is consistent
+                log.debug("fail(): variable already bound during CAS-PENDING->FAILED transition")
             }
         } else {
-            // State was already non-PENDING (COMPLETED, FAILED, or CANCELLED)
-            // Force state to FAILED if not already terminal
             PromiseState currentState = state.get()
-            if (currentState != PromiseState.FAILED && currentState != PromiseState.CANCELLED) {
-                state.set(PromiseState.FAILED)
-            }
-            // Try to bind error anyway (will fail silently if already bound)
-            try {
-                variable.bindError(error)
-            } catch (IllegalStateException e) {
-            }
+            log.debug("fail() called but promise already in terminal state: ${currentState} - ignoring (error was: ${error.class.simpleName})")
         }
-
-        // CRITICAL: Force state synchronization from variable to ensure isDone() works
-        // This handles race conditions where callbacks haven't fired yet
-        deriveStateFromVariable()
-        log.debug("fail() returning, final state: ${state.get()}, variable.isBound(): ${variable.isBound()}, variable.hasError(): ${variable.hasError()}")
 
         return this
     }
@@ -368,42 +353,27 @@ class DataflowPromise<T> implements Promise<T> {
     //internal helper now
     Promise<T> onSuccess(Consumer<T> c) {
         if (c == null) return this
+        // whenAvailable already handles the already-bound case by invoking immediately
+        // and returning early - no explicit re-invocation needed here (would double-fire).
         variable.whenAvailable { v -> c.accept(v) }
-
-        // CRITICAL: If already completed, invoke callback immediately
-        if (this.isCompleted()) {
-            try {
-                c.accept(variable.get())
-            } catch (Throwable t) {
-                log.error("Error in onSuccess callback (immediate invocation)", t)
-            }
-        }
-
         return this
     }
 
     @Override
     Promise<T> onError(Consumer<Throwable> c) {
         if (c == null) return this
+        // whenError already handles the already-failed case by invoking immediately
+        // and returning early - no explicit re-invocation needed here (would double-fire).
         variable.whenError { e -> c.accept(e) }
-
-        // CRITICAL: If already failed, invoke callback immediately
-        if (this.isDone() && !this.isCompleted() && !this.isCancelled()) {
-            try {
-                c.accept(variable.getError())
-            } catch (Throwable t) {
-                log.error("Error in onError callback (immediate invocation)", t)
-            }
-        }
-
         return this
     }
 
     @Override
     Promise<T> onComplete(Consumer<T> callback) {
         if (callback == null) return this
-
-        // Success path only — matches Promise<T>.onComplete contract
+        // Success path only - matches Promise<T>.onComplete contract.
+        // whenAvailable already handles the already-bound case by invoking immediately
+        // and returning early - no explicit re-invocation needed here (would double-fire).
         variable.whenAvailable { T v ->
             try {
                 callback.accept(v)
@@ -411,16 +381,6 @@ class DataflowPromise<T> implements Promise<T> {
                 log.error("Error in onComplete callback", t)
             }
         }
-
-        // CRITICAL: If already completed, invoke callback immediately
-        if (this.isCompleted()) {
-            try {
-                callback.accept(variable.get())
-            } catch (Throwable t) {
-                log.error("Error in onComplete callback (immediate invocation)", t)
-            }
-        }
-
         return this
     }
 
@@ -767,26 +727,20 @@ class DataflowPromise<T> implements Promise<T> {
         DataflowVariable<T> nextVar = new DataflowVariable<>(variable.pool)
         DataflowPromise<T> next = new DataflowPromise<>(nextVar)
 
-        // Schedule timeout
-        def scheduler = variable.executor
-        def timeoutFuture = CompletableFuture.runAsync({
-            try {
-                unit.sleep(timeout)
+        // Use the shared scheduled executor for a one-shot timer - no thread parked.
+        def scheduledFuture = ConcurrentPool.sharedScheduledExecutor.schedule({
+            if (!next.isDone()) {
                 next.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt()
             }
-        }, scheduler)
+        } as Runnable, timeout, unit)
 
-        // Wire up this promise completion
         this.onSuccess { T v ->
-            timeoutFuture.cancel(true)
-            next.accept(v)
+            scheduledFuture.cancel(false)
+            if (!next.isDone()) next.accept(v)
         }
-
         this.onError { Throwable e ->
-            timeoutFuture.cancel(true)
-            next.fail(e)
+            scheduledFuture.cancel(false)
+            if (!next.isDone()) next.fail(e)
         }
 
         return next
@@ -797,26 +751,20 @@ class DataflowPromise<T> implements Promise<T> {
         DataflowVariable<T> nextVar = new DataflowVariable<>(variable.pool)
         DataflowPromise<T> next = new DataflowPromise<>(nextVar)
 
-        // Schedule timeout with fallback
-        def scheduler = variable.executor
-        def timeoutFuture = CompletableFuture.runAsync({
-            try {
-                unit.sleep(timeout)
+        // Use the shared scheduled executor for a one-shot timer - no thread parked.
+        def scheduledFuture = ConcurrentPool.sharedScheduledExecutor.schedule({
+            if (!next.isDone()) {
                 next.accept(fallbackValue)
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt()
             }
-        }, scheduler)
+        } as Runnable, timeout, unit)
 
-        // Wire up this promise completion
         this.onSuccess { T v ->
-            timeoutFuture.cancel(true)
-            next.accept(v)
+            scheduledFuture.cancel(false)
+            if (!next.isDone()) next.accept(v)
         }
-
         this.onError { Throwable e ->
-            timeoutFuture.cancel(true)
-            next.fail(e)
+            scheduledFuture.cancel(false)
+            if (!next.isDone()) next.fail(e)
         }
 
         return next
@@ -824,17 +772,12 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     Promise<T> orTimeout(long timeout, TimeUnit unit) {
-        // Schedule timeout that modifies THIS promise
-        def scheduler = variable.executor
-        CompletableFuture.runAsync({
-            try {
-                unit.sleep(timeout)
+        // One-shot scheduled timer - no thread parked sleeping.
+        ConcurrentPool.sharedScheduledExecutor.schedule({
+            if (!this.isDone()) {
                 this.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt()
             }
-        }, scheduler)
-
+        } as Runnable, timeout, unit)
         return this
     }
 

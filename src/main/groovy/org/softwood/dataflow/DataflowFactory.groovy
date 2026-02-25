@@ -183,21 +183,29 @@ class DataflowFactory {
     <T> DataflowVariable<T> taskWithTimeout(Callable<T> callable, long timeout, TimeUnit unit) {
         DataflowVariable<T> variable = new DataflowVariable<T>(pool)
 
-        def future = pool.executor.submit(callable)
-
-        pool.executor.submit {
-            try {
-                T result = future.get(timeout, unit)
+        // Use pool.executeWithTimeout() which uses the shared ScheduledExecutor for the timer
+        // rather than blocking a second pool thread. Cleaner and avoids thread starvation
+        // on fixed platform thread pools.
+        CompletableFuture cf = pool.executeWithTimeout(callable, timeout, unit)
+        cf.whenComplete { T result, Throwable err ->
+            if (err != null) {
+                Throwable actual = (err instanceof java.util.concurrent.CompletionException && err.cause != null)
+                        ? err.cause : err
+                if (actual instanceof TimeoutException) {
+                    // Explicit timeout - bind as error so callers can inspect result.error
+                    log.warn("DataflowFactory.taskWithTimeout: Task timed out after ${timeout} ${unit}")
+                    variable.bindError(actual)
+                } else if (actual instanceof CancellationException) {
+                    // The underlying task was cancelled by the timeout timer (future.cancel(true))
+                    // before the TimeoutException could win the CF race. Treat as timeout.
+                    log.warn("DataflowFactory.taskWithTimeout: Task cancelled by timeout after ${timeout} ${unit}")
+                    variable.bindError(new TimeoutException("Task timed out after ${timeout} ${unit}"))
+                } else {
+                    variable.bindError(actual)
+                    log.error("DataflowFactory.taskWithTimeout: execution failed", actual)
+                }
+            } else {
                 variable.setValue(result)
-            } catch (TimeoutException e) {
-                future.cancel(true)
-                variable.bindError(new TimeoutException("Task timed out after ${timeout} ${unit}"))
-                log.warn("DataflowFactory.taskWithTimeout: Task timed out after ${timeout} ${unit}")
-            } catch (CancellationException e) {
-                variable.bindCancelled(e)
-            } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("DataflowFactory.taskWithTimeout: execution failed", e)
             }
         }
 
@@ -270,8 +278,14 @@ class DataflowFactory {
      * they're available.
      * </p>
      *
+     * <p><b>Note on errors:</b> Tasks that fail with an error are silently skipped -
+     * their result does not appear in the returned stream. If you need error visibility,
+     * use {@link #taskStream} (which propagates errors via CompletableFuture.allOf)
+     * or register {@code whenError} handlers on individual DFVs.
+     * </p>
+     *
      * @param tasks closures to execute concurrently
-     * @return Gstream of results in completion order
+     * @return Gstream of successful results in completion order; failed tasks are omitted
      */
     <T> Gstream<T> taskStreamUnordered(Closure<T>... tasks) {
         if (tasks == null || tasks.length == 0) {

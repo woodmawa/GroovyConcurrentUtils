@@ -280,7 +280,9 @@ println dfv.get()  // Blocks until task completes
 
 ```groovy
 T get()                              // Block until available
-T get(long timeout, TimeUnit unit)  // Block with timeout
+T get(long timeout, TimeUnit unit)  // Block with timeout - throws TimeoutException if exceeded.
+                                     // NOTE: timeout does NOT permanently mark the DFV as failed;
+                                     // the DFV stays PENDING and can still be bound later.
 T get(Duration duration)             // Block with timeout
 T getNonBlocking()                   // Return immediately (null if pending)
 Optional<T> getIfAvailable()         // Optional wrapper
@@ -564,9 +566,13 @@ try {
 ```
 
 **Behavior:**
-- Task completes → Normal result
-- Task times out → TimeoutException bound, underlying task cancelled
-- Cancellation → CancellationException bound
+- Task completes -> Normal result bound on DFV
+- Task times out -> `TimeoutException` bound on DFV, underlying task cancelled
+- Task cancelled before timeout fires -> treated as timeout, `TimeoutException` bound (v2.1+)
+- Task throws -> error bound on DFV
+
+**Implementation note (v2.1+):** Uses `pool.executeWithTimeout()` backed by the shared
+`ScheduledExecutorService` timer. No second pool thread is parked waiting for completion.
 
 ### 4. Production Observability
 
@@ -1260,18 +1266,36 @@ println "Aggregated: ${aggregatedData}"
 
 ## Version History
 
-### v2.0 (Current) - Production Hardening Release
-- ✅ **Critical:** Fixed race condition in `toFuture()`
-- ✅ **New:** Task execution with auto-binding (`task()` methods)
-- ✅ **New:** Gstream integration (`toGstream()`)
-- ✅ **New:** Timeout support (`taskWithTimeout()`)
-- ✅ **New:** Stream processing (`taskStream()`, `taskStreamUnordered()`)
-- ✅ **New:** Production metrics (`getMetrics()`)
-- ✅ **New:** Error collection (`getListenerErrors()`, `clearListenerErrors()`)
-- ✅ **New:** Cancellation support (`bindCancelled()`)
-- ✅ **Enhancement:** Replaced assertions with exceptions (works with `-da`)
-- ✅ **Quality:** Comprehensive test suite (31 tests, all passing)
-- ✅ **Rating:** 9.6/10 production readiness
+### v2.1 (Current) - Concurrent Correctness Hardening
+-  **Critical fix:** `DataflowVariable.get(timeout, unit)` no longer binds `TimeoutException`
+   as a permanent error on the DFV. A timeout is caller-local; the DFV stays PENDING and can
+   still be bound by its producer. Callers now receive the `TimeoutException` directly.
+-  **Fixed:** All three `task()` overloads (Closure/Callable/Supplier) now call `pool.execute()`
+   instead of `pool.executor.submit()` directly, so pool lifecycle checks are respected.
+   Pool closure is caught and bound as an error on the DFV rather than throwing unchecked.
+-  **Fixed:** `scheduleListener()` in `DataflowExpression` now dispatches via `pool.execute()`
+   so listener scheduling respects pool admission control and closed-state.
+-  **Fixed:** `listenerErrors` static queue capped at 100 entries via `collectListenerError()`.
+-  **Fixed:** Dead null-check removed from the one-arg `DataflowExpression` constructor.
+-  **Fixed:** `DataflowFactory.taskWithTimeout()` now uses `pool.executeWithTimeout()` backed
+   by a shared scheduled executor timer, replacing the previous two-thread blocking approach.
+   `CancellationException`/`TimeoutException` race on CF completion now both resolve to a
+   `TimeoutException` bound on the returned DFV.
+-  **Documented:** `taskStreamUnordered()` clearly states that failed tasks are silently
+   omitted from the returned stream.
+-  **Quality:** All tests green (dataflow suite x2, promises suite clean).
+
+### v2.0 - Production Hardening Release
+-  **Critical:** Fixed race condition in `toFuture()`
+-  **New:** Task execution with auto-binding (`task()` methods)
+-  **New:** Gstream integration (`toGstream()`)
+-  **New:** Timeout support (`taskWithTimeout()`)
+-  **New:** Stream processing (`taskStream()`, `taskStreamUnordered()`)
+-  **New:** Production metrics (`getMetrics()`)
+-  **New:** Error collection (`getListenerErrors()`, `clearListenerErrors()`)
+-  **New:** Cancellation support (`bindCancelled()`)
+-  **Enhancement:** Replaced assertions with exceptions (works with `-da`)
+-  **Quality:** Comprehensive test suite (31 tests, all passing)
 
 ### v1.0 - Initial Release
 - Single-assignment variables

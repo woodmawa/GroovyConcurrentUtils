@@ -22,7 +22,9 @@ import org.softwood.pool.ExecutorPool
 class PromisePoolContext {
 
     private static final ThreadLocal<ExecutorPool> poolHolder = new ThreadLocal<>()
-    private static ExecutorPool defaultPool = new ConcurrentPool("default-promise-pool")
+    // volatile required for correct double-checked locking in getCurrentPool()
+    // and to ensure setDefaultPool() writes are visible across threads immediately.
+    private static volatile ExecutorPool defaultPool = new ConcurrentPool("default-promise-pool")
 
     /**
      * Get the current pool for this thread/context.

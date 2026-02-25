@@ -70,7 +70,23 @@ class SynchronousPoolMock implements ExecutorPool {
     }
 
     // ------------------------------
-    // Scheduled – execute immediately
+    // Timeout-aware execution (synchronous mock: execute immediately)
+    // ------------------------------
+
+    @Override
+    CompletableFuture executeWithTimeout(Closure task, long timeout, TimeUnit unit) {
+        ensureOpen()
+        return completeSync(task.call())
+    }
+
+    @Override
+    CompletableFuture executeWithTimeout(Callable task, long timeout, TimeUnit unit) {
+        ensureOpen()
+        return completeSync(task.call())
+    }
+
+    // ------------------------------
+    // Scheduled  execute immediately
     // ------------------------------
 
     @Override

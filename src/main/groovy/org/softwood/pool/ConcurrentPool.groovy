@@ -4,26 +4,34 @@ import groovy.util.logging.Slf4j
 import groovyjarjarantlr4.v4.runtime.misc.NotNull
 
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.Semaphore
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.function.Consumer
 
 /**
- * ConcurrentPool – a thin abstraction over executors with support for:
+ * ConcurrentPool &mdash; a thin abstraction over executors with support for:
  * <ul>
  *   <li>A shared application-wide virtual-thread executor (when available).</li>
  *   <li>Per-instance platform thread pools (fixed or cached).</li>
  *   <li>Optional scheduled execution using a shared scheduled executor.</li>
+ *   <li>Timeout-aware task execution with proper cancellation propagation.</li>
+ *   <li>Optional admission control to limit in-flight tasks.</li>
  * </ul>
  *
  * <h2>Design goals</h2>
@@ -32,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   <li>Prefer virtual threads when available, falling back to platform threads transparently.</li>
  *   <li>Clearly separate <em>shared</em> executors from <em>owned</em> executors.</li>
  *   <li>Prevent accidental shutdown of shared executors that would impact unrelated code.</li>
+ *   <li>Ensure cancellation of a returned CompletableFuture propagates to the underlying task.</li>
  * </ul>
  *
  * <h2>Ownership semantics</h2>
@@ -51,26 +60,27 @@ import java.util.concurrent.atomic.AtomicInteger
  *   <li>Once {@code #shutdown()} or {@code #shutdownNow()} is called, the pool is
  *       considered <em>closed</em>. Subsequent submissions using the high-level API
  *       throw {@link IllegalStateException}.</li>
- *   <li>Shared executors are designed to live for the lifetime of the JVM and are no
- *       longer shut down by {@code #shutdownSharedExecutors()} – that method is now a
- *       no-op and exists only for backward compatibility.</li>
+ *   <li>Shared executors are designed to live for the lifetime of the JVM. A shutdown hook
+ *       is registered to drain them gracefully on JVM exit.</li>
+ *   <li>Implements {@link AutoCloseable} for use in try-with-resources blocks.</li>
  * </ul>
  */
 @Slf4j
-class ConcurrentPool implements ExecutorPool {
+class ConcurrentPool implements ExecutorPool, AutoCloseable {
 
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Shared application-wide resources
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     private static ExecutorService sharedVirtualThreadExecutor
     private static ScheduledExecutorService sharedScheduledExecutor
     private static AtomicBoolean virtualThreadsAvailable = new AtomicBoolean(false)
+    private static final int MAX_ERRORS = 100
     private static ConcurrentLinkedQueue<String> errors = new ConcurrentLinkedQueue<>()
 
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Instance state
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     private ExecutorService executor
     private ScheduledExecutorService scheduledExecutor
@@ -93,11 +103,40 @@ class ConcurrentPool implements ExecutorPool {
      */
     private AtomicBoolean closed = new AtomicBoolean(false)
 
+    /**
+     * Optional admission control semaphore. When set, limits the number of
+     * concurrently in-flight tasks submitted through the high-level API.
+     * Null means no limit.
+     */
+    private Semaphore admissionSemaphore
+
+    /**
+     * Counter for in-flight tasks (submitted but not yet completed).
+     */
+    private final AtomicInteger inFlightCount = new AtomicInteger(0)
+
+    /**
+     * Counter for tasks that were cancelled due to timeout.
+     */
+    private final AtomicLong timeoutCount = new AtomicLong(0)
+
+    /**
+     * Counter for total tasks submitted through the high-level API.
+     */
+    private final AtomicLong totalSubmitted = new AtomicLong(0)
+
+    /**
+     * Optional handler for uncaught exceptions from tasks. Called when a task
+     * completes exceptionally (in addition to the exception being set on the
+     * CompletableFuture).
+     */
+    private Consumer<Throwable> uncaughtExceptionHandler
+
     String name
 
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Static initialization
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     static {
         // Initialize shared virtual thread executor if available
@@ -107,7 +146,7 @@ class ConcurrentPool implements ExecutorPool {
         } catch (Exception e) {
             // Virtual threads not available (Java < 21), will fall back per instance
             virtualThreadsAvailable.set(false)
-            errors << "Virtual threads not available: ${e.message}".toString()
+            recordError("Virtual threads not available: ${e.message}")
         }
 
         // Shared scheduled executor - uses daemon platform threads so the JVM can exit
@@ -119,13 +158,32 @@ class ConcurrentPool implements ExecutorPool {
         } catch (Exception e) {
             ThreadFactory daemonSchedulerFactory = daemonThreadFactory('gcu-scheduler-fallback')
             sharedScheduledExecutor = Executors.newSingleThreadScheduledExecutor(daemonSchedulerFactory)
-            errors << "Failed to initialize scheduled executor: ${e.message}".toString()
+            recordError("Failed to initialize scheduled executor: ${e.message}")
         }
+
+        // Register JVM shutdown hook for graceful drain of shared executors
+        Runtime.getRuntime().addShutdownHook(new Thread('gcu-shutdown-hook') {
+            @Override
+            void run() {
+                try {
+                    if (sharedScheduledExecutor != null && !sharedScheduledExecutor.isShutdown()) {
+                        sharedScheduledExecutor.shutdown()
+                        sharedScheduledExecutor.awaitTermination(5, TimeUnit.SECONDS)
+                    }
+                    if (sharedVirtualThreadExecutor != null && !sharedVirtualThreadExecutor.isShutdown()) {
+                        sharedVirtualThreadExecutor.shutdown()
+                        sharedVirtualThreadExecutor.awaitTermination(5, TimeUnit.SECONDS)
+                    }
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        })
     }
 
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Construction
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /**
      * Creates a pool using virtual threads if available, otherwise creates a cached thread pool.
@@ -159,7 +217,7 @@ class ConcurrentPool implements ExecutorPool {
      * Creates a pool with a fixed number of platform threads.
      * Use this when you explicitly want platform threads with a specific size.
      *
-     * @param poolSize number of platform threads in the pool (must be > 0)
+     * @param poolSize number of platform threads in the pool (must be &gt; 0)
      */
     ConcurrentPool(int poolSize) {
         if (poolSize <= 0) throw new IllegalArgumentException("Pool size must be greater than 0, got: ${poolSize}")
@@ -191,31 +249,62 @@ class ConcurrentPool implements ExecutorPool {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // mock bridge methods for WorkerPool - so we can readily mock a ConcurrentPool
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Configuration
+    // -------------------------------------------------------------------------
+
+    /**
+     * Sets the maximum number of concurrently in-flight tasks for this pool.
+     * When the limit is reached, {@link #execute} calls will block until a permit
+     * becomes available. Use 0 or negative to disable admission control.
+     *
+     * @param maxInFlight maximum concurrent tasks, or &le; 0 to disable
+     * @return this pool for fluent configuration
+     */
+    ConcurrentPool withMaxInFlight(int maxInFlight) {
+        if (maxInFlight > 0) {
+            this.admissionSemaphore = new Semaphore(maxInFlight)
+        } else {
+            this.admissionSemaphore = null
+        }
+        return this
+    }
+
+    /**
+     * Sets an exception handler that is called whenever a task completes exceptionally.
+     * The exception is still propagated to the CompletableFuture; this handler is
+     * for logging, metrics, or alerting purposes.
+     *
+     * @param handler exception consumer
+     * @return this pool for fluent configuration
+     */
+    ConcurrentPool withUncaughtExceptionHandler(Consumer<Throwable> handler) {
+        this.uncaughtExceptionHandler = handler
+        return this
+    }
+
+    // -------------------------------------------------------------------------
+    // ExecutorPool interface - Callable/Runnable overloads
+    // -------------------------------------------------------------------------
 
     @Override
     CompletableFuture execute(Callable task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
-        Future future = this.executor.submit(task)
-        return transformFutureToCFuture(future, this.executor)
+        checkNotClosed()
+        return submitTask({ task.call() } as Callable)
     }
 
     @Override
     CompletableFuture execute(Runnable task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
-        Future future = this.executor.submit(task)
-        return transformFutureToCFuture(future, this.executor)
+        checkNotClosed()
+        return submitTask({
+            task.run()
+            return null
+        } as Callable)
     }
 
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Static helpers & status
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /**
      * Returns the shared virtual thread executor if available, otherwise {@code null}.
@@ -268,9 +357,15 @@ class ConcurrentPool implements ExecutorPool {
         errors.clear()
     }
 
-    // ─────────────────────────────────────────────────────────────
+    private static void recordError(String error) {
+        if (errors.size() < MAX_ERRORS) {
+            errors.offer(error)
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Executor configuration
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /**
      * Override the executor for this pool instance.
@@ -309,7 +404,7 @@ class ConcurrentPool implements ExecutorPool {
 
     @NotNull
     void setScheduledExecutor(ScheduledExecutorService scheduledExecutor) {
-        assert scheduledExecutor != null, "Scheduled executor cannot be null"
+        if (scheduledExecutor == null) throw new IllegalArgumentException("Scheduled executor cannot be null")
 
         if (ownsScheduledExecutor && this.scheduledExecutor != null) {
             this.scheduledExecutor.shutdown()
@@ -332,9 +427,10 @@ class ConcurrentPool implements ExecutorPool {
         }
         return scheduledExecutor
     }
-    // ─────────────────────────────────────────────────────────────
+
+    // -------------------------------------------------------------------------
     // High-level execution API
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /**
      * Executes work with an optional custom executor for this invocation only.
@@ -346,17 +442,14 @@ class ConcurrentPool implements ExecutorPool {
      */
     @NotNull
     CompletableFuture withPool(ExecutorService executor = null, @DelegatesTo(ConcurrentPool) Closure work) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
 
         ExecutorService effectiveExecutor = executor ?: this.executor
 
         work.delegate = this
         work.resolveStrategy = Closure.DELEGATE_FIRST
 
-        Future future = effectiveExecutor.submit(work)
-        return transformFutureToCFuture(future, effectiveExecutor)
+        return submitTask(work as Callable, effectiveExecutor)
     }
 
     /**
@@ -368,12 +461,9 @@ class ConcurrentPool implements ExecutorPool {
      */
     @NotNull
     CompletableFuture execute(Closure task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
         try {
-            Future future = this.executor.submit(task)
-            return transformFutureToCFuture(future, this.executor)
+            return submitTask(task as Callable)
         } catch (RejectedExecutionException rex) {
             throw new IllegalStateException("Executor rejected task; it may be shutting down or terminated", rex)
         }
@@ -389,14 +479,51 @@ class ConcurrentPool implements ExecutorPool {
      */
     @NotNull
     CompletableFuture execute(Closure task, Object[] args) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
 
-        Closure workWithArgs = { task(args) }
+        Callable workWithArgs = { task(args) } as Callable
         try {
-            Future future = this.executor.submit(workWithArgs)
-            return transformFutureToCFuture(future, this.executor)
+            return submitTask(workWithArgs)
+        } catch (RejectedExecutionException rex) {
+            throw new IllegalStateException("Executor rejected task; it may be shutting down or terminated", rex)
+        }
+    }
+
+    /**
+     * Submits a task with a timeout. If the task does not complete within the given
+     * timeout, the underlying Future is cancelled (with interrupt) and the returned
+     * CompletableFuture completes exceptionally with {@link TimeoutException}.
+     *
+     * @param task    closure to execute
+     * @param timeout maximum time to wait
+     * @param unit    time unit for the timeout
+     * @return {@link CompletableFuture} representing the task
+     * @throws IllegalStateException if pool is closed or executor rejects the task
+     */
+    @NotNull
+    CompletableFuture executeWithTimeout(Closure task, long timeout, TimeUnit unit) {
+        checkNotClosed()
+        try {
+            return submitTaskWithTimeout(task as Callable, timeout, unit)
+        } catch (RejectedExecutionException rex) {
+            throw new IllegalStateException("Executor rejected task; it may be shutting down or terminated", rex)
+        }
+    }
+
+    /**
+     * Submits a Callable task with a timeout.
+     *
+     * @param task    callable to execute
+     * @param timeout maximum time to wait
+     * @param unit    time unit for the timeout
+     * @return {@link CompletableFuture} representing the task
+     * @throws IllegalStateException if pool is closed or executor rejects the task
+     */
+    @NotNull
+    CompletableFuture executeWithTimeout(Callable task, long timeout, TimeUnit unit) {
+        checkNotClosed()
+        try {
+            return submitTaskWithTimeout(task, timeout, unit)
         } catch (RejectedExecutionException rex) {
             throw new IllegalStateException("Executor rejected task; it may be shutting down or terminated", rex)
         }
@@ -414,7 +541,7 @@ class ConcurrentPool implements ExecutorPool {
             return false
         }
         try {
-            this.executor.submit(task)
+            submitTask(task as Callable)
             return true
         } catch (RejectedExecutionException ignored) {
             return false
@@ -434,7 +561,7 @@ class ConcurrentPool implements ExecutorPool {
             return false
         }
         try {
-            this.executor.submit(task)
+            submitTask(task)
             return true
         } catch (RejectedExecutionException ignored) {
             return false
@@ -454,47 +581,195 @@ class ConcurrentPool implements ExecutorPool {
             return false
         }
         try {
-            this.executor.submit(task)
+            submitTask({ task.run(); return null } as Callable)
             return true
         } catch (RejectedExecutionException ignored) {
             return false
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Core submission — single path for all task execution
+    // -------------------------------------------------------------------------
+
     /**
-     * Helper function to take the {@link Future} returned by the executor submit and wrap it
-     * as a {@link CompletableFuture}. The wrapping itself is performed by submitting a small
-     * task to the same executor.
+     * Central submission method. All high-level execute methods funnel through here.
+     * <p>
+     * This method:
+     * <ul>
+     *   <li>Submits the task as a {@link Callable} to the executor, getting back a {@link Future}.</li>
+     *   <li>Wraps it in a {@link CompletableFuture} that propagates cancellation back to the
+     *       underlying Future (so the actual task is interrupted when the CF is cancelled).</li>
+     *   <li>Tracks in-flight count for metrics.</li>
+     *   <li>Respects admission control if configured.</li>
+     *   <li>Reports uncaught exceptions to the handler if configured.</li>
+     * </ul>
      *
-     * @param future          original future
-     * @param executorService executor that will run the bridge task
-     * @return completable future that completes with the same value/exception as {@code future}
+     * @param task            the callable to execute
+     * @param executorService executor to use (defaults to this.executor)
+     * @return CompletableFuture that completes when the task completes
      */
-    private CompletableFuture transformFutureToCFuture(Future future, ExecutorService executorService) {
-        CompletableFuture cf = new CompletableFuture()
+    private CompletableFuture submitTask(Callable task, ExecutorService executorService = this.executor) {
         try {
-            executorService.submit(() -> {
-                try {
-                    def result = future.get()
-                    cf.complete(result)
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt()
-                    cf.completeExceptionally(e)
-                } catch (Exception e) {
-                    cf.completeExceptionally(e)
-                }
-            })
-        } catch (RejectedExecutionException e) {
-            // Executor is shutting down or at capacity
-            cf.completeExceptionally(e)
+            // Admission control: acquire permit if configured (may block or throw InterruptedException)
+            if (admissionSemaphore != null) {
+                admissionSemaphore.acquire()
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+            throw new RejectedExecutionException("Task submission interrupted while waiting for admission permit", e)
         }
+
+        totalSubmitted.incrementAndGet()
+        inFlightCount.incrementAndGet()
+
+        // Submit the actual work
+        Future future
+        try {
+            future = executorService.submit(task)
+        } catch (RejectedExecutionException e) {
+            inFlightCount.decrementAndGet()
+            totalSubmitted.decrementAndGet()
+            if (admissionSemaphore != null) admissionSemaphore.release()
+            throw e
+        }
+
+        // Create a CompletableFuture that bridges to the Future with cancellation propagation
+        return bridgeFutureToCompletable(future)
+    }
+
+    /**
+     * Submits a task with a timeout enforced via the scheduled executor.
+     * On timeout, the underlying Future is cancelled with interrupt.
+     */
+    private CompletableFuture submitTaskWithTimeout(Callable task, long timeout, TimeUnit unit) {
+        try {
+            // Admission control: acquire permit if configured (may block or throw InterruptedException)
+            if (admissionSemaphore != null) {
+                admissionSemaphore.acquire()
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+            throw new RejectedExecutionException("Task submission interrupted while waiting for admission permit", e)
+        }
+
+        totalSubmitted.incrementAndGet()
+        inFlightCount.incrementAndGet()
+
+        // Submit the actual work
+        Future future
+        try {
+            future = this.executor.submit(task)
+        } catch (RejectedExecutionException e) {
+            inFlightCount.decrementAndGet()
+            totalSubmitted.decrementAndGet()
+            if (admissionSemaphore != null) admissionSemaphore.release()
+            throw e
+        }
+
+        // Create a bridged CompletableFuture
+        CompletableFuture cf = bridgeFutureToCompletable(future)
+
+        // Schedule timeout check
+        ScheduledFuture<?> timeoutFuture = getScheduledExecutor().schedule({
+            if (!cf.isDone()) {
+                timeoutCount.incrementAndGet()
+                // Cancel the underlying future with interrupt
+                future.cancel(true)
+                cf.completeExceptionally(
+                        new TimeoutException("Task timed out after ${timeout} ${unit.toString().toLowerCase()}"))
+            }
+        } as Runnable, timeout, unit)
+
+        // When the CF completes (normally or exceptionally), cancel the timeout timer
+        cf.whenComplete { result, error ->
+            timeoutFuture.cancel(false)
+        }
+
         return cf
     }
 
+    /**
+     * Bridges a {@link Future} to a {@link CompletableFuture} with proper cancellation
+     * propagation. Uses a virtual thread (or platform thread) to wait on the Future
+     * and complete the CF, but critically: cancelling the CF cancels the underlying Future.
+     * <p>
+     * This replaces the previous {@code transformFutureToCFuture} which wasted a second
+     * thread from the same pool and did not propagate cancellation.
+     * </p>
+     */
+    private CompletableFuture bridgeFutureToCompletable(Future future) {
+        CompletableFuture cf = new CompletableFuture()
 
-    // ─────────────────────────────────────────────────────────────
+        // Use a dedicated virtual thread for the bridge (not from our executor pool)
+        // This avoids consuming a pool thread just to wait on future.get().
+        // Falls back to a daemon platform thread if virtual threads are unavailable.
+        Runnable bridgeRunnable = {
+            try {
+                def result = future.get()
+                cf.complete(result)
+            } catch (CancellationException e) {
+                cf.cancel(true)
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt()
+                cf.completeExceptionally(e)
+            } catch (ExecutionException e) {
+                // Unwrap ExecutionException to expose the real cause
+                Throwable cause = e.cause ?: e
+                cf.completeExceptionally(cause)
+                notifyExceptionHandler(cause)
+            } catch (Exception e) {
+                cf.completeExceptionally(e)
+                notifyExceptionHandler(e)
+            } finally {
+                inFlightCount.decrementAndGet()
+                if (admissionSemaphore != null) admissionSemaphore.release()
+            }
+        } as Runnable
+
+        if (virtualThreadsAvailable.get()) {
+            Thread.startVirtualThread(bridgeRunnable)
+        } else {
+            Thread t = new Thread(bridgeRunnable, 'gcu-bridge')
+            t.daemon = true
+            t.start()
+        }
+
+        // Propagate cancellation: if someone cancels the CF, cancel the underlying Future
+        cf.whenComplete { result, error ->
+            if (cf.isCancelled()) {
+                future.cancel(true)
+            }
+        }
+
+        return cf
+    }
+
+    /**
+     * Notifies the uncaught exception handler if one is configured.
+     */
+    private void notifyExceptionHandler(Throwable t) {
+        if (uncaughtExceptionHandler != null) {
+            try {
+                uncaughtExceptionHandler.accept(t)
+            } catch (Exception handlerError) {
+                log.warn("Uncaught exception handler itself threw an exception", handlerError)
+            }
+        }
+    }
+
+    /**
+     * Checks that the pool is not closed, throwing if it is.
+     */
+    private void checkNotClosed() {
+        if (this.closed.get()) {
+            throw new IllegalStateException("Pool is closed and not accepting new tasks")
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Scheduling API
-    // ─────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /**
      * Schedules work to execute after a delay.
@@ -506,9 +781,7 @@ class ConcurrentPool implements ExecutorPool {
      * @throws IllegalStateException if pool is closed
      */
     ScheduledFuture scheduleExecution(int delay, TimeUnit unit, Closure task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
         return getScheduledExecutor().schedule(task, delay, unit)
     }
 
@@ -523,9 +796,7 @@ class ConcurrentPool implements ExecutorPool {
      * @throws IllegalStateException if pool is closed
      */
     ScheduledFuture scheduleWithFixedDelay(int initialDelay, int delay, TimeUnit unit, Closure task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
         return getScheduledExecutor().scheduleWithFixedDelay(task, initialDelay, delay, unit)
     }
 
@@ -540,9 +811,7 @@ class ConcurrentPool implements ExecutorPool {
      * @throws IllegalStateException if pool is closed
      */
     ScheduledFuture scheduleAtFixedRate(int initialDelay, int period, TimeUnit unit, Closure task) {
-        if (this.closed.get()) {
-            throw new IllegalStateException("Pool is closed and not accepting new tasks")
-        }
+        checkNotClosed()
         return getScheduledExecutor().scheduleAtFixedRate(task, initialDelay, period, unit)
     }
 
@@ -563,19 +832,23 @@ class ConcurrentPool implements ExecutorPool {
         }
     }
 
-    // 
+    // -------------------------------------------------------------------------
     // Thread factory helpers
-    // 
+    // -------------------------------------------------------------------------
 
     /**
      * Creates a ThreadFactory that produces named daemon threads.
      * Daemon threads do not prevent JVM shutdown, which is critical for
      * test processes and short-lived applications.
+     * <p>
+     * This method is static and accessible for use by other components
+     * that need daemon thread factories.
+     * </p>
      *
      * @param namePrefix prefix for thread names, e.g. 'gcu-scheduler'
      * @return a ThreadFactory producing daemon threads
      */
-    private static ThreadFactory daemonThreadFactory(String namePrefix) {
+    static ThreadFactory daemonThreadFactory(String namePrefix) {
         AtomicInteger counter = new AtomicInteger(0)
         return { Runnable r ->
             Thread t = new Thread(r, "${namePrefix}-${counter.incrementAndGet()}")
@@ -584,9 +857,9 @@ class ConcurrentPool implements ExecutorPool {
         } as ThreadFactory
     }
 
-    // 
+    // -------------------------------------------------------------------------
     // Shutdown & lifecycle
-    // 
+    // -------------------------------------------------------------------------
 
     /**
      * Initiates an orderly shutdown of executors owned by this instance.
@@ -603,6 +876,14 @@ class ConcurrentPool implements ExecutorPool {
         if (ownsScheduledExecutor && scheduledExecutor != null) {
             scheduledExecutor.shutdown()
         }
+    }
+
+    /**
+     * Implements {@link AutoCloseable}. Delegates to {@link #shutdown()}.
+     */
+    @Override
+    void close() {
+        shutdown()
     }
 
     /**
@@ -642,6 +923,14 @@ class ConcurrentPool implements ExecutorPool {
         metrics.usingVirtualThreads = isUsingVirtualThreads()
         metrics.ownsExecutor = ownsExecutor
         metrics.poolSize = getPoolSize()
+        metrics.inFlightCount = inFlightCount.get()
+        metrics.totalSubmitted = totalSubmitted.get()
+        metrics.timeoutCount = timeoutCount.get()
+        metrics.admissionControlEnabled = (admissionSemaphore != null)
+
+        if (admissionSemaphore != null) {
+            metrics.admissionPermitsAvailable = admissionSemaphore.availablePermits()
+        }
 
         if (executor instanceof ThreadPoolExecutor) {
             def tpe = (ThreadPoolExecutor) executor
@@ -723,6 +1012,6 @@ class ConcurrentPool implements ExecutorPool {
     @Deprecated
     static void shutdownSharedExecutors() {
         log.warn("shutdownSharedExecutors() is deprecated and is now a no-op; shared executors live for the JVM lifetime")
-        // Intentionally do nothing – shared executors are treated as JVM-wide resources.
+        // Intentionally do nothing — shared executors are treated as JVM-wide resources.
     }
 }

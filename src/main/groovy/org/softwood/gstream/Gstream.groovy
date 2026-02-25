@@ -7,6 +7,7 @@ import groovy.transform.TypeCheckingMode
 
 import groovy.lang.Tuple2
 
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.BinaryOperator
 import java.util.function.Consumer
@@ -21,6 +22,7 @@ import java.util.stream.LongStream
 import java.util.stream.DoubleStream
 import java.util.stream.Stream
 import java.util.stream.StreamSupport
+import org.softwood.pool.ExecutorPool
 
 /**
  * A fluent, idiomatic Groovy wrapper around Java's {@link java.util.stream.Stream} API that
@@ -259,6 +261,47 @@ class Gstream<T> {
     }
 
     /**
+     * Executes a terminal operation on this stream inside the given {@link ExecutorPool},
+     * so that parallel stream worker threads are drawn from that pool rather than from the
+     * JVM-wide {@code ForkJoinPool.commonPool()}.
+     *
+     * <p>The closure receives this {@code Gstream} as its sole argument and must call a
+     * terminal operation on it.  The result is returned synchronously (the calling thread
+     * blocks until the pool task completes).</p>
+     *
+     * <pre>{@code
+     * def pool = new ConcurrentPool("my-pool")
+     * def result = Gstream.of(1..1000)
+     *     .parallel()
+     *     .executeWith(pool) { gs ->
+     *         gs.filter { it % 2 == 0 }.toList()
+     *     }
+     * pool.shutdown()
+     * }</pre>
+     *
+     * @param pool     pool whose thread will drive the parallel computation
+     * @param terminal closure taking this {@code Gstream<T>} and returning a result
+     * @param <R>      the result type
+     * @return the result produced by the terminal closure
+     * @throws IllegalStateException if the pool is already closed
+     * @throws RuntimeException wrapping any checked exception thrown by the closure
+     */
+    def <R> R executeWith(ExecutorPool pool, Closure<R> terminal) {
+        Objects.requireNonNull(pool,     "pool must not be null")
+        Objects.requireNonNull(terminal, "terminal closure must not be null")
+        if (pool.isClosed()) {
+            throw new IllegalStateException("Pool '${pool.getName()}' is closed")
+        }
+        try {
+            return (R) pool.execute { terminal.call(this) }.get()
+        } catch (java.util.concurrent.ExecutionException ee) {
+            Throwable cause = ee.cause ?: ee
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause
+            throw new RuntimeException("Stream execution failed in pool '${pool.getName()}'", cause)
+        }
+    }
+
+    /**
      * Creates a lazily concatenated stream whose elements are all the elements
      * of the first stream followed by all the elements of the second stream.
      * <p>
@@ -421,7 +464,10 @@ class Gstream<T> {
      * @return a new {@code Gstream} with elements distinct by key
      */
     def <K> Gstream<T> distinctBy(Closure<K> keyExtractor) {
-        Set<Object> seen = new HashSet<>()
+        Objects.requireNonNull(keyExtractor, "keyExtractor must not be null")
+        // ConcurrentHashMap.newKeySet() is thread-safe for parallel streams;
+        // a plain HashSet would be a data race under parallel execution.
+        Set<Object> seen = ConcurrentHashMap.newKeySet()
         new Gstream<T>(stream.filter { T t ->
             Object key = keyExtractor.call(t)
             seen.add(key)
@@ -1191,36 +1237,39 @@ class Gstream<T> {
             throw new IllegalArgumentException("window size must be > 0")
 
         Iterator<T> it = stream.iterator()
+        // buffer holds the current window's contents.
+        // Invariant at entry to tryAdvance:
+        //   - On first call: buffer is empty.
+        //   - On subsequent calls: buffer contains the (size-1) tail of the previous window.
+        // We fill to 'size' by reading one new element, then emit.
         LinkedList<T> buffer = new LinkedList<>()
+        boolean firstCall = true
 
         Stream<List<T>> resultStream = StreamSupport.stream(
                 new Spliterators.AbstractSpliterator<List<T>>(Long.MAX_VALUE, Spliterator.ORDERED) {
 
                     @Override
                     boolean tryAdvance(Consumer<? super List<T>> action) {
-                        // fill initial buffer up to 'size'
-                        while (buffer.size() < size) {
+                        if (firstCall) {
+                            // Bootstrap: read the first (size) elements
+                            while (buffer.size() < size) {
+                                if (!it.hasNext()) return false
+                                buffer.add(it.next())
+                            }
+                            firstCall = false
+                        } else {
+                            // Slide: drop oldest element, read one new element
                             if (!it.hasNext()) return false
+                            buffer.removeFirst()
                             buffer.add(it.next())
                         }
 
-                        // we now have a full window
+                        // Emit a snapshot of the current window
                         action.accept(new ArrayList<>(buffer))
-
-                        // slide the window by 1
-                        buffer.removeFirst()
-
-                        // attempt to read one more element
-                        if (it.hasNext()) {
-                            buffer.add(it.next())
-                            return true
-                        }
-
-                        // after emitting last window, stop
-                        return false
+                        return true
                     }
                 },
-                false
+                false          // windowed is inherently sequential (stateful iterator)
         )
 
         return new Gstream<List<T>>(resultStream)
@@ -1239,7 +1288,7 @@ class Gstream<T> {
      * @return a new Gstream with the same elements
      */
     Gstream<T> tee(Closure<?> sideEffect) {
-        assert sideEffect != null : "sideEffect closure must not be null"
+        Objects.requireNonNull(sideEffect, "sideEffect closure must not be null")
 
         Stream<T> newStream = stream.peek { T t ->
             sideEffect.call(t)
@@ -1264,7 +1313,7 @@ class Gstream<T> {
      * @return a new Gstream<R>
      */
     def <R> Gstream<R> mapMulti(Closure<?> mapper) {
-        assert mapper != null : "Mapper closure must not be null"
+        Objects.requireNonNull(mapper, "mapper closure must not be null")
 
         Stream<R> newStream = stream.mapMulti { T value, java.util.function.Consumer<R> emit ->
             mapper.call(value, emit)
@@ -1282,8 +1331,9 @@ class Gstream<T> {
      * The failing element is skipped and the stream continues.
      */
     Gstream<T> onErrorContinue(Closure<?> handler) {
-        assert handler != null : "handler closure must not be null"
+        Objects.requireNonNull(handler, "handler closure must not be null")
 
+        boolean wasParallel = stream.isParallel()
         Spliterator<T> base = stream.spliterator()
 
         Spliterator<T> wrapped = new Spliterators.AbstractSpliterator<T>(
@@ -1293,32 +1343,43 @@ class Gstream<T> {
             boolean tryAdvance(Consumer<? super T> action) {
                 // We keep trying until either:
                 //  - base.tryAdvance returns true (we successfully processed an element), or
-                //  - base.tryAdvance returns false (no more elements)
+                //  - base.tryAdvance returns false (no more elements).
+                // MAX_CONSECUTIVE_ERRORS prevents an infinite loop if every element
+                // in the underlying stream consistently throws (e.g. permanently broken
+                // source). After the limit we re-throw so the caller can see the failure.
+                final int MAX_CONSECUTIVE_ERRORS = 1000
+                int consecutiveErrors = 0
                 while (true) {
                     try {
-                        // Let the original pipeline produce a value and pass it to our wrapper consumer
-                        return base.tryAdvance { T value ->
+                        boolean advanced = base.tryAdvance { T value ->
                             try {
-                                // Run downstream consumer (including terminal ops) in a try/catch
                                 action.accept(value)
                             } catch (Throwable ex2) {
-                                // Downstream failure, we know the value
+                                // Downstream failure - value is known
                                 handler.call(ex2, value)
-                                // Skip emitting this element; effectively "swallowed"
+                                // Element is swallowed; don't rethrow
                             }
                         }
+                        // Reset error counter on successful advance
+                        consecutiveErrors = 0
+                        return advanced
                     } catch (Throwable ex1) {
-                        // Upstream failure during base.tryAdvance itself (e.g. in a map/filter before
-                        // this onErrorContinue). We don't have a value here, so pass null.
+                        // Upstream failure during base.tryAdvance (e.g. in map/filter upstream).
+                        // Value is not available here.
+                        consecutiveErrors++
+                        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                            throw new IllegalStateException(
+                                "onErrorContinue: exceeded $MAX_CONSECUTIVE_ERRORS consecutive errors - " +
+                                "possible infinite loop. Last error: ${ex1.message}", ex1)
+                        }
                         handler.call(ex1, null)
-                        // Loop again to try the next element. If the underlying stream
-                        // is exhausted, base.tryAdvance will eventually return false.
+                        // Loop to try the next element
                     }
                 }
             }
         }
 
-        return new Gstream<T>(StreamSupport.stream(wrapped, stream.isParallel()))
+        return new Gstream<T>(StreamSupport.stream(wrapped, wasParallel))
     }
 
 

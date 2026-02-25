@@ -182,7 +182,9 @@ assert promise2.get() == 100
 ```
 
 ##### `fail(Throwable error)`
-Complete the promise with an error.
+Complete the promise with an error. Respects single-assignment semantics - only succeeds when
+the promise is still PENDING. If already in a terminal state (COMPLETED, FAILED, CANCELLED)
+the call is silently ignored. First completion wins.
 
 ```groovy
 def promise = Promises.newPromise()
@@ -194,6 +196,11 @@ try {
 } catch (Exception e) {
     assert e.message.contains("Something went wrong")
 }
+
+// Second fail() is ignored - first completion already won
+def p2 = Promises.newPromise(42)
+p2.fail(new RuntimeException("too late"))  // ignored
+assert p2.get() == 42
 ```
 
 #### Retrieval Methods
@@ -238,7 +245,8 @@ assert promise.isDone()
 #### Callback Methods
 
 ##### `onComplete(Consumer<T> callback)`
-Register a success callback.
+Register a success callback. Guaranteed to fire **exactly once** regardless of whether the
+promise is already completed or completes in the future (v1.1+).
 
 ```groovy
 def promise = Promises.async { "hello" }
@@ -247,9 +255,9 @@ promise.onComplete { result ->
     println "Got: $result"  // Prints "Got: hello"
 }
 
-// If already completed, callback executes immediately
+// If already completed, callback executes immediately (exactly once)
 def completed = Promises.newPromise(42)
-completed.onComplete { println it }  // Prints immediately
+completed.onComplete { println it }  // Prints immediately, fires once only
 ```
 
 ##### `onError(Consumer<Throwable> errorHandler)`
@@ -1171,3 +1179,57 @@ The Promises library provides a clean, implementation-agnostic async API for Gro
 - **Interoperability**: Easy conversion to/from CompletableFuture
 
 Whether you're building enterprise applications, reactive microservices, or dataflow pipelines, Promises provides a unified abstraction that grows with your needs.
+---
+
+## Version History
+
+### v1.1 (Current) - Concurrent Correctness Hardening
+
+#### DataflowPromise fixes
+
+-  **Critical fix: double-invocation eliminated in `onSuccess`, `onError`, `onComplete`.**
+   Previously all three methods called `variable.whenAvailable` / `variable.whenError` to
+   register a listener, then *also* checked `isCompleted()` and invoked the callback a second
+   time. Because `whenAvailable` / `whenError` already handle the already-bound case by invoking
+   immediately and returning early, the explicit re-invocation caused guaranteed double-firing on
+   already-completed promises. This cascaded through `then()` / `flatMap()` / `recover()` chains,
+   producing `IllegalStateException: already bound` errors. The redundant blocks have been removed;
+   each callback now fires exactly once.
+
+-  **Fixed: `fail()` no longer forcibly overwrites COMPLETED state.**
+   Previously, if `fail()` was called on a promise that had already been completed successfully,
+   the `state` field was force-set to `FAILED`, silently corrupting the observable state. The
+   method now respects single-assignment semantics: `CAS(PENDING -> FAILED)` is the only
+   transition attempted. If the promise is already in a terminal state the call is logged and
+   ignored. First writer wins.
+
+-  **Fixed: `timeout()` / `timeout(fallback)` / `orTimeout()` no longer park a thread.**
+   All three timeout methods previously submitted a `CompletableFuture.runAsync` task that called
+   `unit.sleep(timeout)`, parking a virtual thread for the full timeout duration. They now
+   schedule a one-shot `Runnable` via `ConcurrentPool.sharedScheduledExecutor.schedule(...)`.
+   Only a lightweight timer entry is created; no thread is consumed during the wait.
+
+-  **Fixed: `PromisePoolContext.defaultPool` declared `volatile`.**
+   The field participates in a double-checked locking pattern via `setDefaultPool()`. Without
+   `volatile` the JVM memory model does not guarantee visibility of the written reference across
+   threads, making the pattern broken. Now correctly declared `volatile`.
+
+-  **Quality:** All tests green (promises suite clean, dataflow suite x2).
+
+#### Callback behaviour reference (v1.1+)
+
+| Method | Already-completed promise | Not-yet-completed promise |
+|---|---|---|
+| `onSuccess(c)` | `whenAvailable` fires `c` immediately (once) | `c` fires when promise completes |
+| `onError(c)` | `whenError` fires `c` immediately (once) | `c` fires on failure |
+| `onComplete(c)` | `whenAvailable` fires `c` immediately (once) | `c` fires on success |
+| `fail(e)` on COMPLETED | Ignored (logged at DEBUG) | Transitions PENDING -> FAILED |
+| `fail(e)` on FAILED | Ignored | N/A |
+
+### v1.0 - Initial Release
+- Implementation-agnostic Promise API
+- Dataflow, CompletableFuture, and Vert.x backends
+- `then()`, `recover()`, `onComplete()`, `onError()` chaining
+- `Promise.all()` and `Promise.any()` static combinators
+- `asType(CompletableFuture)` conversion
+- `PromisePoolContext` for pool management

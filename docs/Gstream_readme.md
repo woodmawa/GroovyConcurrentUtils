@@ -19,6 +19,7 @@ A fluent, idiomatic Groovy wrapper around Java Streams that combines the power o
 13. [Groovy Collections Integration](#groovy-collections-integration)
 14. [Advanced Examples](#advanced-examples)
 15. [API Reference](#api-reference)
+16. [Version History](#version-history)
 
 ## Overview
 
@@ -33,13 +34,15 @@ The class bridges the gap between Groovy's familiar collection methods and Java'
 - **Fluent API**: Chain operations naturally with method chaining
 - **DSL Builder**: Declarative stream construction using Groovy DSL syntax
 - **Parallel Processing**: Built-in support for parallel stream execution
+- **Custom Pool Execution**: `executeWith(pool)` runs stream terminal operations inside a `ConcurrentPool` instead of the JVM common fork-join pool
 - **Primitive Stream Support**: Integration with IntStream, LongStream, DoubleStream
-- **Error Handling**: Built-in error recovery with `onErrorContinue`
+- **Error Handling**: Built-in error recovery with `onErrorContinue` (with infinite-loop protection)
 - **Statistical Operations**: Summarizing operations for numeric streams
 - **Advanced Operations**: `zip`, `zipWithIndex`, `chunked`, `windowed`, `tee`, `mapMulti`
 - **Groovy Integration**: Fallback to Groovy collection methods via `methodMissing`
 - **Rich Factory Methods**: Multiple ways to create streams from various sources
 - **Comprehensive Operations**: All standard stream operations plus Groovy-friendly aliases
+- **Thread-Safe Parallel Helpers**: `distinctBy` uses a lock-free concurrent set safe for parallel streams
 
 ## Quick Start
 
@@ -332,7 +335,16 @@ Gstream.from(people)
     .distinctBy { it.age }
     .toList()
 // Result: [[name: "Alice", age: 30], [name: "Charlie", age: 25]]
+
+// Safe on parallel streams
+Gstream.fromParallel(myLargeList)
+    .distinctBy { it.category }   // uses ConcurrentHashMap.newKeySet() internally
+    .toList()
 ```
+
+> **Thread safety (v2.1+):** `distinctBy` internally uses `ConcurrentHashMap.newKeySet()` so the
+> shared key-set is safe under parallel execution. The previous implementation used a plain
+> `HashSet` which was a data race when the stream was parallel.
 
 ### sorted / sortedBy
 Sort elements naturally or with a comparator.
@@ -636,10 +648,52 @@ def result = Gstream.of(1..10000)
     .toList()
 ```
 
+### Custom Pool Execution with `executeWith` (v2.1+)
+
+By default all parallel Gstream operations use `ForkJoinPool.commonPool()`.  If you need
+to run inside a specific `ConcurrentPool` (e.g. to use virtual threads, enforce a bounded
+queue, or collect pool-level metrics), use `executeWith`:
+
+```groovy
+import org.softwood.pool.ConcurrentPool
+
+def pool = new ConcurrentPool("stream-workers")
+try {
+    // The closure receives this Gstream as its argument.
+    // Call any terminal operation on it; the result is returned synchronously.
+    def result = Gstream.of(1..10_000)
+        .parallel()
+        .executeWith(pool) { gs ->
+            gs.filter { it % 2 == 0 }
+              .map    { it * it }
+              .toList()
+        }
+    println result.size()   // 5000
+} finally {
+    pool.shutdown()
+}
+```
+
+The calling thread blocks until the pool task completes.  The pool's own thread drives
+the `parallel()` work, so ForkJoinPool.commonPool() is not used at all.
+
+```groovy
+// Guard: throws IllegalStateException if pool is already shut down
+pool.shutdown()
+Gstream.of(1, 2, 3).executeWith(pool) { gs -> gs.toList() }   // ISE
+
+// Guard: throws NullPointerException for null pool or null closure
+Gstream.of(1, 2, 3).executeWith(null) { gs -> gs.toList() }   // NPE
+```
+
 ### Important Notes for Parallel Streams
 - Closures must be stateless and thread-safe
 - Order may not be preserved unless using `forEachOrdered()`
 - Use `unordered()` for better parallel performance when order doesn't matter
+- `distinctBy` (v2.1+) is now safe on parallel streams — uses a lock-free concurrent set
+- `chunked` and `windowed` always produce a sequential result stream (they use iterators
+  that cannot be split); calling `.parallel()` before them is a no-op on the output
+- `zip` is always sequential on the output stream
 
 ## Error Handling
 
@@ -677,6 +731,30 @@ Gstream.of("1", "2", "invalid", "4")
     }
     .map { it as Integer }  // NumberFormatException for "invalid"
     .forEach { println it }
+```
+
+### Infinite-Loop Protection (v2.1+)
+
+`onErrorContinue` uses an internal consecutive-error counter.  If 1000 consecutive elements
+all throw (e.g. a permanently broken upstream source), it stops retrying and throws
+`IllegalStateException` rather than looping forever.  The counter resets to zero after each
+successful element.
+
+```groovy
+// The handler closure must not be null
+Gstream.of(1, 2, 3)
+    .onErrorContinue(null)    // throws NullPointerException("handler must not be null")
+
+// Handler receives (Throwable ex, T value).
+// value is null when the error occurred upstream (before a value was produced).
+Gstream.of("1", "x", "2")
+    .map { it.toInteger() }   // throws for "x"
+    .onErrorContinue { ex, val ->
+        // val is null here because the exception fired inside map, before the value
+        // could be delivered to onErrorContinue
+        log.warn "Skipped unparseable element: ${ex.message}"
+    }
+    .toList()   // [1, 2]
 ```
 
 ## Statistical Operations
@@ -783,14 +861,24 @@ Gstream.from(largeDataset)
 def windows = Gstream.of(1, 2, 3, 4, 5)
     .windowed(3)
     .toList()
-// Result: [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+// Result: [[1, 2, 3], [2, 3, 4], [3, 4, 5]]  — exactly 3 windows, no phantom extra
 
 // Calculate moving averages
 def movingAvg = Gstream.from(timeSeries)
     .windowed(5)
     .map { window -> window.sum() / window.size() }
     .toList()
+
+// Edge cases (v2.1+)
+Gstream.of(1, 2, 3).windowed(3).toList()  // [[1,2,3]] — exactly 1 window
+Gstream.of(1, 2).windowed(5).toList()     // []         — size > stream, no windows
+Gstream.of(1, 2, 3).windowed(1).toList() // [[1],[2],[3]] — each element its own window
 ```
+
+> **Bug fix (v2.1+):** The spliterator now uses a `firstCall` bootstrap pattern.
+> The old implementation read one extra element into the buffer after each emission, which
+> caused a spurious phantom window at the end of streams whose length exactly equalled the
+> window size.  Boundary cases (size == stream length, size == 1) now produce correct results.
 
 ### tee - Side Effect Without Consuming
 ```groovy
@@ -801,6 +889,9 @@ def result = Gstream.of(1, 2, 3, 4, 5)
     .tee { println "After map: $it" }
     .toList()
 // Prints intermediate values while continuing the pipeline
+
+// Null closure throws NullPointerException (v2.1+; previously threw AssertionError with -da)
+Gstream.of(1, 2, 3).tee(null)  // NPE: "sideEffect closure must not be null"
 ```
 
 ### mapMulti - One-to-Many Mapping
@@ -825,6 +916,9 @@ def result2 = Gstream.of(1, 2, 3, 4, 5)
     }
     .toList()
 // Result: [2, 4, 4, 8]
+
+// Null mapper throws NullPointerException (v2.1+)
+Gstream.of(1, 2, 3).mapMulti(null)  // NPE: "mapper closure must not be null"
 ```
 
 ### Combining Advanced Operations
@@ -1027,6 +1121,12 @@ def results = Gstream.from(files)
 | `builder()` | Create stream builder |
 | `build(Closure)` | Create stream using DSL |
 
+### Pool-Bound Execution
+
+| Method | Description |
+|--------|-------------|
+| `executeWith(ExecutorPool pool, Closure<R> terminal)` | Run a terminal operation inside a specific `ConcurrentPool`. The closure receives this `Gstream` and must call a terminal operation on it. Returns the result synchronously. Throws `IllegalStateException` if the pool is closed, `NullPointerException` if either argument is null. |
+
 ### Intermediate Operations
 
 | Method | Description |
@@ -1037,7 +1137,7 @@ def results = Gstream.from(files)
 | `flatMap(Closure<Stream<R>> mapper)` | Transform and flatten streams |
 | `flatMapIterable(Closure<Iterable<R>>)` | Transform and flatten iterables |
 | `distinct()` | Remove duplicates |
-| `distinctBy(Closure<K> keyExtractor)` | Remove duplicates by key |
+| `distinctBy(Closure<K> keyExtractor)` | Remove duplicates by key. Thread-safe on parallel streams (v2.1+) |
 | `sorted()` | Sort naturally |
 | `sorted(Closure<Integer> comparator)` | Sort with comparator |
 | `sortedBy(Closure<K> keyExtractor)` | Sort by extracted key |
@@ -1053,10 +1153,10 @@ def results = Gstream.from(files)
 | `zip(Gstream<U>)` | Zip with another stream |
 | `zipWithIndex()` | Pair elements with index |
 | `chunked(int size)` | Split into fixed-size chunks |
-| `windowed(int size)` | Create sliding windows |
-| `tee(Closure)` | Execute side-effect, pass through |
-| `mapMulti(Closure)` | One-to-many element mapping |
-| `onErrorContinue(Closure)` | Continue on errors |
+| `windowed(int size)` | Create sliding windows. Off-by-one fixed in v2.1 — boundary cases (size == stream length, size == 1) now correct |
+| `tee(Closure)` | Execute side-effect, pass through. Throws NPE for null closure (v2.1+) |
+| `mapMulti(Closure)` | One-to-many element mapping. Throws NPE for null closure (v2.1+) |
+| `onErrorContinue(Closure)` | Skip elements that throw. Throws NPE for null handler. Infinite-loop guard at 1000 consecutive errors (v2.1+) |
 
 ### Terminal Operations
 
@@ -1136,3 +1236,69 @@ def results = Gstream.from(files)
 **Annotations**: `@CompileStatic`  
 **Builder**: `GstreamBuilder<T>` (`@CompileDynamic`)
 ```
+
+---
+
+## Version History
+
+### v2.1 (Current) — Concurrent Correctness & Hardening
+
+#### Bug fixes
+
+- **`distinctBy` data race on parallel streams.**  
+  The shared `seen` set was a plain `HashSet`, which is not thread-safe and produces
+  non-deterministic results (including duplicate results or `ConcurrentModificationException`)
+  when the stream is parallel.  Now uses `ConcurrentHashMap.newKeySet()`, a lock-free
+  concurrent set that is safe under parallel execution.
+
+- **`windowed` off-by-one / phantom window.**  
+  The old spliterator read one extra element into the deque *after* emitting a window, then
+  relied on the fill loop at the top of the next `tryAdvance` to detect termination.  This
+  worked for most sizes but produced an erroneous empty or wrong extra window when the stream
+  length was exactly equal to the window size.  The fix uses a `firstCall` bootstrap: on the
+  first call the buffer is filled to `size`; on subsequent calls only one element is read and
+  the oldest is dropped before emitting.  Boundary cases are now correct:
+  - `windowed(size)` on a stream of length `size` → exactly one window
+  - `windowed(1)` → each element is its own window
+  - `windowed(n)` where `n > stream.count()` → empty result
+
+- **`onErrorContinue` infinite-loop risk.**  
+  The `while(true)` retry loop had no upper bound.  If every element in the upstream source
+  consistently threw (e.g. a permanently broken `map` stage), the loop would spin forever.
+  Added a consecutive-error counter: after 1000 consecutive upstream failures the method
+  stops swallowing errors and re-throws as `IllegalStateException`.  The counter resets to
+  zero after each successful element.
+
+- **`assert` → `NullPointerException` in `tee`, `mapMulti`, `onErrorContinue`, `distinctBy`.**  
+  Groovy `assert` statements are disabled when the JVM is started with `-da`, meaning null
+  closures silently became `NullPointerException` from deep inside the stream machinery with
+  no helpful message.  All four methods now use `Objects.requireNonNull` so the failure is
+  immediate, at the call site, with a descriptive message.
+
+#### New feature
+
+- **`executeWith(ExecutorPool pool, Closure<R> terminal)`** — run a stream's terminal
+  operation inside a specific `ConcurrentPool`.  By default parallel streams use
+  `ForkJoinPool.commonPool()`; with `executeWith` the pool's own thread drives the
+  computation, making it possible to use virtual-thread pools, apply bounded queues,
+  or collect metrics via the pool's tracking infrastructure.  The calling thread blocks
+  until the task completes.  Guards: `IllegalStateException` if the pool is closed,
+  `NullPointerException` for null arguments.
+
+#### Documentation & tests
+
+- 100 tests total covering all original operations plus all v2.1 fixes and the new
+  `executeWith` API.
+- README updated with corrected `windowed` edge-case examples, `distinctBy` parallel-safety
+  note, `onErrorContinue` infinite-loop guard documentation, and a new
+  "Custom Pool Execution" section in the Parallel Streams chapter.
+
+### v2.0 — Initial Full Release
+- Full Java Stream API surface wrapped with Groovy closures
+- `@CompileStatic` throughout for compile-time safety and performance
+- `GstreamBuilder` DSL for declarative pipeline construction
+- `zip`, `zipWithIndex`, `chunked`, `windowed`, `tee`, `mapMulti`, `onErrorContinue`
+- `distinctBy`, `sortedBy`, `maxBy`, `minBy`
+- `summarizingInt`, `summarizingLong`, `summarizingDouble`
+- `methodMissing` delegation to Groovy collection API
+- Parallel stream support (`ofParallel`, `fromParallel`, `parallel()`, `sequential()`)

@@ -401,6 +401,11 @@ scheduleExecution(100, MILLISECONDS) { task() }
 
 **Rationale:** Scheduling requires persistent threads that can track time and wake up tasks. Virtual threads are unsuitable for this. However, the *actual task* still runs on a virtual thread.
 
+**Timeout operations use `sharedScheduledExecutor` directly (v1.2+):**  
+`DataflowPromise.timeout()`, `timeout(fallback)` and `orTimeout()` all register one-shot timers
+via `ConcurrentPool.sharedScheduledExecutor.schedule(...)`. No virtual thread is parked sleeping
+for the duration - only a lightweight scheduled callback fires when the timer expires.
+
 ---
 
 ## Ownership & Lifecycle
@@ -1648,6 +1653,21 @@ ConcurrentPool makes modern concurrent programming in Groovy simple, efficient, 
 ---
 
 ## Version History
+
+### v1.2 - Hardening & Lifecycle Integrity
+- **FIXED:** `DataflowExpression.scheduleListener()` now calls `pool.execute()` instead of
+  `pool.executor.execute()` directly — pool closed-state checks, admission control and metrics
+  are now respected when firing listeners.
+- **FIXED:** `sharedScheduledExecutor` is now used directly by `DataflowPromise.timeout()`,
+  `timeout(fallback)` and `orTimeout()` for one-shot timers — previously these methods parked
+  a full virtual thread sleeping for the timeout duration.
+- **FIXED:** `PromisePoolContext.defaultPool` is now declared `volatile`, correcting a broken
+  double-checked locking pattern that could expose a partially-constructed pool under
+  concurrent access.
+- **FIXED:** `DataflowExpression.listenerErrors` queue is now capped at 100 entries via the
+  `collectListenerError()` helper — previously unbounded, risking memory growth in long-running
+  processes with repeated listener failures.
+- **QUALITY:** All fixes verified with full test suite (dataflow + promises, green x2).
 
 ### v1.1 - Enhanced Monitoring & Reliability
 - **NEW:** `isHealthy()` - Health check method for monitoring

@@ -950,4 +950,162 @@ class GstreamTest {
 
         assertEquals(['Alice','Bob','Charlie'], result)
     }
+
+    // -------------------------------------------------------------------------
+    // Hardening tests (v2.1)
+    // -------------------------------------------------------------------------
+
+    // --- distinctBy: parallel safety ---
+
+    @Test
+    void testDistinctByParallel() {
+        // Run distinctBy on a parallel stream - must not produce duplicates
+        // (plain HashSet would be a data race; ConcurrentHashMap.newKeySet() is safe)
+        def words = (1..1000).collect { "key${it % 50}" }  // 50 distinct keys repeated 20x
+        def result = Gstream.fromParallel(words)
+                .distinctBy { it }
+                .toList()
+        assertEquals(50, result.size())
+        assertEquals(50, result.toSet().size())
+    }
+
+    @Test
+    void testDistinctByNullKeyExtractorThrows() {
+        def ex = assertThrows(NullPointerException) {
+            Gstream.of(1, 2, 3).distinctBy(null)
+        }
+        assertTrue(ex.message.contains("keyExtractor"))
+    }
+
+    // --- windowed: off-by-one fix ---
+
+    @Test
+    void testWindowedCorrectCount() {
+        // [1..5] windowed(3) => [[1,2,3],[2,3,4],[3,4,5]] — exactly 3 windows
+        def result = Gstream.of(1, 2, 3, 4, 5)
+                .windowed(3)
+                .toList()
+        assertEquals(3, result.size())
+        assertEquals([1, 2, 3], result[0])
+        assertEquals([2, 3, 4], result[1])
+        assertEquals([3, 4, 5], result[2])
+    }
+
+    @Test
+    void testWindowedSizeEqualsStreamLength() {
+        // window size == stream size => exactly 1 window
+        def result = Gstream.of(1, 2, 3)
+                .windowed(3)
+                .toList()
+        assertEquals(1, result.size())
+        assertEquals([1, 2, 3], result[0])
+    }
+
+    @Test
+    void testWindowedSizeLargerThanStream() {
+        // window size > stream => no windows
+        def result = Gstream.of(1, 2)
+                .windowed(5)
+                .toList()
+        assertEquals(0, result.size())
+    }
+
+    @Test
+    void testWindowedSizeOne() {
+        // window size 1 => each element is its own window
+        def result = Gstream.of(1, 2, 3)
+                .windowed(1)
+                .toList()
+        assertEquals(3, result.size())
+        assertEquals([1], result[0])
+        assertEquals([2], result[1])
+        assertEquals([3], result[2])
+    }
+
+    // --- onErrorContinue: guard against infinite loop ---
+
+    @Test
+    void testOnErrorContinueBoundedErrors() {
+        // Every single element throws -- should hit the MAX_CONSECUTIVE_ERRORS guard
+        // (1000) and rethrow as IllegalStateException rather than looping forever.
+        // We need more than 1000 elements so the guard can trip.
+        def data = (1..1100).toList()
+        def stream = Gstream.from(data)
+                .map { throw new RuntimeException("always fails") }
+                .onErrorContinue { ex, val -> /* swallow */ }
+        assertThrows(IllegalStateException) {
+            stream.toList()
+        }
+    }
+
+    @Test
+    void testOnErrorContinueResetsCounterOnSuccess() {
+        // Error then success then error: counter resets on success, no false positive
+        def errors = []
+        def result = Gstream.of("1", "x", "2", "y", "3")
+                .map { it.toInteger() }
+                .onErrorContinue { ex, val -> errors << val }
+                .toList()
+        assertEquals([1, 2, 3], result)
+        assertEquals(2, errors.size())  // "x" and "y" both null (upstream parse failure)
+    }
+
+    @Test
+    void testOnErrorContinueNullHandlerThrows() {
+        def ex = assertThrows(NullPointerException) {
+            Gstream.of(1, 2, 3).onErrorContinue(null)
+        }
+        assertTrue(ex.message.contains("handler"))
+    }
+
+    // --- tee and mapMulti null-guard ---
+
+    @Test
+    void testTeeNullHandlerThrows() {
+        def ex = assertThrows(NullPointerException) {
+            Gstream.of(1, 2, 3).tee(null)
+        }
+        assertTrue(ex.message.contains("sideEffect"))
+    }
+
+    @Test
+    void testMapMultiNullMapperThrows() {
+        def ex = assertThrows(NullPointerException) {
+            Gstream.of(1, 2, 3).mapMulti(null)
+        }
+        assertTrue(ex.message.contains("mapper"))
+    }
+
+    // --- executeWith pool integration ---
+
+    @Test
+    void testExecuteWithPool() {
+        def pool = new org.softwood.pool.ConcurrentPool("test-gstream")
+        try {
+            def result = Gstream.of(1, 2, 3, 4, 5)
+                    .parallel()
+                    .executeWith(pool) { gs ->
+                        gs.filter { it % 2 == 0 }.toList()
+                    }
+            assertEquals([2, 4], result.sort())
+        } finally {
+            pool.shutdown()
+        }
+    }
+
+    @Test
+    void testExecuteWithClosedPoolThrows() {
+        def pool = new org.softwood.pool.ConcurrentPool("test-closed")
+        pool.shutdown()
+        assertThrows(IllegalStateException) {
+            Gstream.of(1, 2, 3).executeWith(pool) { gs -> gs.toList() }
+        }
+    }
+
+    @Test
+    void testExecuteWithNullPoolThrows() {
+        assertThrows(NullPointerException) {
+            Gstream.of(1, 2, 3).executeWith(null) { gs -> gs.toList() }
+        }
+    }
 }

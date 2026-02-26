@@ -71,3 +71,29 @@ If returning to this work:
 1. Read this file — only L17 remains (deferred)
 2. Run `gradle clean test` to verify green baseline
 3. L17 is a pure refactor of TaskGraph.groovy into delegate classes — no behaviour change
+
+
+---
+
+## Post-Hardening Bug Fixes (2026-02-26)
+
+### B1 — `TaskBase.execute()` reject vs accept [FIXED]
+**File:** `TaskBase.groovy`  
+**Issue:** In the `.recover {}` callback, a failed promise was calling `resultHolder.accept(err)` instead of `resultHolder.reject(err)`. This treated the exception as a successful value, so `Tasks.all()` / `Tasks.sequence()` never threw — they returned the RuntimeException object instead. Also caused `MissingMethodException` in sequence tests when the next task received an exception as `prev`.  
+**Fix:** Changed `resultHolder.accept(err)` → `resultHolder.reject(err)`.  
+**Tests fixed:** `TasksTest.testAllWithException`, `TasksTest.testSequenceWithException`
+
+### B2 — `TaskGraphDsl` missing `@Slf4j` [FIXED]
+**File:** `TaskGraphDsl.groovy`  
+**Issue:** `dependsOn()` called `log.debug(...)` but `@Slf4j` was never applied to the class, causing `MissingPropertyException: No such property: log` at runtime.  
+**Fix:** Added `import groovy.util.logging.Slf4j` and `@Slf4j` annotation.  
+**Test fixed:** `ParallelGatewayTaskTest.testParallelGatewayInGraph`
+
+### B3 — `ReceiveTaskTest` stale initial-state assertion [FIXED]
+**File:** `ReceiveTaskTest.groovy` (test only)  
+**Issue:** `testReceiveTaskStateTransitions` asserted `TaskState.SCHEDULED` as the initial state, but the H5 hardening fix changed `TaskBase` to initialise as `CREATED`. Test comment even said "not PENDING" but the asserted value was still wrong.  
+**Fix:** Updated assertion to `assertEquals(TaskState.CREATED, task.state)`.  
+**Test fixed:** `ReceiveTaskTest.testReceiveTaskStateTransitions`
+
+### Test suite baseline after fixes
+- **1226 passed, 42 ignored, 0 failed** (full suite)

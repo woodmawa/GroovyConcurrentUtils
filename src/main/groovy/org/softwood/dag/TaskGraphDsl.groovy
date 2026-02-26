@@ -1,5 +1,6 @@
 package org.softwood.dag
 
+import groovy.util.logging.Slf4j
 import org.softwood.dag.persistence.PersistenceConfig
 import org.softwood.dag.persistence.PersistenceConfigDsl
 import org.softwood.dag.task.DefaultTaskEventDispatcher
@@ -20,6 +21,7 @@ import org.softwood.dag.task.spi.TaskProviderRegistry
  *  
  * Supports deferred wiring - forks can reference tasks declared later in the DSL.
  */
+@Slf4j
 class TaskGraphDsl {
 
     private final TaskGraph graph

@@ -36,7 +36,8 @@ abstract class TaskBase<T> implements Task<T> {
     List<TaskBase> successors = []
 
     // State
-    TaskState state = NOT_STARTED
+    TaskState state = CREATED
+
     DataflowVariable<T> result = new DataflowVariable<T>()
 
     // Resilience
@@ -90,22 +91,27 @@ task.metadata = [
 
 [source,groovy]
 ----
-// Task states
+// Task states (H5 fix: PENDING/NOT_STARTED removed; CREATED is now the initial state)
 enum TaskState {
-    NOT_STARTED,      // Initial state
-    SCHEDULED,        // Scheduled for execution
-    WAITING_DEPENDENCIES,  // Waiting for predecessors
-    READY,            // Ready to execute
-    RUNNING,          // Currently executing
-    COMPLETED,        // Successfully completed
-    FAILED,           // Failed
-    SKIPPED,          // Skipped (condition false)
-    CANCELLED,        // Cancelled
-    RETRYING,         // Retrying after failure
-    PAUSED            // Paused
+    CREATED,     // Initial state - task constructed but not yet in graph scheduler
+    SCHEDULED,   // Graph has picked the task up; waiting for predecessors to complete
+    RUNNING,     // Currently executing
+    COMPLETED,   // Successfully completed
+    FAILED,      // Failed after exhausting all retries
+    SKIPPED,     // Not selected by a router/gateway
+    CANCELLED    // Cancelled due to upstream failure or explicit cancel()
 }
 
 // Check state
+if (task.state == RUNNING) {
+    println "Task is running"
+}
+
+// State transitions emit events
+task.on(TaskStateChanged.class) { event ->
+    println "${event.taskId} changed from ${event.oldState} to ${event.newState}"
+}
+
 if (task.state == RUNNING) {
     println "Task is running"
 }

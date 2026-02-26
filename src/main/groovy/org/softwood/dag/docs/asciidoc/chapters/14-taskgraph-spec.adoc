@@ -5,6 +5,60 @@
 This chapter introduces TaskGraphSpec, a fluent, Spock-inspired testing framework for TaskGraph workflows. Learn how to write clean, expressive tests with minimal boilerplate using the given-when-then pattern.
 --
 
+[NOTE]
+====
+*FULLY IMPLEMENTED* — `TaskGraphSpec`, `TaskGraphExecution`, and `TaskGraphVerifier` are published as a separate test-fixtures artifact. All 12 example tests pass.
+
+The framework lives in `src/testFixtures/groovy/org/softwood/dag/test/` and is built into a `*-test-fixtures.jar` alongside the main library jar. Consumers must explicitly opt in — see <<_dependency_setup>> below.
+====
+
+
+== Dependency Setup
+[[_dependency_setup]]
+
+The testing framework is distributed as a Gradle https://docs.gradle.org/current/userguide/java_test_fixtures.html[test-fixtures] artifact, keeping JUnit and test-support code out of the main library jar.
+
+=== Adding the Dependency (Gradle)
+
+In your consuming project's `build.gradle`:
+
+[source,groovy]
+----
+dependencies {
+    // Main library
+    implementation 'org.softwood:groovy-concurrent-utils:1.0-SNAPSHOT'
+
+    // Test framework (opt-in — only pulled onto test classpath)
+    testImplementation(testFixtures('org.softwood:groovy-concurrent-utils:1.0-SNAPSHOT'))
+}
+----
+
+The `testFixtures(...)` notation is built into Gradle 6.6+ — no extra plugins needed.
+
+=== Adding the Dependency (Maven)
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.softwood</groupId>
+    <artifactId>groovy-concurrent-utils</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <classifier>test-fixtures</classifier>
+    <scope>test</scope>
+</dependency>
+----
+
+=== Required Transitive Dependencies
+
+The test-fixtures artifact declares its own transitive dependencies, so these are pulled in automatically: `junit-jupiter-api`, `groovy`, and `slf4j-api`. If you need logging output in tests, add a runtime binding such as `logback-classic` to your own `testRuntimeOnly` configuration.
+
+=== Within GroovyConcurrentUtils Itself
+
+The example suite `TaskGraphSpecExample` (in `src/test/groovy/...`) works because `build.gradle` adds `sourceSets.testFixtures.output` to the test classpath and extends `testImplementation` from `testFixturesImplementation`. External consumers do not need this — the published jar handles it.
+
+
+
+
 == Overview
 
 TaskGraphSpec provides a dedicated base class for testing TaskGraph workflows with a clean, expressive API inspired by Spock Framework. It eliminates common testing boilerplate and provides powerful verification capabilities.

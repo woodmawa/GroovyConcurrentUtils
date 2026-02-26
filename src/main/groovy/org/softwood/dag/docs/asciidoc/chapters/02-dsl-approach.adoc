@@ -5,6 +5,13 @@
 This chapter explains why TaskGraph uses a Groovy DSL rather than XML configuration or annotations, and demonstrates the power and flexibility this provides.
 --
 
+[NOTE]
+====
+*FULLY IMPLEMENTED* — All DSL blocks shown in this chapter are live. This includes `task()` / `serviceTask()`, `fork {}`, `join {}`, `dependsOn`, `chainVia`, `globals`, as well as all task-type convenience methods: `httpTask()`, `scriptTask()`, `sqlTask()`, `noSqlTask()`, `messagingTask()`, `fileTask()`, `dataTransform()`, `timer()`, `businessRule()`, `loop()`, `callActivity()`, `saga()`, `parallel()`, and all gateway types via `task(id, TaskType.XXX)`.
+====
+
+
+
 == Why DSL Over XML/Annotations?
 
 TaskGraph chose a Groovy-based DSL approach for workflow definition. Let's explore why this was the right choice.

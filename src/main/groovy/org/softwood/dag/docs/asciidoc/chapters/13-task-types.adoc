@@ -5,6 +5,17 @@
 Complete reference for all built-in task types provided by TaskGraph. This chapter documents every concrete task implementation, its DSL features, configuration options, and usage examples.
 --
 
+[NOTE]
+====
+*FULLY IMPLEMENTED* — All concrete task types listed in this chapter exist as classes and are registered in `TaskType`. Every type has a dedicated DSL convenience method in `TaskGraphDsl` as well as being accessible via `task(id, TaskType.XXX) { ... }`.
+
+DSL convenience methods available inside `TaskGraph.build {}`: +
+`task()` / `serviceTask()` • `httpTask()` • `scriptTask()` • `sqlTask()` • `noSqlTask()` • `messagingTask()` • `fileTask()` • `dataTransform()` • `timer()` • `businessRule()` • `loop()` • `callActivity()` • `saga()` • `parallel()` / `parallelGateway()` • `fork()` • `join()`
+
+Note: Kafka is accessed via `messagingTask()` with a Kafka provider; S3/cloud storage via `ObjectStoreTask` directly.
+====
+
+
 == Overview
 
 TaskGraph provides 15+ concrete task types organized by category:

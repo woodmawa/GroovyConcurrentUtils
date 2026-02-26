@@ -235,6 +235,10 @@ TaskGraph.build {
     }
 }
 ```
+### Service Tasks
+
+> **Note:** `task()` is the primary DSL entry point; `serviceTask()` is an alias for it (M12 fix). Both are equivalent. All custom workflow logic is expressed through these — there are no separate `httpTask()`, `sqlTask()`, etc. DSL blocks. Concrete task types (HttpTask, SqlTask, MailTask…) are instantiated directly or via TaskFactory inside `action {}` closures.
+
 
 ### Service Tasks
 
@@ -368,25 +372,37 @@ fork("router") {
 Each task progresses through these states:
 
 ```
-SCHEDULED → RUNNING → COMPLETED
-                    → FAILED
-                    → SKIPPED (if routing doesn't select it)
+CREATED  (constructed, not yet in graph scheduler)
+    |
+    v
+SCHEDULED  -----> SKIPPED    (router did not select this task)
+    |               CANCELLED  (upstream failure before this task was scheduled)
+    v
+RUNNING
+    |
+    v
+COMPLETED
+    |
+FAILED     (all retry attempts exhausted)
 ```
 
 ### State Transitions
 
-1. **SCHEDULED**: Task created and added to graph
-2. **RUNNING**: Task execution started
-3. **COMPLETED**: Task finished successfully
-4. **FAILED**: Task threw exception or timed out
-5. **SKIPPED**: Task not selected by router
+1. **CREATED**: Task object constructed — initial state (H5 fix, replaces the old PENDING/NOT_STARTED)
+2. **SCHEDULED**: Graph has picked up the task and is waiting for its predecessors to complete
+3. **RUNNING**: Task execution started
+4. **COMPLETED**: Task finished successfully
+5. **FAILED**: Task threw exception or exhausted all retry attempts
+6. **SKIPPED**: Task not selected by a router/gateway
+7. **CANCELLED**: Task cancelled due to upstream failure or explicit `cancel()`
 
 ### Events
 
 Listen to task state changes:
 
 ```groovy
-def dispatcher = new DefaultTaskEventDispatcher()
+def dispatcher = new DefaultTaskEventDispatcher(graph)
+
 dispatcher.addEventListener { event ->
     println "${event.taskId}: ${event.taskState} at ${event.timestamp}"
 }

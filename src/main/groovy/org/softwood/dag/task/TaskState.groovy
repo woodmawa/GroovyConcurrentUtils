@@ -47,7 +47,11 @@ enum TaskState {
     boolean canTransitionTo(TaskState next) {
         switch (this) {
             case CREATED:
-                return next == SCHEDULED
+                // Normal graph path: CREATED -> SCHEDULED -> RUNNING
+                // Direct path: Tasks.all/sequence/any call execute() without markScheduled(),
+                // so CREATED -> RUNNING must be allowed for standalone task execution.
+                // CREATED -> SKIPPED/CANCELLED: upstream failure before this task was ever scheduled.
+                return next == SCHEDULED || next == RUNNING || next == SKIPPED || next == CANCELLED
             case SCHEDULED:
                 return next == RUNNING || next == SKIPPED || next == CANCELLED
             case RUNNING:

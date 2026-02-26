@@ -840,100 +840,104 @@ class TaskGraph {
      * Checks if graph execution is complete and resolves graphCompletionPromise if so
      */
     private void checkGraphCompletion() {
+        // --- Phase 1: decide inside the lock whether this call is the one that completes the graph ---
+        boolean shouldComplete = false
+        boolean hasFailed = false
+        ITask firstFailure = null
+
         synchronized (this) {
             int terminal = tasks.values().count { task ->
                 task.isCompleted() || task.isFailed() || task.isSkipped()
             }
 
-            if (terminal == totalTaskCount && graphCompletionPromise != null) {
-                // All tasks have reached terminal state
-                
-                // Check if any task failed
+            if (terminal == totalTaskCount && graphCompletionPromise != null && !graphCompletionPromise.isDone()) {
+                shouldComplete = true
                 def failedTasks = tasks.values().findAll { it.isFailed() }
-                
                 if (failedTasks) {
-                    // If any task failed, fail the graph promise with the first error
-                    def firstFailure = failedTasks[0]
-                    log.error "Graph execution failed due to task ${firstFailure.id}: ${firstFailure.error}"
-
-                    // Calculate execution time
-                    long executionTimeMs = startTime ?
-                        java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : 0
-
-                    // Emit GRAPH_FAILED event
-                    emitGraphEvent(GraphEventType.GRAPH_FAILED, [
-                        failedTaskId: firstFailure.id,
-                        failedTaskCount: failedTasks.size(),
-                        completedTaskCount: tasks.values().count { it.isCompleted() },
-                        totalTasks: totalTaskCount,
-                        executionTimeMs: executionTimeMs
-                    ])
-
-                    // Finalize persistence with failure info
-                    finalizePersistence(true, firstFailure.id, firstFailure.error)
-
-                    // Update cluster graph state
-                    if (clusteringEnabled && clusterGraphState != null) {
-                        try {
-                            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
-                            String key = "${graphId}-${runId}"
-                            GraphExecutionState graphState = clusterGraphState.get(key)
-                            if (graphState != null) {
-                                graphState.markFailed(firstFailure.id, firstFailure.error?.message)
-                                clusterGraphState.put(key, graphState)
-                            }
-                        } catch (Exception e) {
-                            log.warn "Failed to update cluster graph state on failure", e
-                        }
-                    }
-
-                    graphCompletionPromise.fail(firstFailure.error)
-                } else {
-                    // All tasks completed successfully - collect results
-                    List terminalResults = tasks.values()
-                        .findAll { it.successors.isEmpty() && it.isCompleted() }
-                        .collect { it.completionPromise?.get() }
-                        .findAll { it != null }
-
-                    // Calculate execution time
-                    long executionTimeMs = startTime ?
-                        java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : 0
-
-                    // Emit GRAPH_COMPLETED event
-                    emitGraphEvent(GraphEventType.GRAPH_COMPLETED, [
-                        completedTaskCount: tasks.values().count { it.isCompleted() },
-                        skippedTaskCount: tasks.values().count { it.isSkipped() },
-                        totalTasks: totalTaskCount,
-                        executionTimeMs: executionTimeMs
-                    ])
-
-                    // Finalize persistence with success
-                    finalizePersistence(false)
-
-                    // Update cluster graph state
-                    if (clusteringEnabled && clusterGraphState != null) {
-                        try {
-                            String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
-                            String key = "${graphId}-${runId}"
-                            GraphExecutionState graphState = clusterGraphState.get(key)
-                            if (graphState != null) {
-                                graphState.markCompleted()
-                                clusterGraphState.put(key, graphState)
-                            }
-                        } catch (Exception e) {
-                            log.warn "Failed to update cluster graph state on completion", e
-                        }
-                    }
-
-                    // Resolve the graph completion promise
-                    def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
-                    graphCompletionPromise.accept(result)
-
-                    log.debug "Graph execution completed with result: $result"
+                    hasFailed = true
+                    firstFailure = failedTasks[0]
                 }
             }
         }
+
+        // --- Phase 2: do the heavy work (including any blocking .get()) OUTSIDE the lock ---
+        if (!shouldComplete) return
+
+        long executionTimeMs = startTime ?
+            java.time.Duration.between(startTime, java.time.Instant.now()).toMillis() : 0
+
+        if (hasFailed) {
+            log.error "Graph execution failed due to task ${firstFailure.id}: ${firstFailure.error}"
+
+            emitGraphEvent(GraphEventType.GRAPH_FAILED, [
+                failedTaskId: firstFailure.id,
+                failedTaskCount: tasks.values().count { it.isFailed() },
+                completedTaskCount: tasks.values().count { it.isCompleted() },
+                totalTasks: totalTaskCount,
+                executionTimeMs: executionTimeMs
+            ])
+
+            finalizePersistence(true, firstFailure.id, firstFailure.error)
+
+            if (clusteringEnabled && clusterGraphState != null) {
+                try {
+                    String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+                    String key = "${graphId}-${runId}"
+                    GraphExecutionState graphState = clusterGraphState.get(key)
+                    if (graphState != null) {
+                        graphState.markFailed(firstFailure.id, firstFailure.error?.message)
+                        clusterGraphState.put(key, graphState)
+                    }
+                } catch (Exception e) {
+                    log.warn "Failed to update cluster graph state on failure", e
+                }
+            }
+
+            graphCompletionPromise.fail(firstFailure.error)
+
+        } else {
+            // Collect terminal results outside the lock - tasks are COMPLETED so their
+            // completionPromise is already resolved; bounded get() is just defensive.
+            List terminalResults = tasks.values()
+                .findAll { it.successors.isEmpty() && it.isCompleted() }
+                .collect {
+                    try { it.completionPromise?.get(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                    catch (Exception ignored) { null }
+                }
+                .findAll { it != null }
+
+            emitGraphEvent(GraphEventType.GRAPH_COMPLETED, [
+                completedTaskCount: tasks.values().count { it.isCompleted() },
+                skippedTaskCount:   tasks.values().count { it.isSkipped() },
+                totalTasks:         totalTaskCount,
+                executionTimeMs:    executionTimeMs
+            ])
+
+            finalizePersistence(false)
+
+            if (clusteringEnabled && clusterGraphState != null) {
+                try {
+                    String graphId = ctx.globals.graphId ?: "graph-${System.currentTimeMillis()}"
+                    String key = "${graphId}-${runId}"
+                    GraphExecutionState graphState = clusterGraphState.get(key)
+                    if (graphState != null) {
+                        graphState.markCompleted()
+                        clusterGraphState.put(key, graphState)
+                    }
+                } catch (Exception e) {
+                    log.warn "Failed to update cluster graph state on completion", e
+                }
+            }
+
+            def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
+            graphCompletionPromise.accept(result)
+            log.debug "Graph execution completed with result: $result"
+        }
     }
+
+    // --------------------------------------------------------------------
+    // Scheduler
+    // --------------------------------------------------------------------
 
     // --------------------------------------------------------------------
     // Scheduler

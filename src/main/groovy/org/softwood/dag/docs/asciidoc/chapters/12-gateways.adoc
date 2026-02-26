@@ -5,6 +5,30 @@
 Complete reference for all gateway types in TaskGraph. Gateways control workflow routing, enabling conditional logic, parallel execution, and complex orchestration patterns.
 --
 
+[NOTE]
+====
+*FULLY IMPLEMENTED* — All gateway and router types are implemented as concrete classes extending `RouterTask` (or `TaskBase` for `EventGatewayTask`), all registered via `TaskType` enum.
+
+Gateway types are created via the generic `task(id, TaskType.XXX) { ... }` DSL, or via dedicated convenience methods where provided.
+
+[cols="1,1,2"]
+|===
+|Class |TaskType |DSL entry point
+
+|`ExclusiveGatewayTask` |`EXCLUSIVE_GATEWAY` |`task(id, TaskType.EXCLUSIVE_GATEWAY) { when { ... } route "x"; otherwise "y" }`
+|`ParallelGatewayTask` |`PARALLEL_GATEWAY` |`parallel(id) { branches "a","b","c" }` or `parallelGateway(id) { ... }`
+|`InclusiveRouterTask` |`INCLUSIVE_GATEWAY` |`task(id, TaskType.INCLUSIVE_GATEWAY) { route "x" when { ... }; route "y" when { ... } }`
+|`EventGatewayTask` |`EVENT_GATEWAY` |`task(id, TaskType.EVENT_GATEWAY) { on "evt" trigger { ... }; on "timeout" after Duration.ofHours(24) { ... } }`
+|`SwitchRouterTask` |`SWITCH_ROUTER` |`task(id, TaskType.SWITCH_ROUTER) { switchOn { it.status }; case_("A") route "x"; default_ "y" }`
+|`DynamicRouterTask` |`DYNAMIC_ROUTER` |`task(id, TaskType.DYNAMIC_ROUTER) { routingLogic { prev -> ["taskA", "taskB"] } }`
+|`ShardingRouterTask` |`SHARDING_ROUTER` |`task(id, TaskType.SHARDING_ROUTER) { shardSource { prev -> prev.items }; shardCount 4; templateTargetId "worker" }`
+|`ConditionalForkTask` |`CONDITIONAL_FORK` |`task(id, TaskType.CONDITIONAL_FORK) { ... }`
+|===
+
+All implement `IDecisionTask<T>` (which extends `ITask<T>`). The `fork {}` and `join {}` DSL blocks provide higher-level wiring that composes these gateway tasks with `ExclusiveGatewayBuilder` / `SwitchRouterBuilder`.
+====
+
+
 == Overview
 
 Gateways are decision points in workflows that control execution paths. TaskGraph provides several gateway types:

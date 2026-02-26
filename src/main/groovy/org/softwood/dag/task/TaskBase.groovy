@@ -784,7 +784,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
             lastError = err
             transitionState(TaskState.FAILED)
             emitErrorEvent(err)
-            resultHolder.accept(err)   // signal failure to waiting successors
+            resultHolder.reject(err)   // signal failure to waiting successors
             throw err
         }
 

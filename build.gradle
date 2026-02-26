@@ -6,6 +6,7 @@ import org.gradle.plugins.signing.Sign
 plugins {
     id 'groovy'
     id 'java-library'
+    id 'java-test-fixtures'
     id 'idea'
     id "org.asciidoctor.jvm.convert" version "4.0.5"
     id 'maven-publish'
@@ -58,6 +59,12 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // test-fixtures jar - JUnit + Groovy available to consumers of the fixtures artifact
+    testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
+    testFixturesImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
+    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
     testImplementation 'org.apache.groovy:groovy-test:5.0.2'
     testImplementation 'io.vertx:vertx-junit5:5.0.5'
     testImplementation("io.projectreactor:reactor-test:3.8.0")
@@ -65,6 +72,13 @@ dependencies {
     testImplementation 'org.spockframework:spock-core:2.4-groovy-5.0'
     testImplementation 'org.wiremock:wiremock:3.3.1'
     testImplementation 'com.h2database:h2:2.2.224'
+
+    // test-fixtures jar: TaskGraphSpec base class + verifier for library consumers
+    testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
+    testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
+    testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
+    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
+    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.20"
 }
 
 jar {
@@ -79,6 +93,24 @@ java {
 
 tasks.withType(JavaCompile).configureEach {
     options.release = 25
+}
+
+// Make testFixtures classes available to the test source set at runtime
+// (needed so TaskGraphSpecExample can extend TaskGraphSpec which lives in testFixtures)
+configurations {
+    testImplementation.extendsFrom(testFixturesImplementation)
+}
+
+dependencies {
+    testImplementation sourceSets.testFixtures.output
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "short"
+    }
 }
 
 /**

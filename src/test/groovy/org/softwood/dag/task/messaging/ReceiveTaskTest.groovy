@@ -573,13 +573,14 @@ class ReceiveTaskTest {
     void testReceiveTaskStateTransitions() {
         def task = new ReceiveTask("state-test", "State Test", ctx)
         
-        // Tasks start in SCHEDULED state (not PENDING)
-        assertEquals(TaskState.SCHEDULED, task.state)
-        
+        // Tasks start in CREATED state (H5 fix - initial state is CREATED, not SCHEDULED)
+        assertEquals(TaskState.CREATED, task.state)
+
         task.correlationKey { prev -> "state-correlation" }
         
         def prevPromise = ctx.promiseFactory.createPromise(null)
         def promise = task.execute(prevPromise)
+
         
         // Task should be in RUNNING state while waiting
         assertEquals(TaskState.RUNNING, task.state)

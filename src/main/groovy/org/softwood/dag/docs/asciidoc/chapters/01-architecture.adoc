@@ -372,22 +372,26 @@ workflow.addListener(new GraphEventListener() {
 Each task progresses through defined states:
 
 ....
-    NOT_STARTED
+    CREATED
          |
          v
-    SCHEDULED -----> SKIPPED (if condition false)
+    SCHEDULED -----> SKIPPED  (router/gateway did not select this task)
+         |           |
+         |           v
+         |       CANCELLED    (upstream failure before this task was scheduled)
+         v
+    RUNNING
          |
          v
-    RUNNING --------> RETRYING (if retry configured)
-         |               |
-         v               v
-    COMPLETED      RUNNING (retry attempt)
-         |               |
-         |               v
-         |          COMPLETED/FAILED
+    COMPLETED
+         |
+         v
+    FAILED      (all retry attempts exhausted)
+         |
          v
     (propagate to successors)
 ....
+
 
 === Concurrency Control
 

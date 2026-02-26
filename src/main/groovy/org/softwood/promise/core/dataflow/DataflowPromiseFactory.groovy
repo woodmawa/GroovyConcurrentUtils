@@ -40,6 +40,17 @@ class DataflowPromiseFactory implements PromiseFactory {
     }
 
     /**
+     * Create factory backed by a specific ExecutorPool.
+     * This is the preferred constructor when wiring from TaskContext so the
+     * hardened ConcurrentPool backs all async task execution.
+     *
+     * @param pool pool to use for async task execution
+     */
+    DataflowPromiseFactory(ExecutorPool pool) {
+        this(new DataflowFactory(pool))
+    }
+
+    /**
      * Create factory using current context pool.
      */
     DataflowPromiseFactory() {

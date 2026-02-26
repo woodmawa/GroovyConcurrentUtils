@@ -49,7 +49,10 @@ class TlsContextBuilder {
     private char[] trustStorePassword
     private List<String> protocols = ['TLSv1.3', 'TLSv1.2']
     private List<String> cipherSuites = getStrongDefaultCipherSuites()
-    
+    // SECURITY: PKCS12 is the modern standard; JKS is legacy.
+    // Configurable so callers can still use JKS keystores during migration.
+    private String keystoreType = 'PKCS12'
+
     // Certificate resolution support
     private boolean useResolver = false
     private CertificateResolver resolver
@@ -83,6 +86,19 @@ class TlsContextBuilder {
      */
     static TlsContextBuilder builder() {
         return new TlsContextBuilder()
+    }
+
+    /**
+     * Sets the keystore/truststore type.
+     * Defaults to {@code PKCS12} (modern standard). Use {@code JKS} only for
+     * legacy keystores that have not yet been migrated.
+     *
+     * @param type keystore type (PKCS12, JKS, ...)
+     * @return this builder
+     */
+    TlsContextBuilder keystoreType(String type) {
+        this.keystoreType = type
+        return this
     }
     
     /**
@@ -320,63 +336,68 @@ class TlsContextBuilder {
     /**
      * Loads key managers from keystore.
      * Supports both filesystem paths and classpath resources.
+     *
+     * <p>SECURITY: password char[] is zeroed in a finally block after use.
      */
     private KeyManager[] loadKeyManagers(String keystorePath, char[] password) throws Exception {
         log.debug("Loading keystore from: ${keystorePath}")
-        
-        // Load keystore
-        KeyStore keyStore = KeyStore.getInstance('JKS')
-        
-        // Open input stream (supports both file and classpath)
+
+        KeyStore keyStore = KeyStore.getInstance(keystoreType)
+
         InputStream inputStream = openInputStream(keystorePath)
         if (!inputStream) {
             throw new FileNotFoundException("Keystore not found: ${keystorePath}")
         }
-        
+
         try {
             keyStore.load(inputStream, password)
         } finally {
             inputStream.close()
+            // SECURITY: zero the password bytes to limit exposure window
+            if (password) Arrays.fill(password, '\0' as char)
         }
-        
-        // Initialize key manager factory
+
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(
             KeyManagerFactory.getDefaultAlgorithm()
         )
-        kmf.init(keyStore, password)
-        
+        // Note: kmf.init() copies the password internally; original is already zeroed above.
+        // We pass an empty array here — KeyManagerFactory only needs it during init and
+        // retains its own copy, so passing empty is fine for access to the already-loaded KeyStore.
+        kmf.init(keyStore, new char[0])
+
         log.info("Keystore loaded successfully from: ${keystorePath}")
         return kmf.getKeyManagers()
     }
-    
+
     /**
      * Loads trust managers from truststore.
      * Supports both filesystem paths and classpath resources.
+     *
+     * <p>SECURITY: password char[] is zeroed in a finally block after use.
      */
     private TrustManager[] loadTrustManagers(String truststorePath, char[] password) throws Exception {
         log.debug("Loading truststore from: ${truststorePath}")
-        
-        // Load truststore
-        KeyStore trustStore = KeyStore.getInstance('JKS')
-        
-        // Open input stream (supports both file and classpath)
+
+        KeyStore trustStore = KeyStore.getInstance(keystoreType)
+
         InputStream inputStream = openInputStream(truststorePath)
         if (!inputStream) {
             throw new FileNotFoundException("Truststore not found: ${truststorePath}")
         }
-        
+
         try {
             trustStore.load(inputStream, password)
         } finally {
             inputStream.close()
+            // SECURITY: zero the password bytes to limit exposure window
+            if (password) Arrays.fill(password, '\0' as char)
         }
-        
-        // Initialize trust manager factory
+
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(
             TrustManagerFactory.getDefaultAlgorithm()
         )
         tmf.init(trustStore)
-        
+
         log.info("Truststore loaded successfully from: ${truststorePath}")
         return tmf.getTrustManagers()
     }

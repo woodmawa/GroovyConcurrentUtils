@@ -35,7 +35,7 @@ class ObjectStoreTask extends TaskBase<Object> {
     // Constructor
     // =========================================================================
     
-    ObjectStoreTask(String id, String name, ctx) {
+    ObjectStoreTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
 

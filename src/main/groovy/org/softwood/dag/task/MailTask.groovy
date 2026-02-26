@@ -143,7 +143,7 @@ class MailTask extends TaskBase<Object> {
     // Constructors
     // =========================================================================
 
-    MailTask(String id, String name, ctx) {
+    MailTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
 

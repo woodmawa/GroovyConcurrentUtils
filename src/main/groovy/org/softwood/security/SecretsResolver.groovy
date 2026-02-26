@@ -3,9 +3,11 @@ package org.softwood.security
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 
+import java.util.concurrent.atomic.AtomicReference
+
 /**
  * Simple secrets resolver that reads from environment variables and system properties.
- * 
+ *
  * <p>This is a basic implementation suitable for development and simple deployments.
  * For production, integrate with a proper secrets manager like:</p>
  * <ul>
@@ -14,11 +16,11 @@ import groovy.util.logging.Slf4j
  *   <li>Google Secret Manager</li>
  *   <li>HashiCorp Vault</li>
  * </ul>
- * 
+ *
  * <p><strong>NEW in 2.1:</strong> Supports pluggable {@link SecretManager} implementations.
  * By default uses {@link EnvironmentSecretManager} (environment variables), but can
  * be configured to use Vault, AWS, Azure, or custom implementations.</p>
- * 
+ *
  * <h2>Basic Usage (Default - Environment Variables)</h2>
  * <pre>
  * // In config.groovy
@@ -33,14 +35,14 @@ import groovy.util.logging.Slf4j
  *         }
  *     }
  * }
- * 
+ *
  * // Set environment variable
  * export TLS_KEYSTORE_PASSWORD=mySecretPassword
- * 
+ *
  * // Or system property
  * java -DTLS_KEYSTORE_PASSWORD=mySecretPassword -jar app.jar
  * </pre>
- * 
+ *
  * <h2>Advanced Usage (External Secret Manager)</h2>
  * <pre>
  * // Configure Vault (optional)
@@ -50,61 +52,63 @@ import groovy.util.logging.Slf4j
  * )
  * vaultManager.initialize()
  * SecretsResolver.setSecretManager(vaultManager)
- * 
+ *
  * // Now resolve uses Vault
  * String password = SecretsResolver.resolve('DB_PASSWORD')
  * </pre>
- * 
+ *
  * @since 2.0.0
  */
 @Slf4j
 @CompileStatic
 class SecretsResolver {
-    
-    // Secret Manager (pluggable)
-    private static SecretManager secretManager = new EnvironmentSecretManager()
-    
+
+    // SECURITY: AtomicReference for thread-safe publish/read of secretManager.
+    // A plain static field would be a data race between setSecretManager() and resolve().
+    private static final AtomicReference<SecretManager> secretManagerRef =
+        new AtomicReference<>(new EnvironmentSecretManager())
+
     /**
      * Sets a custom secret manager implementation.
-     * 
+     *
      * <p><strong>OPTIONAL:</strong> By default, SecretsResolver uses
      * {@link EnvironmentSecretManager}. Set a custom manager to use
      * Vault, AWS, Azure, or your own implementation.</p>
-     * 
+     *
      * @param manager the secret manager to use
      */
     static void setSecretManager(SecretManager manager) {
         if (!manager) {
             throw new IllegalArgumentException("SecretManager cannot be null")
         }
-        secretManager = manager
+        secretManagerRef.set(manager)
         log.info("Secret manager changed to: {}", manager.getManagerName())
     }
-    
+
     /**
      * Gets the current secret manager.
-     * 
+     *
      * @return the active secret manager
      */
     static SecretManager getSecretManager() {
-        return secretManager
+        return secretManagerRef.get()
     }
-    
+
     /**
      * Resets to default environment variable manager.
      * Useful for testing or reset scenarios.
      */
     static void resetToDefault() {
-        secretManager = new EnvironmentSecretManager()
+        secretManagerRef.set(new EnvironmentSecretManager())
         log.info("Secret manager reset to default (Environment)")
     }
-    
+
     /**
      * Resolves a secret using the configured {@link SecretManager}.
-     * 
+     *
      * <p>By default uses environment variables and system properties.
      * If a custom SecretManager is configured (Vault, AWS, etc.), uses that instead.</p>
-     * 
+     *
      * @param key secret name (e.g., 'TLS_KEYSTORE_PASSWORD')
      * @return secret value or null if not found
      */
@@ -112,24 +116,25 @@ class SecretsResolver {
         if (!key) {
             return null
         }
-        
+
+        SecretManager manager = secretManagerRef.get()
         try {
-            String value = secretManager.getSecret(key)
+            String value = manager.getSecret(key)
             if (value) {
-                log.trace("Secret resolved from {}", secretManager.getManagerName())
+                log.trace("Secret resolved from {}", manager.getManagerName())
             } else {
-                log.trace("Secret not found in {}", secretManager.getManagerName())
+                log.trace("Secret not found in {}", manager.getManagerName())
             }
             return value
         } catch (Exception e) {
-            log.error("Error resolving secret from {}", secretManager.getManagerName(), e)
+            log.error("Error resolving secret from {}", manager.getManagerName(), e)
             return null
         }
     }
-    
+
     /**
      * Resolves a secret with a default value.
-     * 
+     *
      * @param key secret name
      * @param defaultValue value to return if secret not found
      * @return secret value or default
@@ -138,33 +143,33 @@ class SecretsResolver {
         def value = resolve(key)
         return value ?: defaultValue
     }
-    
+
     /**
      * Resolves a required secret using the configured {@link SecretManager}.
-     * 
+     *
      * @param key secret name
      * @return secret value
      * @throws IllegalStateException if secret not found
      */
     static String resolveRequired(String key) {
         try {
-            return secretManager.getRequiredSecret(key)
+            return secretManagerRef.get().getRequiredSecret(key)
         } catch (Exception e) {
-            // SECURITY: Don't reveal which key is missing
+            // SECURITY: Don't reveal which key is missing in the public exception
             throw new IllegalStateException("Required secret not found")
         }
     }
-    
+
     /**
      * Checks if a secret exists in the configured {@link SecretManager}.
-     * 
+     *
      * @param key secret name
      * @return true if secret exists
      */
     static boolean exists(String key) {
-        return secretManager.secretExists(key)
+        return secretManagerRef.get().secretExists(key)
     }
-    
+
     /**
      * Completely masks a secret key for logging.
      * SECURITY: Returns generic placeholder to avoid any information leakage.
@@ -172,7 +177,7 @@ class SecretsResolver {
     private static String maskKey(String key) {
         return "<secret>"
     }
-    
+
     /**
      * Completely masks a secret value.
      * SECURITY: Never log any part of actual secrets.

@@ -17,6 +17,11 @@ import java.util.function.Function
  * Provides a simpler API for executing independent tasks that share a common context.
  * Similar to Dataflows API but works with ITask instances.
  *
+ * <p><strong>Thread resource management:</strong> Each call to all(), any(), sequence(),
+ * and parallel() creates a TaskContext (with its own ExecutorPool) that is closed
+ * automatically when the call completes. For withContext(), the caller receives the
+ * context and is responsible for calling ctx.close() when done.</p>
+ *
  * <h3>Usage Examples:</h3>
  * <pre>
  * // Execute multiple tasks and collect all results
@@ -47,43 +52,40 @@ class Tasks {
     /**
      * Execute multiple tasks and wait for ALL to complete.
      * Returns a list of all results in the order tasks were defined.
-     *
-     * FIX: Explicitly collect promises in a loop instead of using .collect {}
-     * to avoid Groovy closure issues.
+     * Pool is automatically closed after completion (FIX C4/M14).
      */
     static <R> List<R> all(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
-        TasksDsl tasksDsl = new TasksDsl(ctx)
+        try {
+            TasksDsl tasksDsl = new TasksDsl(ctx)
+            dsl.delegate = tasksDsl
+            dsl.resolveStrategy = Closure.DELEGATE_FIRST
+            dsl.call(ctx)
 
-        dsl.delegate = tasksDsl
-        dsl.resolveStrategy = Closure.DELEGATE_FIRST
-        dsl.call(ctx)
+            List<Promise<?>> promises = []
+            for (ITask task : tasksDsl.tasks) {
+                log.debug "Tasks.all(): executing task ${task.id}"
+                Promise<?> nullPromise = ctx.promiseFactory.createPromise()
+                nullPromise.accept(null)
+                promises.add(task.execute(nullPromise))
+            }
 
-        // Execute all tasks and collect promises - EXPLICIT LOOP
-        List<Promise<?>> promises = []
-        for (ITask task : tasksDsl.tasks) {
-            log.debug "Tasks.all(): executing task ${task.id}"
-            Promise<?> nullPromise = ctx.promiseFactory.createPromise()
-            nullPromise.accept(null)
-            Promise<?> resultPromise = task.execute(nullPromise)
-            promises.add(resultPromise)
+            log.debug "Tasks.all(): waiting for ${promises.size()} tasks to complete"
+            List<R> results = []
+            for (Promise<?> promise : promises) {
+                results.add(promise.get() as R)
+            }
+            log.debug "Tasks.all(): all tasks completed, returning ${results.size()} results"
+            return results
+        } finally {
+            ctx.close()
         }
-
-        // ✅ FIX: Wait individually and collect manually instead of Promises.all()
-        log.debug "Tasks.all(): waiting for ${promises.size()} tasks to complete"
-        List<R> results = []
-        for (Promise<?> promise : promises) {
-            Object result = promise.get()  // Wait for this promise
-            results.add(result as R)        // Collect the result
-        }
-        log.debug "Tasks.all(): all tasks completed, returning ${results.size()} results"
-
-        return results
     }
 
     /**
      * Execute multiple tasks and return the FIRST to complete.
      * Other tasks will continue executing but their results are ignored.
+     * Pool is automatically closed after the first result is obtained (FIX C4/M14).
      *
      * <pre>
      * def winner = Tasks.any { ctx ->
@@ -98,31 +100,32 @@ class Tasks {
      */
     static <S> S any(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
-        TasksDsl tasksDsl = new TasksDsl(ctx)
+        try {
+            TasksDsl tasksDsl = new TasksDsl(ctx)
+            dsl.delegate = tasksDsl
+            dsl.resolveStrategy = Closure.DELEGATE_FIRST
+            dsl.call(ctx)
 
-        dsl.delegate = tasksDsl
-        dsl.resolveStrategy = Closure.DELEGATE_FIRST
-        dsl.call(ctx)
+            List<Promise<?>> promises = []
+            for (ITask task : tasksDsl.tasks) {
+                log.debug "Tasks.any(): executing task ${task.id}"
+                Promise<?> nullPromise = ctx.promiseFactory.createPromise()
+                nullPromise.accept(null)
+                promises.add(task.execute(nullPromise))
+            }
 
-        // Execute all tasks and collect promises - use EXPLICIT LOOP
-        List<Promise<?>> promises = []
-        for (ITask task : tasksDsl.tasks) {
-            log.debug "Tasks.any(): executing task ${task.id}"
-            Promise<?> nullPromise = ctx.promiseFactory.createPromise()
-            nullPromise.accept(null)
-            Promise<?> resultPromise = task.execute(nullPromise)
-            promises.add(resultPromise)
+            log.debug "Tasks.any(): racing ${promises.size()} tasks"
+            Promise<?> anyPromise = Promises.any(promises)
+            return anyPromise.get() as S
+        } finally {
+            ctx.close()
         }
-
-        // Wait for first to complete
-        log.debug "Tasks.any(): racing ${promises.size()} tasks"
-        Promise<?> anyPromise = Promises.any(promises)
-        return anyPromise.get() as S
     }
 
     /**
      * Execute tasks sequentially, passing result of previous to next.
      * Creates a pipeline where each task receives the previous task's result.
+     * Pool is automatically closed after completion (FIX C4/M14).
      *
      * <pre>
      * def result = Tasks.sequence { ctx ->
@@ -138,23 +141,25 @@ class Tasks {
      */
     static <U> U sequence(@DelegatesTo(TasksDsl) Closure dsl) {
         TaskContext ctx = new TaskContext()
-        TasksDsl tasksDsl = new TasksDsl(ctx)
+        try {
+            TasksDsl tasksDsl = new TasksDsl(ctx)
+            dsl.delegate = tasksDsl
+            dsl.resolveStrategy = Closure.DELEGATE_FIRST
+            dsl.call(ctx)
 
-        dsl.delegate = tasksDsl
-        dsl.resolveStrategy = Closure.DELEGATE_FIRST
-        dsl.call(ctx)
+            Promise<?> prevPromise = ctx.promiseFactory.createPromise()
+            prevPromise.accept(null)
 
-        // Execute tasks sequentially
-        Promise<?> prevPromise = ctx.promiseFactory.createPromise()
-        prevPromise.accept(null)
+            for (ITask task : tasksDsl.tasks) {
+                log.debug "Tasks.sequence(): executing task ${task.id}"
+                prevPromise = task.execute(prevPromise)
+            }
 
-        for (ITask task : tasksDsl.tasks) {
-            log.debug "Tasks.sequence(): executing task ${task.id}"
-            prevPromise = task.execute(prevPromise)
+            log.debug "Tasks.sequence(): waiting for final result"
+            return prevPromise.get() as U
+        } finally {
+            ctx.close()
         }
-
-        log.debug "Tasks.sequence(): waiting for final result"
-        return prevPromise.get() as U
     }
 
     // =========================================================================
@@ -163,17 +168,13 @@ class Tasks {
 
     /**
      * Execute a single task with Java lambda/Function style.
-     * Useful for simple one-off task execution.
+     * Pool is automatically closed after completion (FIX C4/M14).
      *
      * <pre>
-     * // Using lambda
      * def result = Tasks.execute(task -> {
      *     task.action { ctx, prev -> "Hello" }
      *     return task
      * })
-     *
-     * // Or method reference style
-     * def result = Tasks.execute(this::configureTask)
      * </pre>
      *
      * @param configurator function to configure the task
@@ -181,30 +182,26 @@ class Tasks {
      */
     static <V> V execute(Function<ServiceTask, ServiceTask> configurator) {
         TaskContext ctx = new TaskContext()
+        try {
+            ServiceTask task = TaskFactory.createServiceTask(
+                    "task_${UUID.randomUUID()}",
+                    "anonymous",
+                    ctx
+            )
+            configurator.apply(task)
 
-        // Create a service task
-        ServiceTask task = TaskFactory.createServiceTask(
-                "task_${UUID.randomUUID()}",
-                "anonymous",
-                ctx
-        )
-
-        // Apply configuration
-        configurator.apply(task)
-
-        // Execute
-        log.debug "Tasks.execute(): executing configured task"
-        Promise<?> nullPromise = ctx.promiseFactory.createPromise()
-        nullPromise.accept(null)
-        Promise<?> result = task.execute(nullPromise)
-
-        return result.get() as V
+            log.debug "Tasks.execute(): executing configured task"
+            Promise<?> nullPromise = ctx.promiseFactory.createPromise()
+            nullPromise.accept(null)
+            return task.execute(nullPromise).get() as V
+        } finally {
+            ctx.close()
+        }
     }
 
     /**
      * Execute a single task with Groovy closure style.
-     * The closure receives a wrapped task that automatically converts
-     * non-Promise results to Promises.
+     * Pool is automatically closed after completion (FIX C4/M14).
      *
      * <pre>
      * def result = Tasks.execute { task ->
@@ -217,46 +214,39 @@ class Tasks {
      */
     static <W> W execute(@DelegatesTo(ServiceTask) Closure configurator) {
         TaskContext ctx = new TaskContext()
+        try {
+            ServiceTask task = TaskFactory.createServiceTask(
+                    "task_${UUID.randomUUID()}",
+                    "anonymous",
+                    ctx
+            )
 
-        // Create a service task
-        ServiceTask task = TaskFactory.createServiceTask(
-                "task_${UUID.randomUUID()}",
-                "anonymous",
-                ctx
-        )
-
-        // Create a wrapper that intercepts action() calls and wraps results
-        def wrapper = [
-                action: { Closure userAction ->
-                    // Wrap the user's action to handle non-promise returns
-                    task.action { TaskContext taskCtx, Object prevValue ->
-                        Object result = userAction.call(taskCtx, prevValue)
-
-                        // If result is already a promise, return it; otherwise wrap it
-                        if (result instanceof Promise) {
-                            return result
-                        } else {
-                            // Wrap non-promise results in a resolved promise
-                            Promise wrapped = taskCtx.promiseFactory.createPromise()
-                            wrapped.accept(result)
-                            return wrapped
+            def wrapper = [
+                    action: { Closure userAction ->
+                        task.action { TaskContext taskCtx, Object prevValue ->
+                            Object result = userAction.call(taskCtx, prevValue)
+                            if (result instanceof Promise) {
+                                return result
+                            } else {
+                                Promise wrapped = taskCtx.promiseFactory.createPromise()
+                                wrapped.accept(result)
+                                return wrapped
+                            }
                         }
                     }
-                }
-        ]
+            ]
 
-        // Apply configuration with our wrapper
-        configurator.delegate = wrapper
-        configurator.resolveStrategy = Closure.DELEGATE_FIRST
-        configurator.call(wrapper)
+            configurator.delegate = wrapper
+            configurator.resolveStrategy = Closure.DELEGATE_FIRST
+            configurator.call(wrapper)
 
-        // Execute
-        log.debug "Tasks.execute(): executing configured task"
-        Promise<?> nullPromise = ctx.promiseFactory.createPromise()
-        nullPromise.accept(null)
-        Promise<?> result = task.execute(nullPromise)
-
-        return result.get() as W
+            log.debug "Tasks.execute(): executing configured task"
+            Promise<?> nullPromise = ctx.promiseFactory.createPromise()
+            nullPromise.accept(null)
+            return task.execute(nullPromise).get() as W
+        } finally {
+            ctx.close()
+        }
     }
 
     // =========================================================================
@@ -267,77 +257,82 @@ class Tasks {
      * Execute multiple independent tasks in parallel.
      * Unlike all(), doesn't wait - returns promises immediately.
      *
+     * <p><strong>Note:</strong> Because this returns live promises, the context
+     * is NOT closed automatically. Caller should close it after consuming all promises:
      * <pre>
-     * def promises = Tasks.parallel { ctx ->
+     * def (promises, ctx) = Tasks.parallelWithContext { ctx ->
      *     task("t1") { longRunningWork1() }
      *     task("t2") { longRunningWork2() }
      * }
      * // Do other work...
      * def results = promises.collect { it.get() }
+     * ctx.close()
      * </pre>
      *
      * @param dsl closure defining tasks
-     * @return list of promises for each task
+     * @return list of promises for each task (context NOT auto-closed)
      */
     static List<Promise<?>> parallel(@DelegatesTo(TasksDsl) Closure dsl) {
+        // NOTE: context deliberately not closed here since promises are still pending
+        // Caller must manage lifecycle. For auto-close, use all() instead.
         TaskContext ctx = new TaskContext()
         TasksDsl tasksDsl = new TasksDsl(ctx)
-
         dsl.delegate = tasksDsl
         dsl.resolveStrategy = Closure.DELEGATE_FIRST
         dsl.call(ctx)
 
-        // Execute all tasks and return promises - EXPLICIT LOOP
         List<Promise<?>> promises = []
         for (ITask task : tasksDsl.tasks) {
             log.debug "Tasks.parallel(): starting task ${task.id}"
             Promise<?> nullPromise = ctx.promiseFactory.createPromise()
             nullPromise.accept(null)
-            Promise<?> resultPromise = task.execute(nullPromise)
-            promises.add(resultPromise)
+            promises.add(task.execute(nullPromise))
         }
 
         return promises
     }
 
-
     /**
      * Execute tasks with a shared context and return the context.
      * Useful when tasks need to share state via context globals.
+     *
+     * <p><strong>Caller is responsible for closing the returned context</strong>
+     * to release pool threads.</p>
      *
      * <pre>
      * def ctx = Tasks.withContext { ctx ->
      *     task("t1") { ctx.globals.data = "shared"; "A" }
      *     task("t2") { ctx.globals.data + "B" }
      * }
-     * println ctx.globals.data // "shared"
+     * try {
+     *     println ctx.globals.data // "shared"
+     * } finally {
+     *     ctx.close()
+     * }
      * </pre>
      *
      * @param dsl closure defining tasks
-     * @return the shared TaskContext
+     * @return the shared TaskContext (caller must call close() when done)
      */
     static TaskContext withContext(@DelegatesTo(TasksDsl) Closure dsl) {
+        // NOTE: context is returned to caller who must close() it
         TaskContext ctx = new TaskContext()
         TasksDsl tasksDsl = new TasksDsl(ctx)
-
         dsl.delegate = tasksDsl
         dsl.resolveStrategy = Closure.DELEGATE_FIRST
         dsl.call(ctx)
 
-        // Execute all tasks - EXPLICIT LOOP
         List<Promise<?>> promises = []
         for (ITask task : tasksDsl.tasks) {
             log.debug "Tasks.withContext(): executing task ${task.id}"
             Promise<?> nullPromise = ctx.promiseFactory.createPromise()
             nullPromise.accept(null)
-            Promise<?> resultPromise = task.execute(nullPromise)
-            promises.add(resultPromise)
+            promises.add(task.execute(nullPromise))
         }
 
-        // ✅ FIX: Wait for each promise individually instead of Promises.all()
         log.debug "Tasks.withContext(): waiting for ${promises.size()} tasks individually"
         for (Promise<?> promise : promises) {
-            promise.get()  // Wait for this promise to complete
+            promise.get()
         }
         log.debug "Tasks.withContext(): all tasks completed"
 
@@ -380,9 +375,7 @@ class TasksDsl {
     ITask task(String id, @DelegatesTo(ServiceTask) Closure action) {
         ServiceTask task = TaskFactory.createServiceTask(id, id, ctx)
 
-        // Configure the task's action
         task.action { TaskContext taskCtx, Object prevValue ->
-            // Execute the user's closure
             action.delegate = task
             action.resolveStrategy = Closure.DELEGATE_FIRST
 
@@ -395,11 +388,9 @@ class TasksDsl {
                 result = action.call(taskCtx, prevValue)
             }
 
-            // If result is already a promise, return it; otherwise wrap it
             if (result instanceof Promise) {
                 return result
             } else {
-                // Wrap non-promise results in a resolved promise
                 Promise wrapped = taskCtx.promiseFactory.createPromise()
                 wrapped.accept(result)
                 return wrapped
@@ -420,11 +411,9 @@ class TasksDsl {
      */
     ITask task(String id, TaskType type, @DelegatesTo(ITask) Closure config) {
         ITask task = TaskFactory.createTask(type, id, id, ctx)
-
         config.delegate = task
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.call()
-
         tasks << task
         log.debug "TasksDsl: defined task ${task.id} of type ${type}"
         return task

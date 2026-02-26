@@ -107,6 +107,11 @@ class ForkDsl {
     }
 
     // Alias for dynamicRouter for convenience
+    /**
+     * M10: Alias for {@link #dynamicRouter}. Prefer dynamicRouter() for clarity.
+     * @deprecated Use dynamicRouter(routingLogic) instead
+     */
+    @Deprecated
     void route(Closure routingLogic) {
         dynamicRouter(routingLogic)
     }
@@ -146,6 +151,11 @@ class ForkDsl {
     }
 
     // Alias for conditionalFork
+    /**
+     * M10: Alias for {@link #conditionalFork}. Prefer conditionalFork() for clarity.
+     * @deprecated Use conditionalFork(targets, condition) instead
+     */
+    @Deprecated
     void conditionalOn(List<String> targets, Closure condition) {
         conditionalFork(targets, condition)
     }
@@ -172,7 +182,11 @@ class ForkDsl {
         log.debug("fork($id): created sharding router with ${shardCount} shards")
     }
 
-    // Alias for shardingRouter
+    /**
+     * M10: Alias for {@link #shardingRouter}. Prefer shardingRouter() for clarity.
+     * @deprecated Use shardingRouter(baseTaskName, shardCount, shardLogic) instead
+     */
+    @Deprecated
     void shard(String baseTaskName, int shardCount, Closure shardLogic) {
         shardingRouter(baseTaskName, shardCount, shardLogic)
     }

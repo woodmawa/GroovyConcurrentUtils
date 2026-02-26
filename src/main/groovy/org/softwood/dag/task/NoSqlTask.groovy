@@ -158,7 +158,7 @@ class NoSqlTask extends TaskBase<Object> {
     // Constructor
     // =========================================================================
     
-    NoSqlTask(String id, String name, ctx) {
+    NoSqlTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
     

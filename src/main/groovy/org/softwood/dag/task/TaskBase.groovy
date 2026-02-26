@@ -28,15 +28,23 @@ import org.softwood.dag.resilience.IdempotencyCacheEntry
  */
 @Slf4j
 @ToString(includeNames = true, includeFields = true, excludes = ['ctx', 'eventDispatcher'])
-abstract class TaskBase<T> implements ITask<T> {
+abstract class TaskBase<T> implements IGraphNode<T> {
 
     final String id
     final String name
-    volatile TaskState state = TaskState.SCHEDULED
+    // H5 fix: initial state is CREATED (not SCHEDULED - that happens when graph picks it up)
+    // H8 fix: use AtomicReference for guarded, race-free transitions
+    private final java.util.concurrent.atomic.AtomicReference<TaskState> _state =
+            new java.util.concurrent.atomic.AtomicReference<>(TaskState.CREATED)
+
+    TaskState getState() { _state.get() }
+    // Legacy setter kept so execute() / emitEvent() bare assignments still compile;
+    // prefer the transitionState() guard below for all new code.
+    void setState(TaskState s) { _state.set(s) }
     TaskEventDispatch eventDispatcher
 
-    // enable duck typing on context
-    def ctx
+    // L16 fix: typed as TaskContext (was 'def' - duck typing not needed here)
+    TaskContext ctx
 
     /**
      * Canonical DAG topology:
@@ -62,7 +70,7 @@ abstract class TaskBase<T> implements ITask<T> {
     // ----------------------------------------------------
     // constructor - expects id and a name and a graph ctx
     // ----------------------------------------------------
-    TaskBase(String id, String name, ctx) {
+    TaskBase(String id, String name, TaskContext ctx) {
         this.id = id
         this.name = name
         this.ctx = ctx
@@ -107,31 +115,64 @@ abstract class TaskBase<T> implements ITask<T> {
 
     Throwable getError() { lastError }
 
-    boolean getHasStarted() { state != TaskState.SCHEDULED }
+    // H5 fix: hasStarted means we've moved beyond CREATED/SCHEDULED - i.e. at least RUNNING
+    boolean getHasStarted() { state.ordinal() >= TaskState.RUNNING.ordinal() }
 
     boolean isCompleted() { state == TaskState.COMPLETED }
-    boolean isSkipped() { state == TaskState.SKIPPED }
-    boolean isFailed() { state == TaskState.FAILED }
+    boolean isSkipped()   { state == TaskState.SKIPPED }
+    boolean isFailed()    { state == TaskState.FAILED }
+    boolean isCancelled() { state == TaskState.CANCELLED }
+
+    /**
+     * H8 fix: Guarded state transition - only moves to `next` if current state
+     * is a valid predecessor according to TaskState.canTransitionTo().
+     * Returns true if transition succeeded, false if it was rejected (e.g. already terminal).
+     * Thread-safe via AtomicReference CAS loop.
+     */
+    boolean transitionState(TaskState next) {
+        while (true) {
+            TaskState current = _state.get()
+            if (!current.canTransitionTo(next)) {
+                log.debug "Task ${id}: rejected transition ${current} -> ${next} (illegal)"
+                return false
+            }
+            if (_state.compareAndSet(current, next)) {
+                log.debug "Task ${id}: state ${current} -> ${next}"
+                return true
+            }
+            // CAS failed - another thread changed state concurrently, retry
+        }
+    }
 
     void markScheduled() {
-        state = TaskState.SCHEDULED
-        emitEvent(TaskState.SCHEDULED)
+        if (transitionState(TaskState.SCHEDULED)) {
+            emitEvent(TaskState.SCHEDULED)
+        }
     }
 
     void markCompleted() {
-        state = TaskState.COMPLETED
-        emitEvent(TaskState.COMPLETED)
+        if (transitionState(TaskState.COMPLETED)) {
+            emitEvent(TaskState.COMPLETED)
+        }
     }
 
     void markFailed(Throwable error) {
-        lastError = error
-        state = TaskState.FAILED
-        emitErrorEvent(error)
+        if (transitionState(TaskState.FAILED)) {
+            lastError = error
+            emitErrorEvent(error)
+        }
     }
 
     void markSkipped() {
-        state = TaskState.SKIPPED
-        emitEvent(TaskState.SKIPPED)
+        if (transitionState(TaskState.SKIPPED)) {
+            emitEvent(TaskState.SKIPPED)
+        }
+    }
+
+    void markCancelled() {
+        if (transitionState(TaskState.CANCELLED)) {
+            emitEvent(TaskState.CANCELLED)
+        }
     }
 
     void setInjectedInput(Object data) {
@@ -715,35 +756,39 @@ abstract class TaskBase<T> implements ITask<T> {
     // ----------------------------------------------------
     Promise execute(Promise<?> previousPromise) {
 
-        state = TaskState.RUNNING
+        transitionState(TaskState.RUNNING)
         emitEvent(TaskState.RUNNING)
 
         log.debug "Task ${id}: execute() called with prevPromise present: $previousPromise"
 
+        // C1 fix: pre-create completionPromise and assign it BEFORE runAttempt fires.
+        // If the task completes synchronously, successor tasks reading completionPromise
+        // via buildPrevPromise() will find a non-null promise.
+        Promise<T> resultHolder = ctx.promiseFactory.createPromise()
+        completionPromise = resultHolder
+
+        log.debug "Task ${id}: execute() starting runAttempt (completionPromise pre-assigned)"
         Promise<T> attemptPromise = runAttempt(previousPromise)
 
-        log.debug "Task ${id}: execute() got attemptPromise"
-
-        // Build the full chained promise with completion/error callbacks.
-        // IMPORTANT: completionPromise must be set to the CHAINED promise (not the raw attemptPromise)
-        // so that successor tasks (which read completionPromise via buildPrevPromise()) only start
-        // after completion callbacks have fired and task state is fully updated.
-        def chainedPromise = attemptPromise.then { T result ->
+        // Wire completion/failure callbacks into the pre-assigned holder.
+        // then/recover return a NEW chained promise - we need to propagate that
+        // back into resultHolder by completing it once the chain resolves.
+        attemptPromise.then { T result ->
             log.debug "Task ${id}: completed with result: $result"
-            state = TaskState.COMPLETED
+            transitionState(TaskState.COMPLETED)
             emitEvent(TaskState.COMPLETED)
+            resultHolder.accept(result)
             result
         }.recover { Throwable err ->
             log.error "Task ${id}: failed with error: ${err.message}"
             lastError = err
-            state = TaskState.FAILED
+            transitionState(TaskState.FAILED)
             emitErrorEvent(err)
+            resultHolder.accept(err)   // signal failure to waiting successors
             throw err
         }
 
-        completionPromise = chainedPromise
-
-        return chainedPromise
+        return resultHolder
     }
 
     // ----------------------------------------------------

@@ -57,20 +57,23 @@ class TaskGraphDsl {
     }
 
     // ============================================================================
-    // ENHANCED: Task Creation with TaskFactory
+    // ============================================================================
+    // Task Creation — task() is the PRIMARY entry point
     // ============================================================================
 
     /**
-     * Create a service task (ENHANCED with TaskFactory)
+     * Create a generic task (defaults to SERVICE type).
+     * M12: This is the PRIMARY entry point. serviceTask() is an alias for this.
+     *
+     * Usage:
+     *   task("myTask") { action { ctx, prev -> "result" } }
      */
-    ITask serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
-        // Use TaskFactory instead of direct instantiation
+    ITask task(String id, @DelegatesTo(ServiceTask) Closure config) {
         def t = TaskFactory.createServiceTask(id, id, graph.ctx)
         t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        // Don't add saga steps to the outer graph
         if (!insideSagaBuild) {
             graph.addTask(t)
         }
@@ -78,20 +81,26 @@ class TaskGraphDsl {
     }
 
     /**
-     * Create a task by type string (for flexibility)
-     * 
+     * M12: Alias for task() - kept for backward compatibility.
+     * Prefer task() as the canonical form.
+     */
+    ITask serviceTask(String id, @DelegatesTo(ServiceTask) Closure config) {
+        return task(id, config)
+    }
+
+    /**
+     * Create a task by type string (for flexibility).
+     *
      * Usage:
      *   task("myTask", "service") { ... }
      *   task("router1", "dynamic-router") { ... }
      */
     ITask task(String id, String typeString, @DelegatesTo(ITask) Closure config) {
-        // Parse type string and create task via factory
         def t = TaskFactory.createTask(typeString, id, id, graph.ctx)
         t.eventDispatcher = new DefaultTaskEventDispatcher(graph)
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        // Don't add saga steps to the outer graph
         if (!insideSagaBuild) {
             graph.addTask(t)
         }
@@ -99,8 +108,8 @@ class TaskGraphDsl {
     }
 
     /**
-     * Create a task by TaskType enum (MOST TYPE-SAFE)
-     * 
+     * Create a task by TaskType enum (most type-safe).
+     *
      * Usage:
      *   task("myTask", TaskType.SERVICE) { ... }
      *   task("router1", TaskType.DYNAMIC_ROUTER) { ... }
@@ -111,21 +120,10 @@ class TaskGraphDsl {
         config.resolveStrategy = Closure.DELEGATE_FIRST
         config.delegate = t
         config.call()
-        // Don't add saga steps to the outer graph
         if (!insideSagaBuild) {
             graph.addTask(t)
         }
         return t
-    }
-
-    /**
-     * Generic task declaration (defaults to SERVICE type)
-     * 
-     * Usage:
-     *   task("myTask") { ... }  // Creates ServiceTask
-     */
-    ITask task(String id, @DelegatesTo(ITask) Closure config) {
-        return serviceTask(id, config)
     }
 
     // ============================================================================
@@ -443,46 +441,59 @@ class TaskGraphDsl {
      * 
      * For multiple dependencies, an implicit join task is created.
      */
+    /**
+     * Declare that {@code taskId} depends on one or more upstream tasks.
+     *
+     * <p>H6 fix: signature is dependsOn(downstream, upstream...) which matches
+     * the ITask.dependsOn() semantics: "downstream depends on upstream".
+     *
+     * <p>M13 fix: when multiple sources require an implicit join task, its name is
+     * deterministic: taskId-join (no UUID suffix) so it is visible in health snapshots.
+     *
+     * @param taskId       the downstream task that needs the upstreams to complete first
+     * @param dependencyIds one or more upstream task IDs that taskId depends on
+     */
     void dependsOn(String taskId, String... dependencyIds) {
         if (dependencyIds.length == 0) {
-            throw new IllegalArgumentException("dependsOn requires at least one dependency")
+            throw new IllegalArgumentException("dependsOn('${taskId}', ...) requires at least one upstream dependency")
         }
-        
+
         def task = graph.tasks[taskId]
         if (!task) {
             throw new IllegalArgumentException("dependsOn: unknown task '${taskId}'")
         }
-        
+
         if (dependencyIds.length == 1) {
-            // Simple 1-to-1 dependency - direct edge
             def depTask = graph.tasks[dependencyIds[0]]
             if (!depTask) {
-                throw new IllegalArgumentException("dependsOn: unknown dependency '${dependencyIds[0]}'")
+                throw new IllegalArgumentException("dependsOn: unknown upstream '${dependencyIds[0]}'")
             }
-            
             depTask.addSuccessor(task)
             task.addPredecessor(depTask)
         } else {
-            // Multiple dependencies → create implicit join task
-            def joinId = "${taskId}-join-" + UUID.randomUUID().toString().substring(0, 8)
+            // M13 fix: deterministic join name - no UUID suffix
+            def joinId = "${taskId}-join"
+            if (graph.tasks[joinId]) {
+                throw new IllegalArgumentException(
+                    "dependsOn: implicit join task '${joinId}' already exists. Use a different downstream task name.")
+            }
+            log.debug "dependsOn: creating implicit join task '${joinId}' for ${dependencyIds.length} upstreams"
             def joinTask = TaskFactory.createTask(TaskType.SERVICE, joinId, joinId, graph.ctx)
-            joinTask.action({ ctx, prevResults -> 
-                // Pass through all results as a list wrapped in a Promise
+            joinTask.action({ ctx, prevResults ->
                 ctx.promiseFactory.createPromise(prevResults)
             })
             joinTask.eventDispatcher = new DefaultTaskEventDispatcher(graph)
             graph.addTask(joinTask)
-            
-            // Wire: dependencies → join → task
+
             dependencyIds.each { depId ->
                 def depTask = graph.tasks[depId]
                 if (!depTask) {
-                    throw new IllegalArgumentException("dependsOn: unknown dependency '${depId}'")
+                    throw new IllegalArgumentException("dependsOn: unknown upstream '${depId}'")
                 }
                 depTask.addSuccessor(joinTask)
                 joinTask.addPredecessor(depTask)
             }
-            
+
             joinTask.addSuccessor(task)
             task.addPredecessor(joinTask)
         }
@@ -541,7 +552,8 @@ class TaskGraphDsl {
     // ----------------------------------------------------
     // Globals block → sets ctx.globals
     // ----------------------------------------------------
-    def globals(@DelegatesTo(Map) Closure body) {
+    // M11 fix: delegate is TaskBinding (implements IBinding), NOT Map - was wrong annotation
+    def globals(@DelegatesTo(TaskBinding) Closure body) {
         body.delegate = graph.ctx.globals
         body.resolveStrategy = Closure.DELEGATE_FIRST
         body.call()

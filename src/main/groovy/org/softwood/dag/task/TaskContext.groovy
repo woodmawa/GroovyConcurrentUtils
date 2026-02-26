@@ -13,8 +13,19 @@ import org.softwood.dag.resilience.RateLimiterRegistry
 import org.softwood.dag.resilience.DeadLetterQueue
 import org.softwood.dag.resilience.IdempotencyCache
 
+/**
+ * Shared context for a TaskGraph execution.
+ *
+ * <p>Owns the ExecutorPool and PromiseFactory used by all tasks in the graph.
+ * The PromiseFactory is wired to use the same pool so that the hardened
+ * ConcurrentPool backs all async task execution.</p>
+ *
+ * <p>Implements {@link Closeable}: call {@link #close()} when the graph is done
+ * to shut down the underlying pool and release threads. The Tasks utility
+ * methods do this automatically via try-with-resources.</p>
+ */
 @Slf4j
-class TaskContext {
+class TaskContext implements Closeable {
 
     final IBinding globals = new TaskBinding()
     final IBinding credentials = new TaskBinding()
@@ -37,41 +48,49 @@ class TaskContext {
     // Reference to the owning TaskGraph (set by TaskGraph when execution starts)
     def graph = null
 
-    //default empty constructor  - wont have a graph set, create a real ConcurrentPool
+    /**
+     * Default constructor - creates a dag-pool and wires it into the PromiseFactory.
+     * This ensures the hardened ConcurrentPool backs all async task execution.
+     */
     TaskContext() {
-        this.promiseFactory = new DataflowPromiseFactory()
         this.config = ConfigLoader.loadConfig()
         this.pool   = ExecutorPoolFactory.builder()
                 .name("dag-pool")
                 .build()
+        // FIX C2: pass pool into factory so all executeAsync uses the hardened pool
+        this.promiseFactory = new DataflowPromiseFactory(pool)
     }
 
-    //for testing
+    /**
+     * For testing - inject both pool and promiseFactory explicitly.
+     */
     TaskContext(ExecutorPool pool, PromiseFactory promiseFactory) {
         this.config = ConfigLoader.loadConfig()
         this.pool   = pool
         this.promiseFactory = promiseFactory
     }
 
-    // Explicit: inject a custom pool (FakePool or ConcurrentPool)
-    TaskContext (ExecutorPool pool) {
-        this.promiseFactory = new DataflowPromiseFactory()
+    /**
+     * Inject a custom pool; factory is wired to use it.
+     */
+    TaskContext(ExecutorPool pool) {
         this.config = ConfigLoader.loadConfig()
         this.pool   = pool
+        // FIX C2: factory uses the injected pool
+        this.promiseFactory = new DataflowPromiseFactory(pool)
     }
-
 
     TaskContext(Map config) {
-        this.promiseFactory = new DataflowPromiseFactory()
-        this.config = config ?: ConfigLoader.loadConfig()      // uses  ConfigLoader as fallback
+        this.config = config ?: ConfigLoader.loadConfig()
         this.pool   = ExecutorPoolFactory.builder()
                 .name("dag-pool")
-                .build()    // uses virtual threads if available
+                .build()
+        // FIX C2: factory uses the built pool
+        this.promiseFactory = new DataflowPromiseFactory(pool)
     }
 
-
     // -----------------------
-    // 💥 ADD BUILDER HERE
+    //  BUILDER
     // -----------------------
     static Builder builder() { new Builder() }
 
@@ -96,20 +115,18 @@ class TaskContext {
         }
 
         TaskContext build() {
-            // Default config if user doesn't supply one
             Map cfg = config ?: ConfigLoader.loadConfig()
 
             if (!pool) {
-                // Normal default behaviour
                 pool = ExecutorPoolFactory.builder()
                         .name("dag-pool")
                         .build()
             }
             if (!promiseFactory) {
-                promiseFactory = new DataflowPromiseFactory()
+                // FIX C2: default factory always wired to the pool
+                promiseFactory = new DataflowPromiseFactory(pool)
             }
 
-            // Reuse your existing constructor
             return new TaskContext(pool, promiseFactory)
         }
     }
@@ -124,16 +141,7 @@ class TaskContext {
     
     /**
      * Create or get a rate limiter using DSL configuration.
-     * 
-     * <h3>Example:</h3>
-     * <pre>
-     * ctx.rateLimiter("api-limiter") {
-     *     maxRequests 100
-     *     timeWindow Duration.ofMinutes(1)
-     *     strategy "sliding-window"
-     * }
-     * </pre>
-     * 
+     *
      * @param name unique name for the rate limiter
      * @param config DSL configuration closure
      * @return the rate limiter
@@ -144,9 +152,6 @@ class TaskContext {
     
     /**
      * Get or create the Dead Letter Queue for this context.
-     * Creates a default DLQ if one doesn't exist.
-     * 
-     * @return the dead letter queue
      */
     DeadLetterQueue getDeadLetterQueue() {
         if (deadLetterQueue == null) {
@@ -157,9 +162,6 @@ class TaskContext {
     
     /**
      * Get or create the Idempotency Cache for this context.
-     * Creates a default cache if one doesn't exist.
-     * 
-     * @return the idempotency cache
      */
     IdempotencyCache getIdempotencyCache() {
         if (idempotencyCache == null) {
@@ -167,4 +169,21 @@ class TaskContext {
         }
         return idempotencyCache
     }
-}
+
+    /**
+     * FIX C4: Shut down the pool when the context is done.
+     * Call this after graph completion to release threads.
+     * Idempotent - safe to call multiple times.
+     */
+    @Override
+    void close() {
+        try {
+            if (pool != null) {
+                log.debug "TaskContext.close(): shutting down pool '${pool.name ?: 'dag-pool'}'"
+                pool.shutdown()
+            }
+        } catch (Exception e) {
+            log.warn "TaskContext.close(): error shutting down pool", e
+        }
+    }
+}

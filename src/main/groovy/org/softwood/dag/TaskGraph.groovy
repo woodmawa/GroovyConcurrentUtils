@@ -230,12 +230,17 @@ class TaskGraph {
     private GraphState determineGraphState() {
         if (!hasStarted) return GraphState.NOT_STARTED
 
+        // H9: CANCELLED takes priority - graph was cut short by timeout
+        if (tasks.values().any { it instanceof org.softwood.dag.task.TaskBase && it.isCancelled() }) {
+            return GraphState.CANCELLED
+        }
+
         // Check if any task failed
         if (tasks.values().any { it.isFailed() }) {
             return GraphState.FAILED
         }
 
-        // Check if all tasks completed
+        // Check if all tasks completed (or were skipped)
         if (tasks.values().every { it.isCompleted() || it.isSkipped() }) {
             return GraphState.COMPLETED
         }
@@ -652,26 +657,26 @@ class TaskGraph {
      * Cancel all tasks that are still running or scheduled when graph timeout occurs.
      * Marks them as FAILED with a timeout message.
      */
+    // H9 fix: use markCancelled() so timeout-cancelled tasks are distinguishable
+    // from genuinely failed tasks in health/observability output.
     private void cancelRemainingTasks() {
         synchronized (this) {
             tasks.values().each { task ->
-                if (!task.isCompleted() && !task.isFailed() && !task.isSkipped()) {
-                    // Mark as failed due to graph timeout
-                    def timeoutError = new GraphTimeoutException(
-                        "Task cancelled due to graph timeout"
-                    )
-                    task.markFailed(timeoutError)
-                    
-                    // Persist FAILED state
+                if (!task.isCompleted() && !task.isFailed() && !task.isSkipped() &&
+                        !(task instanceof org.softwood.dag.task.TaskBase && task.isCancelled())) {
+                    // H9: mark CANCELLED not FAILED - these were cut short by timeout, not errors
+                    task.markCancelled()
+
+                    // Persist CANCELLED state (map to FAILED for persistence layer which may not know CANCELLED)
                     persistTaskStateChange(task.id, PersistenceTaskState.FAILED, [
                         errorMessage: "Cancelled due to graph timeout",
                         errorStackTrace: "Graph execution exceeded maximum duration"
                     ])
-                    
+
                     // Publish to cluster
-                    publishTaskStateToCluster(task.id, "FAILED", "Graph timeout")
-                    updateClusterGraphState(task.id, "FAILED")
-                    
+                    publishTaskStateToCluster(task.id, "CANCELLED", "Graph timeout")
+                    updateClusterGraphState(task.id, "CANCELLED")
+
                     log.debug "Cancelled task ${task.id} due to graph timeout"
                 }
             }
@@ -1114,34 +1119,38 @@ class TaskGraph {
      * When a task fails, recursively mark all downstream (successor) tasks as skipped
      * This ensures the graph can reach completion even when a task fails
      */
+    // C3 fix: synchronize the entire BFS walk on `this` (same lock as checkGraphCompletion
+    // and cancelRemainingTasks) so concurrent completions cannot race with skip propagation.
     private void markDownstreamAsSkipped(ITask failedTask) {
-        def visited = new HashSet<String>()
-        def queue = new LinkedList<String>()
-        
-        // Start with immediate successors
-        queue.addAll(failedTask.successors)
-        
-        while (!queue.isEmpty()) {
-            String taskId = queue.poll()
-            
-            if (visited.contains(taskId)) continue
-            visited.add(taskId)
-            
-            ITask task = tasks[taskId]
-            if (task && !task.hasStarted) {
-                task.markSkipped()
-                
-                // Persist SKIPPED state
-                persistTaskStateChange(taskId, PersistenceTaskState.SKIPPED, [:])
-                
-                // Publish to cluster
-                publishTaskStateToCluster(taskId, "SKIPPED")
-                updateClusterGraphState(taskId, "SKIPPED")
-                
-                log.debug "Marked task ${taskId} as SKIPPED due to upstream failure"
-                
-                // Add its successors to the queue
-                queue.addAll(task.successors)
+        synchronized (this) {
+            def visited = new HashSet<String>()
+            def queue = new LinkedList<String>()
+
+            // Start with immediate successors
+            queue.addAll(failedTask.successors)
+
+            while (!queue.isEmpty()) {
+                String taskId = queue.poll()
+
+                if (visited.contains(taskId)) continue
+                visited.add(taskId)
+
+                ITask task = tasks[taskId]
+                if (task && !task.hasStarted) {
+                    task.markSkipped()
+
+                    // Persist SKIPPED state
+                    persistTaskStateChange(taskId, PersistenceTaskState.SKIPPED, [:])
+
+                    // Publish to cluster
+                    publishTaskStateToCluster(taskId, "SKIPPED")
+                    updateClusterGraphState(taskId, "SKIPPED")
+
+                    log.debug "Marked task ${taskId} as SKIPPED due to upstream failure"
+
+                    // Add its successors to the queue
+                    queue.addAll(task.successors)
+                }
             }
         }
     }

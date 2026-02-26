@@ -101,7 +101,7 @@ class MessagingTask extends TaskBase<Object> {
     private Closure messageFilter
     private Closure messageAuthenticator
     
-    MessagingTask(String id, String name, ctx) {
+    MessagingTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
     

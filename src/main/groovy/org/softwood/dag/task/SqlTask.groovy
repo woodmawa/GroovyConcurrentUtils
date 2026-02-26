@@ -131,7 +131,7 @@ class SqlTask extends TaskBase<Object> {
     // Constructor
     // =========================================================================
     
-    SqlTask(String id, String name, ctx) {
+    SqlTask(String id, String name, TaskContext ctx) {
         super(id, name, ctx)
     }
     

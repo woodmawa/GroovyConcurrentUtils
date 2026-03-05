@@ -135,6 +135,28 @@ class TaskGraph {
         return start()
     }
 
+    /**
+     * Convenience method - inject a single input value into all root tasks
+     * (those with no predecessors) then start the graph.
+     *
+     * <p>The value is delivered as the {@code prev} argument to each root
+     * task's action closure, exactly as if it had come from a predecessor.
+     * This is the primary way to pass an initial value into a graph without
+     * wiring a dedicated source task.</p>
+     *
+     * <pre>{@code
+     * def result = graph.execute("input-A").get()
+     * }</pre>
+     *
+     * @param input the value to inject (may be null)
+     * @return a Promise that resolves when the graph completes
+     */
+    Promise<?> execute(Object input) {
+        List<ITask> roots = tasks.values().findAll { it.predecessors.isEmpty() }
+        roots.each { it.setInjectedInput(input) }
+        return start()
+    }
+
     // --------------------------------------------------------------------
     // Health & Observability API
     // --------------------------------------------------------------------

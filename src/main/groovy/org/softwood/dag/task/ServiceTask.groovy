@@ -89,7 +89,7 @@ class ServiceTask extends TaskBase<Object> {
      * @param prevValue The previous task's result
      * @return The Promise returned by the closure
      */
-    private Promise callActionClosure(Closure action, TaskContext ctx, Object prevValue) {
+    private Object callActionClosure(Closure action, TaskContext ctx, Object prevValue) {
         int paramCount = action.maximumNumberOfParameters
         
         log.debug "Task ${id}: action closure has ${paramCount} parameter(s)"

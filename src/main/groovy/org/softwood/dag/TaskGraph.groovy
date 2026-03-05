@@ -157,6 +157,29 @@ class TaskGraph {
         return start()
     }
 
+    /**
+     * Reset this graph instance so it can be executed again.
+     *
+     * <p>Clears the {@code hasStarted} flag and resets every task back to
+     * {@code CREATED} state, clearing its completion promise and any injected
+     * input. The graph's shared {@link TaskContext} (including memo and
+     * idempotency caches) is intentionally preserved so that caching features
+     * work correctly across re-runs on the same instance.</p>
+     *
+     * <p>Use {@link TaskGraphFactory} when you need a completely fresh context
+     * between runs instead.</p>
+     */
+    void reset() {
+        hasStarted = false
+        completedTaskCount = 0
+        totalTaskCount = 0
+        graphCompletionPromise = null
+        startTime = null
+        tasks.values().each { task ->
+            task.resetForReuse()
+        }
+    }
+
     // --------------------------------------------------------------------
     // Health & Observability API
     // --------------------------------------------------------------------

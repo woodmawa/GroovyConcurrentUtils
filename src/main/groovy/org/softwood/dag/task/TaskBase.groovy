@@ -16,6 +16,9 @@ import org.softwood.dag.resilience.DeadLetterQueue
 import org.softwood.dag.resilience.IdempotencyPolicy
 import org.softwood.dag.resilience.IdempotencyKey
 import org.softwood.dag.resilience.IdempotencyCacheEntry
+import org.softwood.dag.resilience.MemoPolicy
+import org.softwood.dag.resilience.MemoDsl
+import org.softwood.dag.resilience.MemoCache
 
 /**
  * Abstract base class for all DAG tasks.
@@ -61,6 +64,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     protected TimeoutPolicy timeoutPolicy = new TimeoutPolicy()
     protected DeadLetterQueuePolicy dlqPolicy = new DeadLetterQueuePolicy()
     protected IdempotencyPolicy idempotencyPolicy = new IdempotencyPolicy()
+    protected MemoPolicy memoPolicy = new MemoPolicy()
     private Long taskTimeoutMillis = null  // Legacy - kept for backwards compatibility
     protected Throwable lastError = null
 
@@ -177,6 +181,18 @@ abstract class TaskBase<T> implements IGraphNode<T> {
 
     void setInjectedInput(Object data) {
         this.injectedInput = Optional.ofNullable(data)
+    }
+
+    /**
+     * Reset this task so the graph can be executed again via {@link TaskGraph#reset()}.
+     * Restores state to CREATED, clears the completion promise and injected input.
+     * Does NOT clear memo/idempotency caches - those are held on the shared TaskContext.
+     */
+    void resetForReuse() {
+        _state.set(TaskState.CREATED)
+        completionPromise = null
+        injectedInput = Optional.empty()
+        lastError = null
     }
 
     // ----------------------------------------------------
@@ -657,6 +673,41 @@ abstract class TaskBase<T> implements IGraphNode<T> {
         dsl.preset(preset)
     }
 
+    // ----------------------------------------------------
+    // Memoisation DSL Configuration
+    // ----------------------------------------------------
+
+    /**
+     * Configure memoisation for this task using a DSL block.
+     *
+     * <p>Memo sits in the execution chain BEFORE the idempotency check:
+     * memo (performance) → idempotency (correctness) → rate limit → runTask()</p>
+     *
+     * <pre>
+     * task("lookup") {
+     *     memo {
+     *         keyFrom { ctx, input -> "user:${input.id}" }
+     *         ttl Duration.ofMinutes(10)
+     *     }
+     *     action { ctx, prev -> db.find(prev.id) }
+     * }
+     * </pre>
+     */
+    void memo(@DelegatesTo(MemoDsl) Closure config) {
+        def dsl = new MemoDsl(this.memoPolicy)
+        config.delegate = dsl
+        config.resolveStrategy = Closure.DELEGATE_FIRST
+        config.call()
+    }
+
+    /**
+     * Configure memoisation with a named preset.
+     * Valid: "session", "short", "long", "persistent"
+     */
+    void memo(String preset) {
+        new MemoDsl(this.memoPolicy).preset(preset)
+    }
+
 
     // ------------
     // helper method
@@ -943,6 +994,23 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         log.debug "Task ${id}: rate limit check passed (${limiter.getCurrentCount()}/${limiter.maxRequests})"
                     }
                     
+                    // Check memo cache FIRST (performance shortcut — before idempotency)
+                    if (memoPolicy.enabled) {
+                        String memoKey = memoPolicy.deriveKey(id, ctx, prevValue)
+                        MemoCache mc = ctx?.memoCache
+                        if (mc == null) { mc = ctx?.getMemoCache() }
+                        if (mc != null) {
+                            Object memo = mc.get(memoKey)
+                            if (memo != null) {
+                                log.debug "Task ${id}: memo cache hit for key='${memoKey}'"
+                                state = TaskState.COMPLETED
+                                emitEvent(TaskState.COMPLETED)
+                                return (T) memo
+                            }
+                        }
+                    }
+                    
+                    // Check idempotency cache BEFORE calling runTask()
                     // Check idempotency cache BEFORE calling runTask()
                     if (idempotencyPolicy.enabled) {
                         def cacheResult = checkIdempotencyCache(prevValue)
@@ -1046,6 +1114,17 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                     // Store result in idempotency cache if enabled
                     if (idempotencyPolicy.enabled) {
                         storeInIdempotencyCache(prevValue, result)
+                    }
+
+                    // Store result in memo cache if enabled
+                    if (memoPolicy.enabled) {
+                        String memoKey = memoPolicy.deriveKey(id, ctx, prevValue)
+                        MemoCache mc = ctx?.memoCache
+                        if (mc == null) { mc = ctx?.getMemoCache() }
+                        if (mc != null) {
+                            mc.put(memoKey, result, memoPolicy.ttl)
+                            log.debug "Task ${id}: memo stored key='${memoKey}'"
+                        }
                     }
 
                     // Calculate execution time

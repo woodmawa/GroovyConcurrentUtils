@@ -1154,6 +1154,79 @@ println "Second task input: ${secondInput}"
 * **`await()`** - Execute and wait for result
 * **`start()`** - Execute without waiting (returns Promise)
 
+== Identity Fields
+
+Every `TaskGraph` carries two identity fields that test code may need to assert on or correlate with external systems.
+
+=== `id` — Template / Shape Name
+
+`TaskGraph.id` is the **stable, human-readable name** for the graph definition. It identifies the _shape_ or _template_ of the workflow — the set of tasks and edges — not a specific execution. It is set at build time (via the `id` property in the DSL or constructor) and does not change between runs.
+
+Use `graph.id` (or `event.graphId` in listeners) when you want to group or filter by workflow type.
+
+=== `runId` — Execution-Instance UUID
+
+`TaskGraph.runId` is a **fresh UUID generated on every `start()` call**. It uniquely identifies one execution of the graph. It is `null` before `start()` is called and is replaced by a new UUID on each subsequent `start()`.
+
+The same value is injected into `TaskContext.globals` under the key `'flowId'` at execution start, so any task closure can read it via:
+
+[source,groovy]
+----
+ctx.globals.flowId   // same value as graph.runId for this execution
+----
+
+This is the key used by `mcp-agentic-workflow` when streaming execution events — callers subscribe to `GET /flows/{flowId}/events` using the `runId` returned from `start_flow`.
+
+=== Asserting Identity in Tests
+
+`TaskGraphExecution` (the object returned by `execute(workflow)`) exposes the `runId` once `await()` completes via the result map's `executedTasks` and the live `currentExecution` reference on the spec:
+
+[source,groovy]
+----
+@Test
+void "assert runId is set and consistent"() {
+    given:
+    def workflow = TaskGraph.build {
+        id = 'my-flow'
+        serviceTask('step-1') {
+            action { ctx, prev -> ctx.promiseFactory.executeAsync { 'done' } }
+        }
+    }
+
+    when:
+    def result = execute(workflow).with(null).await()
+
+    then: "template id is stable"
+    workflow.id == 'my-flow'
+
+    and: "runId was generated for this execution"
+    workflow.runId != null
+
+    and: "flowId in globals matches runId"
+    ctx.globals.flowId == workflow.runId
+}
+----
+
+[NOTE]
+====
+If you call `start()` again on the same `workflow` instance, `runId` will change. Store the value immediately after `await()` if you need it for post-run assertions or external correlation.
+====
+
+=== Quick Reference
+
+[cols="1,2,2"]
+|===
+| Field | What it identifies | Scope
+
+| `graph.id` / `event.graphId`
+| Workflow template / shape name
+| Stable across all runs
+
+| `graph.runId` / `event.runId` / `ctx.globals.flowId`
+| This specific execution instance
+| Fresh UUID per `start()` call
+|===
+
 == Summary
 
 TaskGraphSpec provides a powerful, expressive testing framework for TaskGraph workflows:

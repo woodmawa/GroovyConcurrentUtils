@@ -808,7 +808,8 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     Promise execute(Promise<?> previousPromise) {
 
         transitionState(TaskState.RUNNING)
-        emitEvent(TaskState.RUNNING)
+        // NOTE: RUNNING event emitted by executeTaskWithRetry() inside runAttempt().
+        // Do NOT emit here — would cause duplicate TASK_STARTED per node.
 
         log.debug "Task ${id}: execute() called with prevPromise present: $previousPromise"
 
@@ -822,21 +823,23 @@ abstract class TaskBase<T> implements IGraphNode<T> {
         Promise<T> attemptPromise = runAttempt(previousPromise)
 
         // Wire completion/failure callbacks into the pre-assigned holder.
-        // then/recover return a NEW chained promise - we need to propagate that
-        // back into resultHolder by completing it once the chain resolves.
-        attemptPromise.then { T result ->
+        // Use onComplete/onError (registered on the underlying CompletableFuture) rather
+        // than then/recover (which return a NEW derived CompletableFuture that nobody
+        // holds a reference to and can be GC'd before it fires, silently dropping the
+        // callback and leaving resultHolder unresolved forever).
+        attemptPromise.onComplete { T result ->
             log.debug "Task ${id}: completed with result: $result"
             transitionState(TaskState.COMPLETED)
-            emitEvent(TaskState.COMPLETED)
+            // NOTE: COMPLETED event emitted by executeTaskWithRetry() at return point.
+            // Do NOT emit here — would cause duplicate TASK_COMPLETED per node.
             resultHolder.accept(result)
-            result
-        }.recover { Throwable err ->
+        }
+        attemptPromise.onError { Throwable err ->
             log.error "Task ${id}: failed with error: ${err.message}"
             lastError = err
             transitionState(TaskState.FAILED)
             emitErrorEvent(err)
             resultHolder.reject(err)   // signal failure to waiting successors
-            throw err
         }
 
         return resultHolder
@@ -1140,6 +1143,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         .executionTimeMs(executionTimeMs)
                         .graphId(ctx?.globals?.get('graphId'))
                         .runId(ctx?.globals?.get('runId'))
+                        .result(result)
                         .addMetadata('totalTimeMs', totalTimeMs)
                         .addMetadata('retriesUsed', attempt - 1)
                         .build()

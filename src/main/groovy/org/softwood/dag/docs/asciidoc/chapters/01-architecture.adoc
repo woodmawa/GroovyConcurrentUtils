@@ -620,6 +620,15 @@ scriptTask("secure-script") {
 
 Implement observability integrations:
 
+==== Graph identity in events
+
+Every `GraphEvent` carries two identity values that listeners can use for correlation:
+
+* `event.graphId` — the graph shape / template name (`TaskGraph.id`), stable across multiple runs of the same flow definition.
+* `event.runId` — the execution-instance UUID (`TaskGraph.runId`), generated fresh on each `start()` call. Use this as the `flowId` key when writing to an external event store or polling for progress.
+
+The same `runId` value is also injected into `ctx.globals` as `'flowId'` at execution start, so task closures can read it via `ctx.globals.flowId` without a direct reference to the graph.
+
 [source,groovy]
 ----
 class PrometheusListener implements GraphEventListener {

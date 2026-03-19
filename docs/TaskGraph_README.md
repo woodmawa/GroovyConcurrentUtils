@@ -113,12 +113,12 @@ ITask<T>                    Interface for all executable tasks
 
 | Component | Purpose |
 |-----------|---------|
-| **TaskGraph** | Container holding all tasks and execution context |
+| **TaskGraph** | Container holding all tasks and execution context. Carries two identity fields: `id` (graph shape / template name, stable across runs) and `runId` (execution-instance UUID generated fresh per `start()` call). `runId` is also readable as `ctx.globals.flowId` inside any task closure. |
 | **ITask** | Interface defining task contract |
 | **TaskBase** | Abstract implementation with retry, timeout, state management |
 | **ServiceTask** | Concrete task executing user-defined closures |
 | **RouterTask** | Base for tasks that control flow (forks, branches) |
-| **TaskContext** | Shared execution context with globals, config, promise factory |
+| **TaskContext** | Shared execution context with globals, config, promise factory. The `globals` binding is automatically populated with `flowId` (= `graph.runId`) at execution start. |
 | **TaskFactory** | Factory for creating task instances (for testing/mocking) |
 
 ### Execution Model

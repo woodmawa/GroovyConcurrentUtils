@@ -141,6 +141,34 @@ workflow.addListener(new GraphEventListener() {
 workflow.start()
 ----
 
+=== Graph identity in events
+
+Every `GraphEvent` exposes two complementary identity fields:
+
+[cols="1,3", options="header"]
+|===
+| Field | Meaning
+| `event.graphId` | The graph shape / template name (`TaskGraph.id`). Stable across runs — use for grouping metrics by workflow type.
+| `event.runId` | The execution-instance UUID, generated fresh on each `start()` call. Use as a `flowId` key when writing node-completion events to an external store or correlating log entries to a specific run.
+|===
+
+The `runId` value is also injected into `ctx.globals` as `'flowId'` at execution start, readable inside any task closure via `ctx.globals.flowId`.
+
+[source,groovy]
+----
+workflow.addListener(new GraphEventListener() {
+    void onEvent(GraphEvent event) {
+        if (event.type == GraphEventType.TASK_COMPLETED) {
+            // graphId groups by workflow type; runId identifies this specific run
+            db.insert("""
+                INSERT INTO workflow_events(flow_id, node_id, status, occurred_at)
+                VALUES(?, ?, 'completed', ?)
+            """, [event.runId, event.taskEvent.taskId, Instant.now().toString()])
+        }
+    }
+})
+----
+
 === Typed Event Handlers
 
 [source,groovy]

@@ -31,6 +31,9 @@ class TaskEvent {
     final String graphId            // ID of the TaskGraph
     final String runId              // Unique ID for this execution run
 
+    // Task result (non-null only for COMPLETED events)
+    final Object result
+
     // Extensible metadata
     final Map<String, Object> metadata
 
@@ -55,6 +58,7 @@ class TaskEvent {
         this.attemptNumber = 1
         this.graphId = null
         this.runId = null
+        this.result = null
         this.metadata = [:]
     }
 
@@ -72,6 +76,7 @@ class TaskEvent {
         Integer attemptNumber,
         String graphId,
         String runId,
+        Object result,
         Map<String, Object> metadata
     ) {
         this.taskId = taskId
@@ -84,6 +89,7 @@ class TaskEvent {
         this.attemptNumber = attemptNumber ?: 1
         this.graphId = graphId
         this.runId = runId
+        this.result = result
         this.metadata = metadata ?: [:]
     }
 
@@ -121,6 +127,7 @@ class TaskEvent {
         private Integer attemptNumber = 1
         private String graphId
         private String runId
+        private Object result
         private Map<String, Object> metadata = [:]
 
         Builder(String taskId, TaskState state) {
@@ -136,6 +143,7 @@ class TaskEvent {
         Builder attemptNumber(Integer attempt) { this.attemptNumber = attempt; return this }
         Builder graphId(String id) { this.graphId = id; return this }
         Builder runId(String id) { this.runId = id; return this }
+        Builder result(Object result) { this.result = result; return this }
         Builder metadata(Map<String, Object> meta) { this.metadata = meta; return this }
         Builder addMetadata(String key, Object value) { this.metadata[key] = value; return this }
 
@@ -143,7 +151,7 @@ class TaskEvent {
             return new TaskEvent(
                 taskId, taskName, taskState, error,
                 timestamp, executionTimeMs, waitTimeMs, attemptNumber,
-                graphId, runId, metadata
+                graphId, runId, result, metadata
             )
         }
     }

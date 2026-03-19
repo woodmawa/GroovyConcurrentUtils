@@ -12,6 +12,7 @@ import org.softwood.dag.resilience.RateLimiter
 import org.softwood.dag.resilience.RateLimiterRegistry
 import org.softwood.dag.resilience.DeadLetterQueue
 import org.softwood.dag.resilience.IdempotencyCache
+import org.softwood.dag.resilience.MemoCache
 
 /**
  * Shared context for a TaskGraph execution.
@@ -41,6 +42,9 @@ class TaskContext implements Closeable {
     
     // Idempotency Cache (optional - set by TaskGraph or manually)
     IdempotencyCache idempotencyCache = null
+
+    // Memo Cache (optional - session-scoped performance cache, set on demand)
+    MemoCache memoCache = null
     
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
@@ -168,6 +172,16 @@ class TaskContext implements Closeable {
             idempotencyCache = new IdempotencyCache()
         }
         return idempotencyCache
+    }
+
+    /**
+     * Get or create the Memo Cache for this context.
+     */
+    MemoCache getMemoCache() {
+        if (memoCache == null) {
+            memoCache = new MemoCache()
+        }
+        return memoCache
     }
 
     /**

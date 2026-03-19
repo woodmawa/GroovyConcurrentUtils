@@ -49,15 +49,26 @@ class TaskGraph {
     private EclipseStoreManager persistenceManager
 
     /** Graph completion tracking */
-    private Promise graphCompletionPromise = null
+    Promise graphCompletionPromise = null   // public getter allows callers to await without polling
     private int completedTaskCount = 0
     private int totalTaskCount = 0
     
     /** Reuse guard - ensures graph can only be started once */
     private volatile boolean hasStarted = false
     
-    /** Unique run ID (generated per execution) */
-    private String runId
+    /**
+     * Unique run ID for this execution instance, generated fresh on each {@link #start()} call.
+     *
+     * <p>This is the <em>flow instance identity</em> — distinct from {@link #id} which identifies
+     * the graph shape/template across multiple runs. External callers (e.g. the MCP agentic-workflow
+     * service) use this value as a stable {@code flowId} handle for correlating log entries,
+     * polling execution events, and persisting node-level progress to an event store.</p>
+     *
+     * <p>Value is {@code null} until {@link #start()} is called. Also injected into
+     * {@code ctx.globals} as {@code 'flowId'} at execution start so tasks can read it
+     * without a direct reference to the graph.</p>
+     */
+    String runId
 
     /** Graph ID for observability */
     String id
@@ -460,6 +471,20 @@ class TaskGraph {
     }
 
     /**
+     * Returns the run ID for this execution instance.
+     *
+     * <p>Non-null only after {@link #start()} has been called. Intended for use as a
+     * {@code flowId} handle by external event consumers — e.g. the MCP agentic-workflow
+     * service registers a {@link GraphEventListener} keyed on this value to write
+     * node-completion events to a SQLite {@code workflow_events} table.</p>
+     *
+     * @return the run UUID string, or {@code null} if the graph has not yet started
+     */
+    String getRunId() {
+        return runId
+    }
+
+    /**
      * Emit a graph-level event.
      * Used internally to notify graph state changes.
      */
@@ -606,8 +631,11 @@ class TaskGraph {
         // Set graph reference in context so tasks can access siblings
         ctx.graph = this
 
-        // Generate unique run ID
+        // Generate unique run ID for this execution instance
         runId = UUID.randomUUID().toString()
+
+        // Inject flowId into globals so tasks can read it without a graph reference
+        ctx.globals.set('flowId', runId)
 
         // Set graph ID if not already set
         if (!this.id) {
@@ -725,6 +753,24 @@ class TaskGraph {
                     log.debug "Cancelled task ${task.id} due to graph timeout"
                 }
             }
+        }
+    }
+
+    /**
+     * Public abort entry point for external callers (e.g. FlowExecutionService).
+     * Cancels all remaining in-flight tasks and fails the completion promise with
+     * a RuntimeException carrying the supplied reason.
+     *
+     * Safe to call if the graph has already completed — the isDone() guard prevents
+     * double-resolution of the promise.
+     *
+     * @param reason  human-readable explanation for the abort
+     */
+    void abortFlow(String reason = 'Flow aborted') {
+        log.warn 'TaskGraph.abortFlow: aborting runId={} reason={}', runId, reason
+        cancelRemainingTasks()
+        if (graphCompletionPromise != null && !graphCompletionPromise.isDone()) {
+            graphCompletionPromise.fail(new RuntimeException("Flow aborted: ${reason}"))
         }
     }
 

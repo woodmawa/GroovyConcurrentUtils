@@ -79,6 +79,14 @@ class TaskGraph {
     /** Event listeners (thread-safe for concurrent registration) */
     private final java.util.concurrent.CopyOnWriteArrayList<GraphEventListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>()
 
+    /**
+     * Dedup guard for task events. Tracks (taskId, eventType) pairs already broadcast
+     * for the current run to prevent double-emission from TaskBase.executeTaskWithRetry()
+     * + TaskGraph.schedule() onComplete both emitting COMPLETED/FAILED events.
+     * Cleared on each start() call.
+     */
+    private final Set<String> seenTaskEvents = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>())
+
     /** Clustering support (optional) */
     private boolean clusteringEnabled = false
     private IMap<String, GraphExecutionState> clusterGraphState
@@ -381,6 +389,17 @@ class TaskGraph {
         // Convert TaskEvent to GraphEvent and broadcast
         GraphEventType eventType = mapTaskStateToEventType(event.taskState, event)
         if (eventType) {
+            // Dedup guard: COMPLETED and FAILED events can be emitted twice —
+            // once from TaskBase.executeTaskWithRetry() via eventDispatcher, and again
+            // from TaskGraph.schedule() onComplete/onError calling markCompleted()/markFailed().
+            // Only the first emission for a given (taskId, eventType) is broadcast per run.
+            String dedupeKey = "${event.taskId}:${eventType.name()}"
+            if (eventType.name() in ['TASK_COMPLETED', 'TASK_FAILED', 'TASK_STARTED', 'TASK_SKIPPED']) {
+                if (!seenTaskEvents.add(dedupeKey)) {
+                    log.debug "TaskGraph.notifyEvent: suppressing duplicate {} for task {}", eventType, event.taskId
+                    return
+                }
+            }
             def graphEvent = new GraphEvent(eventType, this.id, this.runId, event)
             notifyListeners(graphEvent)
         }
@@ -625,6 +644,7 @@ class TaskGraph {
             )
         }
         hasStarted = true
+        seenTaskEvents.clear()  // Reset dedup set for this run
         
         finalizeWiring()
 

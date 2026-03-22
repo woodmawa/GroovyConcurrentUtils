@@ -1083,9 +1083,228 @@ httpTask("comprehensive") {
 }
 ----
 
+== Intelligent / Agentic Task Types
+
+[NOTE]
+====
+The intelligent task types documented in this section are _library-level abstractions_ defined in GroovyConcurrentUtils. They are designed to be wired and executed by the `mcp-agentic-workflow` server, which supplies the LLM provider, `WorkingMemory`, and event bus at runtime via its `FlowTypeRegistry`. You do not instantiate these task types directly via the standard `TaskGraph.build {}` DSL — they are used through flow descriptors and the `FlowTypeRegistry.register()` factory pattern.
+====
+
+=== LlmTask
+
+`LlmTask` is a `ServiceTask` subclass representing a single-shot LLM inference call within a `TaskGraph` flow. It decouples prompt configuration from the actual LLM provider by accepting a `llmCallFn` closure injected at wiring time by `FlowTypeRegistry`.
+
+==== Fields
+
+[cols="2,1,4", options="header"]
+|===
+| Field | Type | Description
+| `systemPrompt` | `String` | System prompt sent to the LLM. Sets role and behavioural constraints.
+| `userPromptTemplate` | `String` | User prompt, optionally containing `${prev}` and `${nodeId.field}` template tokens resolved from `WorkingMemory`.
+| `modelTier` | `String` | Routing hint: `SIMPLE`, `MODERATE`, `COMPLEX`, or `CRITICAL`. Used by `RoutingEngine` to select provider.
+| `temperature` | `float` | Sampling temperature (default `0.3`). Lower = more deterministic.
+| `maxParseRetries` | `int` | Number of corrective retry attempts if `outputSchema` JSON parse fails (default `1`).
+| `outputSchema` | `Map` | Optional. If set, raw LLM output is stripped of markdown fences and parsed as JSON via `JsonSlurper`. One corrective retry is attempted on failure.
+| `llmCallFn` | `Closure` | Injected by `FlowTypeRegistry`. Signature: `(String sysPrompt, String userPrompt, String modelTier, float temperature) -> String`. Routes to `RoutingEngine` (embedded provider) or HTTP orchestrator fallback.
+|===
+
+==== Prompt Template Resolution
+
+The `userPromptTemplate` field supports `${expression}` tokens resolved from `WorkingMemory` at execution time:
+
+[cols="2,3", options="header"]
+|===
+| Token | Resolves to
+| `${prev}` | Result of the immediately upstream node
+| `${nodeId.field}` | Field `field` from the result map of node `nodeId` in `WorkingMemory.resultsByNode`
+| `${factName}` | Value from `WorkingMemory.sharedFacts`
+|===
+
+==== outputSchema and JSON mode
+
+When `outputSchema` is set, the task enters structured-output mode:
+
+. Raw LLM response is stripped of markdown code fences (` ```json ` ... ` ``` `)
+. `JsonSlurper.parseText()` is called on the stripped content
+. On `JsonException`: a corrective prompt is sent including the parse error, the expected schema, and the failed response. The corrected response is parsed once more.
+. If parsing still fails, the exception propagates and the node is marked `TASK_FAILED`
+
+[IMPORTANT]
+====
+Do **not** rely on the LLM echoing your input data as its JSON output. Write an explicit `systemPrompt` instructing the model to generate its own structured assessment. Models like Qwen3 with thinking mode can burn their token budget on `<think>` blocks and output only a minimal stub if the prompt is ambiguous.
+====
+
+==== Streaming mode
+
+When `p.stream = true` is set in the flow node params AND a `RoutingEngine` is available, the task calls `provider.streamComplete()` instead of `provider.complete()`. Each chunk is:
+
+* Appended to a `StringBuilder`
+* Emitted as a `TEXT_MESSAGE_CONTENT` event via `PipelineEventBus` (AG-UI protocol alignment)
+* Written to `ctx.globals['__text_message_content__']` for downstream inspection
+
+OllamaProvider implements real NDJSON streaming (`/api/generate stream:true`). AnthropicProvider implements real SSE streaming (`content_block_delta` events). LMStudioProvider uses a safe blocking fallback.
+
+==== Example (flow descriptor node)
+
+[source,json]
+----
+{
+  "id": "analyse-build",
+  "taskType": "llm.inference",
+  "dependsOn": ["run-build"],
+  "params": {
+    "systemPrompt": "You are a build health analyst. Assess the build result and respond with a JSON object.",
+    "userPromptTemplate": "Build output: ${run-build.output}. Issues: ${run-build.issueCount}.",
+    "modelTier": "MODERATE",
+    "temperature": 0.2,
+    "outputSchema": {
+      "healthy": "boolean",
+      "confidence": "float",
+      "summary": "string"
+    }
+  }
+}
+----
+
+---
+
+=== ControlTask (control.policy)
+
+`ControlTask` represents a policy gate in a flow graph. It evaluates a list of Groovy rule expressions against the upstream node result and returns a `ControlAction` that can drive conditional graph routing.
+
+The `control.policy` task type is registered in `FlowTypeRegistry` and delegates evaluation to `PolicyEvaluator`.
+
+==== ControlAction
+
+`ControlAction` is the return type of a `control.policy` node. It carries:
+
+[cols="2,4", options="header"]
+|===
+| Field | Description
+| `action` | One of: `CONTINUE`, `ABORT`, `ESCALATE`, `ROUTE`
+| `target` | (Optional) Node ID to route to when `action=ROUTE`
+| `reason` | Human-readable explanation of which rule fired
+| `metadata` | Arbitrary Map of additional context from the rule
+|===
+
+==== Rule structure
+
+Each rule in `policy.rules` is a map with:
+
+[cols="2,1,4", options="header"]
+|===
+| Key | Required | Description
+| `when` | ✅ | Groovy expression string. Evaluated with bindings: `input` (upstream result), `globals` (ctx.globals), `memory` (WorkingMemory snapshot)
+| `action` | ✅ | `CONTINUE` \| `ABORT` \| `ESCALATE` \| `ROUTE`
+| `target` | ❌ | Target node ID (only meaningful for `ROUTE`)
+| `reason` | ❌ | Human-readable label for logging and events
+|===
+
+Rules are evaluated in order. The first matching rule wins. If no rule matches, `policy.default` fires.
+
+[IMPORTANT]
+====
+Use `input.fieldName` (not `prev.fieldName`) in rule `when` expressions. The `input` binding is populated from the result of `inputNodeId` (or `prev` if not specified). `prev` in the closure context is the raw upstream value — `input` is the resolved, policy-visible value.
+====
+
+==== Example (flow descriptor node)
+
+[source,json]
+----
+{
+  "id": "gate-build",
+  "taskType": "control.policy",
+  "dependsOn": ["analyse-build"],
+  "params": {
+    "inputNodeId": "analyse-build",
+    "policy": {
+      "rules": [
+        {
+          "when": "input.healthy == true && input.confidence >= 0.8",
+          "action": "CONTINUE",
+          "reason": "Build healthy with high confidence"
+        },
+        {
+          "when": "input.healthy == false",
+          "action": "ABORT",
+          "reason": "Build reported unhealthy"
+        },
+        {
+          "when": "input.confidence < 0.6",
+          "action": "ESCALATE",
+          "reason": "Low confidence - needs human review"
+        }
+      ],
+      "default": {
+        "action": "CONTINUE",
+        "reason": "No rule matched - defaulting to continue"
+      }
+    }
+  }
+}
+----
+
+---
+
+=== HumanInputTask (planned — Phase 2)
+
+`HumanInputTask` is a _planned_ task type representing a mid-flow pause requiring human input before execution can continue. It is not yet implemented in the current release.
+
+==== Intended design
+
+* The task emits an `INTERRUPT` event via `PipelineEventBus` with a prompt and a `resumeToken`
+* The flow is suspended (graph stays alive, completion promise not resolved)
+* An external caller provides input via `flow_management action=resume` with the `resumeToken` and input payload
+* The task completes with the provided input as its result, and successor nodes are scheduled normally
+
+This pattern maps to the AG-UI `INTERRUPT` → resume handshake and enables human-in-the-loop validation gates within otherwise automated flows.
+
+==== Semantic equivalent today
+
+Until `HumanInputTask` is implemented, use `control.policy` with `action=ESCALATE` to signal that human review is needed. The escalation is surfaced in flow events and can be handled by the consuming MCP client (e.g. Claude Desktop).
+
+---
+
+=== EffectClass annotation (planned)
+
+`@EffectClass` is a planned annotation for task types that produce side effects (file writes, HTTP mutations, database writes, LLM API calls). When applied, the TaskGraph execution engine can:
+
+* Log the effect type in `WorkingMemory` alongside the node result
+* Enable dry-run mode (skip side-effect nodes, return mocked results)
+* Surface effect provenance in flow events for audit trail
+
+This is not yet implemented but is part of the intelligent flow roadmap.
+
+---
+
+== WorkingMemory
+
+`WorkingMemory` is the shared state carrier for intelligent flow runs. It is created per `TaskGraph` execution and threaded through all nodes via `ctx.globals['__workingMemory']`.
+
+=== Structure
+
+[cols="2,2,4", options="header"]
+|===
+| Field | Type | Description
+| `runId` | `String` | UUID stamped by `FlowExecutionService` after `start()`. Correlates with all flow events.
+| `resultsByNode` | `Map<String, Object>` | Append-only. Keyed by node ID. Written by `FlowBuilder.wrappedAction` on each node completion via `TaskResult`.
+| `sharedFacts` | `Map<String, Object>` | Mutable shared scratch space. Tasks can read/write arbitrary key-value pairs here.
+| `globals` | `Map<String, Object>` | Mirror of `ctx.globals` at snapshot time. Includes `__llm_provenance__`, `__llm_inputs_hash__`, `__text_message_content__`.
+|===
+
+=== Thread safety
+
+`resultsByNode` writes are guarded by `synchronized(this)`. `sharedFacts` is a `ConcurrentHashMap`. The `toSnapshot()` method returns a deep-copy Map safe for prompt template resolution without holding locks.
+
+=== Integration with LlmTask
+
+`FlowTypeRegistry` resolves `userPromptTemplate` tokens using `WorkingMemory.toSnapshot()` before calling `llmCallFn`. This means any upstream node result is available for interpolation by name, without the downstream node needing a direct reference to its predecessor's output.
+
+---
+
 == Summary
 
-TaskGraph provides 15+ task types:
+TaskGraph provides 15+ infrastructure task types plus intelligent agentic task types:
 
 * ✅ **Core** - ServiceTask, ScriptTask
 * ✅ **HTTP/REST** - HttpTask, RestTask, GraphQLTask
@@ -1094,6 +1313,8 @@ TaskGraph provides 15+ task types:
 * ✅ **Messaging** - MessagingTask, KafkaTask, RabbitMQTask
 * ✅ **Cloud** - S3Task, BlobStorageTask, LambdaTask
 * ✅ **Utilities** - DelayTask, LogTask, TransformTask
+* ✅ **Intelligent** - LlmTask (`llm.inference`), ControlTask (`control.policy`)
+* 🔶 **Planned** - HumanInputTask, `@EffectClass` annotation
 
 All tasks inherit features from TaskBase:
 * Retry logic
@@ -1103,8 +1324,16 @@ All tasks inherit features from TaskBase:
 * Event emission
 * Error handling
 
+Intelligent task types additionally provide:
+* `WorkingMemory` integration for cross-node state sharing
+* LLM provider abstraction via injected `llmCallFn`
+* Structured JSON output with corrective retry
+* Real-time token streaming via `PipelineEventBus`
+* Policy-driven conditional branching via `PolicyEvaluator`
+
 == Next Steps
 
 * **Chapter 7** - Task usage examples
 * **Chapter 11** - TaskBase reference
 * **Chapter 5** - Create custom task types
+* **mcp-agentic-workflow docs** - Full flow descriptor reference, FlowTypeRegistry, WorkingMemory lifecycle

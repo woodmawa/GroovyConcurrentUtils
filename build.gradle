@@ -56,6 +56,12 @@ dependencies {
     //javascript for script engine loading
     implementation("org.openjdk.nashorn:nashorn-core:15.7")
 
+    // Apache POI - optional compile-time dep for office doc task types.
+    // GCU stays POI-free at runtime; actual POI dep lives in consuming servers
+    // (mcp-agentic-workflow, mcp-groovy-filesystem-server).
+    // XlsxTask/DocxTask/PptxTask are injection-based - no POI calls in GCU code.
+    compileOnly 'org.apache.poi:poi-ooxml:5.3.0'
+
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

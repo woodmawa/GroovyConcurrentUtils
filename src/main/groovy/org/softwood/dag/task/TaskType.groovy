@@ -195,7 +195,28 @@ enum TaskType {
      * HTTP task for making REST API calls and HTTP requests.
      * Supports all HTTP methods, headers, authentication, and request bodies.
      */
-    HTTP(HttpTask, false)
+    HTTP(HttpTask, false),
+
+    /**
+     * Excel spreadsheet task for reading and writing .xlsx files.
+     * POI implementation injected by server factory via xlsxCallFn.
+     * Supports READ, WRITE, APPEND, TRANSFORM, CREATE actions.
+     */
+    XLSX(XlsxTask, false),
+
+    /**
+     * Word document task for reading and generating .docx files.
+     * POI implementation injected by server factory via docxCallFn.
+     * Supports READ, GENERATE, APPEND_SECTION, REPLACE_SECTION, EXTRACT_TEXT actions.
+     */
+    DOCX(DocxTask, false),
+
+    /**
+     * PowerPoint presentation task for reading and generating .pptx files.
+     * POI implementation injected by server factory via pptxCallFn.
+     * Supports READ, GENERATE, ADD_SLIDE, EXTRACT_TEXT actions.
+     */
+    PPTX(PptxTask, false)
 
     // =========================================================================
     // Enum Properties
@@ -399,6 +420,21 @@ enum TaskType {
             case 'couchbase':
             case 'keyvalue':
                 return NOSQL
+            case 'xlsx':
+            case 'xlsxtask':
+            case 'excel':
+            case 'spreadsheet':
+                return XLSX
+            case 'docx':
+            case 'docxtask':
+            case 'word':
+            case 'worddoc':
+                return DOCX
+            case 'pptx':
+            case 'pptxtask':
+            case 'powerpoint':
+            case 'presentation':
+                return PPTX
             default:
                 throw new IllegalArgumentException(
                         "Unknown task type: '$type'. Valid types: ${values()*.name().join(', ')}"

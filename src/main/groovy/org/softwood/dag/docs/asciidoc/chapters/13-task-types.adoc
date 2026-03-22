@@ -1246,22 +1246,47 @@ Use `input.fieldName` (not `prev.fieldName`) in rule `when` expressions. The `in
 
 ---
 
-=== HumanInputTask (planned — Phase 2)
+=== ManualTask (library: implemented; FlowTypeRegistry factory: planned)
 
-`HumanInputTask` is a _planned_ task type representing a mid-flow pause requiring human input before execution can continue. It is not yet implemented in the current release.
+`ManualTask` is a fully implemented task type in GroovyConcurrentUtils that pauses graph execution
+until an external caller explicitly completes it. It is the library-level implementation of the
+human-in-the-loop pattern.
 
-==== Intended design
+==== What is already implemented
 
-* The task emits an `INTERRUPT` event via `PipelineEventBus` with a prompt and a `resumeToken`
-* The flow is suspended (graph stays alive, completion promise not resolved)
-* An external caller provides input via `flow_management action=resume` with the `resumeToken` and input payload
-* The task completes with the provided input as its result, and successor nodes are scheduled normally
+`ManualTask` (in `org.softwood.dag.task`) provides:
 
-This pattern maps to the AG-UI `INTERRUPT` → resume handshake and enables human-in-the-loop validation gates within otherwise automated flows.
+* Three completion outcomes: `SUCCESS`, `FAILURE`, `SKIP`
+* Form field support (`form { field 'approved', type: FieldType.BOOLEAN, required: true }`)
+* Assignee / role-based assignment
+* Priority levels (`LOW`, `NORMAL`, `HIGH`, `URGENT`)
+* Due dates with configurable timeout and `autoAction` on expiry
+* Notification channels: email, Slack, webhook (`notify { email ...; slack ... }`)
+* Escalation rules: automated reassignment after duration (`escalate { after 24.hours, to: '...' }`)
+* Completion handlers: `onSuccess`, `onFailure`, `onSkip`
+
+A `ManualTaskContext` carries the completed form data, attachments, outcome, completedBy, and
+timestamp to the handlers.
+
+==== What is planned: FlowTypeRegistry factory
+
+What is _not yet_ implemented is the `human.input` task type factory in `FlowTypeRegistry`
+(the `mcp-agentic-workflow` server). This factory would:
+
+. Create a `ManualTask` instance and register it in the graph
+. Emit an `INTERRUPT` event via `PipelineEventBus` with a `resumeToken` and prompt
+. Expose completion via `flow_management action=resume runId=<id> input={...}` which calls
+  `manualTask.complete(outcome: ..., formData: ..., completedBy: ...)`
+. Resume downstream node scheduling once the promise resolves
+
+This maps to the AG-UI `INTERRUPT` → resume handshake and enables human-in-the-loop validation
+gates within otherwise automated flows.
 
 ==== Semantic equivalent today
 
-Until `HumanInputTask` is implemented, use `control.policy` with `action=ESCALATE` to signal that human review is needed. The escalation is surfaced in flow events and can be handled by the consuming MCP client (e.g. Claude Desktop).
+Until the `human.input` factory is implemented, use `control.policy` with `action=ESCALATE`
+to signal that human review is needed. The ESCALATE action surfaces in flow events and can be
+handled by the consuming MCP client (e.g. Claude Desktop) to prompt the user.
 
 ---
 
@@ -1314,7 +1339,8 @@ TaskGraph provides 15+ infrastructure task types plus intelligent agentic task t
 * ✅ **Cloud** - S3Task, BlobStorageTask, LambdaTask
 * ✅ **Utilities** - DelayTask, LogTask, TransformTask
 * ✅ **Intelligent** - LlmTask (`llm.inference`), ControlTask (`control.policy`)
-* 🔶 **Planned** - HumanInputTask, `@EffectClass` annotation
+* ✅ **Human-in-loop (library)** - ManualTask (implemented in GCU with forms, notifications, escalation, timeout)
+* 🔶 **Planned** - `human.input` FlowTypeRegistry factory (wires ManualTask into flow graphs), `@EffectClass` annotation
 
 All tasks inherit features from TaskBase:
 * Retry logic
@@ -1330,6 +1356,7 @@ Intelligent task types additionally provide:
 * Structured JSON output with corrective retry
 * Real-time token streaming via `PipelineEventBus`
 * Policy-driven conditional branching via `PolicyEvaluator`
+* Human-in-the-loop via `ManualTask` (library) / `human.input` factory (planned)
 
 == Next Steps
 

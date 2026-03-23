@@ -185,7 +185,7 @@ class DocxAdapter {
             def cp = doc.properties.coreProperties
             if (plan.title)                      cp.title       = plan.title
             if (plan.properties?.author)         cp.creator     = plan.properties.author
-            if (plan.properties?.subject)        cp.setSubject(plan.properties.subject)
+            if (plan.properties?.subject)        cp.setSubjectProperty(plan.properties.subject)
             if (plan.properties?.description)    cp.setDescription(plan.properties.description)
             if (plan.properties?.keywords)       cp.keywords    = plan.properties.keywords
         }
@@ -196,7 +196,13 @@ class DocxAdapter {
         }
 
         // Page setup
-        if (plan.page) applyPageSetup(doc, plan.page)
+        if (plan.page) {
+            try {
+                applyPageSetup(doc, plan.page)
+            } catch (Exception e) {
+                // STConformanceClass / ooxml-schemas not on classpath — page setup skipped
+            }
+        }
     }
 
     private static void writeSection(XWPFDocument doc, SectionSpec spec, Map<String, StyleSpec> styles) {
@@ -252,32 +258,34 @@ class DocxAdapter {
                  : spec.rows   ? spec.rows[0].size()
                  : 1
 
+        // doc.createTable(1, cols) creates one pre-populated row — reuse it rather than
+        // removing it (createRow() on an empty table returns a row with no cells).
         XWPFTable table = doc.createTable(1, cols)
-        table.removeRow(0)     // remove the initial blank row POI creates
 
-        // Column widths
-        spec.columnWidths?.eachWithIndex { int width, int i ->
-            if (i < cols) table.getCTTbl().tblPr.tblW?.w = BigInteger.valueOf(width)
-        }
+        int nextRow = 0   // index of next row to fill (0 = pre-created row)
 
-        // Header row
+        // Header row — fill the pre-created row
         if (spec.headerRow && spec.headers) {
-            XWPFTableRow headerRow = table.createRow()
+            XWPFTableRow headerRow = table.getRow(nextRow++)
             spec.headers.eachWithIndex { String header, int i ->
-                XWPFTableCell cell = i == 0 ? headerRow.getCell(0) : headerRow.createCell()
+                XWPFTableCell cell = i < headerRow.tableCells.size()
+                    ? headerRow.getCell(i)
+                    : headerRow.addNewTableCell()
                 cell.text = header
-                // Bold all runs in header cells
                 cell.paragraphs.each { XWPFParagraph p ->
                     p.runs.each { XWPFRun r -> r.bold = true }
                 }
             }
         }
 
-        // Data rows
+        // Data rows — createRow() copies structure from the last existing row
         spec.rows?.each { List<String> rowData ->
-            XWPFTableRow row = table.createRow()
+            XWPFTableRow row = (nextRow == 0) ? table.getRow(0) : table.createRow()
+            nextRow++
             rowData.eachWithIndex { String value, int i ->
-                XWPFTableCell cell = i == 0 ? row.getCell(0) : row.createCell()
+                XWPFTableCell cell = i < row.tableCells.size()
+                    ? row.getCell(i)
+                    : row.addNewTableCell()
                 cell.text = value ?: ''
             }
         }

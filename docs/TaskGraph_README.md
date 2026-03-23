@@ -11,6 +11,7 @@ TaskGraph is a lightweight, asynchronous Directed Acyclic Graph (DAG) execution 
 - 🔀 **Dynamic routing** - Conditional branches, sharding, fan-out/fan-in
 - 🎨 **Fluent DSL** - Readable, declarative workflow definitions
 - 🔌 **Pluggable backends** - Dataflow, CompletableFuture, Vert.x, etc.
+- 📄 **Office Document DSL** - Generate/read `.xlsx`, `.docx`, `.pptx` files with idiomatic Groovy builders
 
 ---
 
@@ -759,12 +760,66 @@ action { ctx, prevValue ->
 
 ---
 
+## Office Document DSL
+
+TaskGraph includes a first-class DSL for generating and reading Office documents as DAG tasks:
+
+```groovy
+// Excel
+xlsxTask('gen-report') {
+    file '/output/q3.xlsx'
+    workbook {
+        style('header') { font bold: true, color: '#FFFFFF'; fill color: '#1F497D' }
+        style('money')  { currency() }
+        sheet('Results') {
+            row 1, style: 'header', values: ['Region', 'Revenue', 'Target']
+            rows dataKey: 'salesData', startAt: 2, style: 'money'
+        }
+    }
+}
+
+// Word
+docxTask('gen-summary') {
+    file '/output/summary.docx'
+    document {
+        title 'Q3 Summary'
+        section { heading 'Overview', 1; text 'Performance report.' }
+        section { heading 'Detail', 2; table { headers ['Region','Revenue']; row ['North','£1.2M'] } }
+    }
+}
+
+// PowerPoint
+pptxTask('gen-deck') {
+    file '/output/deck.pptx'
+    presentation {
+        slide { layout 'TITLE'; title 'Q3 Review' }
+        slide {
+            layout 'TITLE_CONTENT'; title 'Revenue'
+            shape { type 'IMAGE'; image '/charts/rev.png'; positionInches 1.0, 1.5; sizeInches 8.0, 5.0 }
+        }
+    }
+}
+```
+
+Key features:
+- **POI-agnostic DSL** — Task and plan layers have no Apache POI imports; adapter is injected at runtime
+- **Style inheritance** — `extend 'parentStyle'` with cycle detection
+- **Rich text** — `richText { bold 'text'; italic 'note'; run 'plain' }` in cells, paragraphs, and shapes
+- **Formula resolution** — `#{NamedRange}` substitution + `{r}` column-formula placeholder
+- **Query DSL** — structured Excel reads with row predicates, column projection, type coercion
+- **Typed links** — URL / EMAIL / FILE / INTERNAL hyperlinks in cells
+
+See **Chapter 15** of the AsciiDoc reference guide for full documentation.
+
+---
+
 ## Additional Resources
 
 - **Full Manual**: `taskgraph_manual_full.md` - Detailed technical documentation
 - **Promise Guide**: `Promises_readme.md` - Understanding the Promise abstraction
 - **Dataflow Guide**: `dataflow_readme.md` - Backend implementation details
 - **Source Code**: `src/main/groovy/org/softwood/dag/` - Browse the implementation
+- **Chapter 15** (AsciiDoc): `src/main/groovy/org/softwood/dag/docs/asciidoc/chapters/15-office-task-dsl.adoc`
 
 ---
 
@@ -801,5 +856,6 @@ graph.run()
 
 ---
 
-**Version**: 2.0.0 (December 2025)  
-**License**: Apache 2.0
+**Version**: 2.1.0 (March 2026)  
+**License**: Apache 2.0  
+**What's new in 2.1.0**: Office Document DSL (XlsxTask, DocxTask, PptxTask) with Apache POI adapters, WorkbookPlan/DocumentPlan/PresentationPlan domain model, style inheritance, rich text, formula resolution, query DSL.

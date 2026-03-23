@@ -1,0 +1,718 @@
+= Office Document DSL — XlsxTask, DocxTask, PptxTask
+
+[abstract]
+--
+Complete reference for the Office Document DSL layer built on top of `XlsxTask`, `DocxTask`, and `PptxTask`. This chapter covers the three-layer architecture, the Groovy builder DSL for each format, shared concepts (style inheritance, rich text, formula resolution, named ranges), adapter injection, and integration with the TaskGraph DAG engine.
+--
+
+[NOTE]
+====
+*FULLY IMPLEMENTED* — All classes described in this chapter exist and compile cleanly against Apache POI 5.3.0.
+Smoke-tested: `XlsxTaskSmokeTest`, `DocxTaskSmokeTest`, `PptxTaskSmokeTest` — all green.
+
+Packages:
+`org.softwood.dag.task.xlsx` • `org.softwood.dag.task.docx` • `org.softwood.dag.task.pptx`
+
+DSL entry points available from `TaskFactory`:
+`createXlsxTask()` • `createDocxTask()` • `createPptxTask()`
+====
+
+---
+
+== Architecture Overview
+
+The Office DSL follows a strict three-layer pattern, identical for all three formats:
+
+[cols="1,2,4", options="header"]
+|===
+| Layer | Class(es) | Responsibility
+
+| *Task* | `XlsxTask` / `DocxTask` / `PptxTask`
+| TaskBase integration — resolver-aware fields, DSL closure wiring, effectClass computation, WorkingMemory access
+
+| *DSL / Plan* | `XlsxWorkbookDsl` + `WorkbookPlan` +
+`DocumentDsl` + `DocumentPlan` +
+`PresentationDsl` + `PresentationPlan`
+| Fluent Groovy builder that produces an immutable plan object. Zero POI dependency.
+
+| *Adapter* | `XlsxAdapter` / `DocxAdapter` / `PptxAdapter`
+| Apache POI write/read logic. Injected at runtime via `callFn` closure. Tasks never import POI directly.
+|===
+
+=== POI-Agnostic Design
+
+The Task and DSL layers have *no Apache POI imports*. All POI work is encapsulated in the adapter. This means:
+
+* DSL plan objects are pure Groovy — serialisable, testable, and loggable without POI on the classpath
+* The adapter can be swapped (e.g. for a LibreOffice UNO adapter) without touching DSL code
+* Unit tests for DSL builders run without the POI JAR
+
+=== callFn Injection
+
+Each task exposes a `Closure<Object> xyzCallFn` field. The adapter is wired by the factory:
+
+[source,groovy]
+----
+// TaskFactory does this automatically via AdapterFactory:
+XlsxTask task = new XlsxTask('gen-report', 'Generate Report', ctx)
+XlsxAdapterFactory.inject(task)        // sets task.xlsxCallFn = XlsxAdapter.asFn()
+
+// The callFn contract:
+task.xlsxCallFn.call('GENERATE', [filePath: '/out/report.xlsx', plan: workbookPlan])
+----
+
+Supported actions per format:
+
+[cols="1,1,1,1", options="header"]
+|===
+| Action | XlsxAdapter | DocxAdapter | PptxAdapter
+| `GENERATE` | ✅ | ✅ | ✅
+| `READ` | ✅ | ✅ | ✅
+| `QUERY` | ✅ | — | —
+| `APPEND` | ✅ | — | —
+| `TRANSFORM` | ✅ | — | —
+| `EXTRACT_TEXT` | — | ✅ | ✅
+| `MERGE` | — | ✅ | —
+| `ADD_SLIDE` | — | — | ✅
+|===
+
+---
+
+== Shared Concepts
+
+=== StyleSpec and Style Inheritance
+
+`StyleSpec` is shared across all three formats (defined in `org.softwood.dag.task.xlsx`). It covers font, fill, border, alignment, and data format:
+
+[source,groovy]
+----
+workbook {
+    style('header') {
+        font bold: true, size: 12, color: '#FFFFFF', name: 'Calibri'
+        fill color: '#1F497D', pattern: 'SOLID_FOREGROUND'
+        align horizontal: 'CENTER', vertical: 'MIDDLE'
+        border bottom: 'THIN', color: '#000000'
+    }
+
+    style('subheader') {
+        extend 'header'          // <1>
+        font size: 11            // <2>
+        fill color: '#4472C4'
+    }
+}
+----
+<1> `extend 'header'` sets `StyleSpec.extendsStyle = 'header'`
+<2> Only overridden fields are set — unset fields inherit from parent
+
+`StyleResolver.resolve(spec, registry)` walks the `extendsStyle` chain at write time, merging parent fields first then applying child overrides. Cycle detection throws if the chain exceeds 10 levels.
+
+==== Format Shortcuts on StyleDsl
+
+[source,groovy]
+----
+style('money')    { currency()   }   // '#,##0.00'
+style('pct')      { percent()    }   // '0.00%'
+style('count')    { integer()    }   // '#,##0'
+style('dt')       { date()       }   // 'dd/mm/yyyy'
+style('ts')       { dateTime()   }   // 'dd/mm/yyyy hh:mm'
+style('sci')      { scientific() }   // '0.00E+00'
+style('txt')      { text()       }   // '@'
+----
+
+=== Rich Text Runs
+
+`RichRun` (in `org.softwood.dag.task.xlsx.model`) is shared by all three formats for mixed-format text:
+
+[source,groovy]
+----
+cell('A1') {
+    richText {
+        run  'Total: '
+        bold '£1,234.56',  color: '#C00000'
+        italic ' (provisional)', fontSize: 9
+        run  ' — Q3 2026'
+    }
+}
+----
+
+Each `run {}` / `bold {}` / `italic {}` call appends a `RichRun` to `CellSpec.richText`. The adapter maps each run to a `XSSFRichTextString` / `XWPFRun` / `XSLFTextRun` as appropriate.
+
+=== Typed Links (xlsx only)
+
+`LinkSpec` replaces the old flat `String hyperlink`:
+
+[source,groovy]
+----
+cell('B3') {
+    value 'Click here'
+    link 'https://example.com'                           // URL (default)
+    link type: 'EMAIL', target: 'hello@example.com'
+    link type: 'FILE',  target: 'C:/reports/q3.xlsx'
+    link type: 'INTERNAL', target: 'Summary!A1'          // within-workbook
+}
+----
+
+---
+
+== Excel DSL (XlsxTask)
+
+=== Workbook-level DSL
+
+[source,groovy]
+----
+xlsxTask('generate-report') {
+    file '/output/q3-report.xlsx'
+    outputKey 'reportPath'
+    action 'GENERATE'
+
+    workbook {                                           // <1>
+        createIfMissing        true
+        preserveExistingStyles false
+        evaluateFormulas       true
+        template               '/templates/corp.xlsx'   // optional
+
+        namedRange 'TotalRevenue', 'Summary!B2:B500'    // workbook-scope named range
+
+        style('header')   { font bold:true, color:'#FFFFFF'; fill color:'#1F497D' }
+        style('money')    { currency(); align horizontal:'RIGHT' }
+        style('date')     { date() }
+
+        sheet('Summary') { ... }
+        sheet('Detail')  { ... }
+    }
+}
+----
+<1> The `workbook { }` closure delegates to `XlsxWorkbookDsl`, which builds a `WorkbookPlan` and passes it to `XlsxAdapter.asFn().call('GENERATE', ...)`.
+
+=== Sheet DSL
+
+[source,groovy]
+----
+sheet('Summary') {
+    tabColor         '#90CAF9'
+    freeze           'B2'               // freeze rows above row 2, columns left of col B
+    autoFilter       'A1:H1'
+    protect          password: 'secret', sort: true, filter: true
+    page             paper: 'A4', orientation: 'landscape', fitWidth: 1
+
+    defaultRowHeight   18
+    defaultColumnWidth 14
+    defaultStyle       'body'
+
+    style('localOverride') { font italic: true }        // sheet-scoped style
+
+    namedRange 'Revenue', 'B2:B100'                     // sheet-scope named range
+
+    // Rows
+    row 1, style: 'header', height: 24, values: ['Region', 'Q1', 'Q2', 'Q3', 'Total']
+    row(2) {
+        cell 'A', value: 'North'
+        cell 'B', value: 1200.50, style: 'money'
+        cell 'E', formula: 'SUM(B2:D2)', style: 'money'
+    }
+    row()                                               // skip one row
+    rows dataKey: 'salesData', startAt: 4, style: 'body'  // deferred from WorkingMemory
+
+    // Standalone cell
+    cell 'A50', value: 'Grand Total', style: 'header'
+    cell('B50') { formula 'SUM(B2:B49)'; style 'money' }
+
+    // Columns
+    column 'A', width: 20
+    column('B:E') { width 14; style 'money' }
+
+    // Ranges
+    range 'A1:E1', style: 'header'
+    range('B2:E49') {
+        style         'money'
+        columnFormula 'SUM(B{r}:D{r})'                 // {r} = current row number
+    }
+
+    // Structure
+    merge        'A50:A51'
+    groupRows    4..49,  collapsed: true
+    groupColumns 'B:D',  collapsed: false
+}
+----
+
+==== Row Auto-Sequencing
+
+The sheet maintains a `_nextRow` counter:
+
+[cols="2,3", options="header"]
+|===
+| Call | Behaviour
+| `row(n, ...)` | Sets index = n, advances `_nextRow` to n+1
+| `row { ... }` | Uses `_nextRow`, then increments
+| `row()` | Skips one row, increments `_nextRow`
+| `rows(dataKey:...)` | Records `DataRowsSpec` at current `_nextRow` but does NOT advance
+|===
+
+=== Column DSL
+
+[source,groovy]
+----
+column 'A', width: 20
+column('B') { width 14; autoSize true; style 'money'; hidden false }
+column 'C:F', width: 12
+----
+
+=== Range DSL
+
+[source,groovy]
+----
+range('B2:B500') {
+    style         'money'
+    columnFormula '#{TotalRevenue}/12'      // #{Name} resolves via named range registry
+}
+
+range('C2:C500') {
+    columnFormula 'B{r}*1.2'               // {r} = current row, e.g. 'B2*1.2', 'B3*1.2' ...
+}
+----
+
+==== Formula Resolution
+
+`FormulaResolver` processes two substitutions at write time:
+
+* `#{Name}` — looks up `Name` in the workbook/sheet named ranges map and substitutes the A1-style ref
+* `{r}` — substitutes the current row number when writing column formulas
+
+=== Query DSL (READ path)
+
+[source,groovy]
+----
+xlsxTask('load-data') {
+    file      '/data/monthly.xlsx'
+    outputKey 'reportData'
+    action    'QUERY'
+
+    query {
+        sheet      'Summary'
+        range      'A1:F500'
+        columns    'Region', 'Revenue', 'Status'
+        rows       { row -> row['Status'].asString() in ['Active', 'Pending'] }
+        format     'list_of_maps'           // list_of_maps | list_of_lists | map_by_key
+        keyColumn  'Region'                 // for map_by_key format
+        coerce     Revenue: Double, Quarter: Integer
+    }
+}
+----
+
+`SpreadsheetRow` / `SpreadsheetCell` interfaces provided by `QueryDsl`:
+
+[source,groovy]
+----
+SpreadsheetRow row  →  row['ColumnName']  or  row.cell('B')
+SpreadsheetCell     →  .getValue() | .asString() | .asDouble() | .asInt()
+                        .asDate() | .asBool() | .getFormula() | .getComment()
+----
+
+---
+
+== Word Document DSL (DocxTask)
+
+=== Document-level DSL
+
+[source,groovy]
+----
+docxTask('generate-report') {
+    file      '/output/exec-summary.docx'
+    outputKey 'docPath'
+    action    'GENERATE'
+
+    document {
+        title 'Executive Summary — Q3 2026'
+
+        properties author: 'Finance Team', subject: 'Quarterly Review'
+
+        page paper: 'A4', orientation: 'portrait',
+             marginTop: 1440, marginBottom: 1440,   // twips (1440 = 1 inch)
+             marginLeft: 1800, marginRight: 1800
+
+        style('bodyText') { font name: 'Calibri', size: 11 }
+        style('emphasis') { extend 'bodyText'; font italic: true }
+
+        section {
+            heading 'Overview', 1
+            text    'This report covers Q3 2026 performance across all regions.'
+        }
+
+        section {
+            heading 'Revenue Breakdown', 2
+            table {
+                headers      ['Region', 'Q3 Revenue', 'vs Q2', 'vs Target']
+                row          ['North',  '£1.2M', '+4%', '102%']
+                row          ['South',  '£0.9M', '-2%', '94%']
+                row          ['West',   '£1.1M', '+8%', '108%']
+                headerRow    true
+                headerStyle  { fill color: '#1F497D'; font bold: true, color: '#FFFFFF' }
+                columnWidths [2000, 2000, 1500, 1500]   // twips
+            }
+        }
+
+        section {
+            heading 'Key Risks', 2
+            bullets ['Supply chain delays', 'FX headwinds', 'Regulatory uncertainty']
+        }
+
+        section {
+            heading 'Appendix Note', 3
+            richText {
+                bold    'Important: '
+                run     'All figures are unaudited. See '
+                italic  'Appendix A'
+                run     ' for methodology.'
+            }
+        }
+    }
+}
+----
+
+=== SectionSpec Mapping to POI
+
+[cols="2,4", options="header"]
+|===
+| DSL field | POI output
+| `heading(text, level)` | `XWPFParagraph` with style `Heading1`..`Heading6`
+| `text(string)` | Plain `XWPFParagraph` with `XWPFRun`
+| `richText { }` | One `XWPFRun` per `RichRun` with bold/italic/color/fontSize
+| `table { }` | `XWPFTable`; first row styled if `headerRow=true`
+| `bullets([...])` | `XWPFParagraph` per item with `LIST_BULLET` style
+| `numbered([...])` | `XWPFParagraph` per item with `LIST_NUMBER` style
+|===
+
+=== DocxTask Actions
+
+[cols="1,4", options="header"]
+|===
+| Action | Behaviour
+| `GENERATE` | Write `DocumentPlan` → `.docx` file via `DocxAdapter`
+| `READ` | Return `Map` of sections (heading → content text)
+| `EXTRACT_TEXT` | Return plain `String` of all body text concatenated
+| `MERGE` | Merge `List<String>` file paths into one output `.docx`
+|===
+
+---
+
+== PowerPoint DSL (PptxTask)
+
+=== Presentation-level DSL
+
+[source,groovy]
+----
+pptxTask('generate-deck') {
+    file      '/output/q3-review.pptx'
+    outputKey 'deckPath'
+    action    'GENERATE'
+
+    presentation {
+        title      'Q3 2026 Business Review'
+        properties author: 'Strategy Team', subject: 'Quarterly Review'
+
+        layout {
+            theme       'Office Theme'
+            background  '#FFFFFF'
+            fontFamily  'Calibri'
+            titleFontSize 28
+            bodyFontSize  18
+            accentColor '#1F497D'
+        }
+
+        slide {
+            layout 'TITLE'
+            title  'Q3 2026 Business Review'
+            notes  'Welcome slide — presenter introduces the agenda'
+        }
+
+        slide {
+            layout  'TITLE_CONTENT'
+            title   'Revenue Performance'
+            notes   'Highlight North region outperformance'
+            shape {
+                type    'TEXT_BOX'
+                text    'North: £1.2M (+4% vs Q2)'
+                style   { font bold: true, size: 18 }
+                positionInches 1.0, 2.0
+                sizeInches     8.0, 1.5
+            }
+        }
+
+        slide {
+            layout 'TITLE_CONTENT'
+            title  'Regional Breakdown'
+            shape {
+                type  'TABLE'
+                table {
+                    headers ['Region', 'Revenue', 'vs Target']
+                    row     ['North', '£1.2M', '102%']
+                    row     ['South', '£0.9M', '94%']
+                    row     ['West',  '£1.1M', '108%']
+                }
+                positionInches 0.5, 1.8
+                sizeInches     9.0, 4.0
+            }
+        }
+
+        slide {
+            layout 'TITLE_CONTENT'
+            title  'Trend Chart'
+            shape {
+                type      'IMAGE'
+                image     '/charts/q3-trend.png'
+                positionInches 1.0, 1.5
+                sizeInches     8.0, 5.0
+            }
+            transition {
+                type       'FADE'
+                durationMs  500
+            }
+        }
+    }
+}
+----
+
+=== ShapeSpec Position and Size
+
+All positions and sizes are stored internally in EMUs (English Metric Units).
+`914400 EMU = 1 inch`.
+
+[source,groovy]
+----
+shape {
+    // Raw EMU:
+    position 914400L, 1828800L      // 1 inch, 2 inches from top-left
+    size     8229600L, 4572000L     // 9 inches wide, 5 inches tall
+
+    // Convenience (preferred):
+    positionInches 1.0, 2.0
+    sizeInches     9.0, 5.0
+}
+----
+
+=== SlideLayout Names
+
+Standard POI layout names (matched against `XSLFSlideLayout.name`):
+
+* `TITLE` — title + subtitle
+* `TITLE_CONTENT` — title + content area
+* `BLANK` — empty slide
+* `TWO_CONTENT` — title + two side-by-side content areas
+* `SECTION_HEADER` — section divider
+* `PICTURE_CAPTION` — image with caption
+
+=== PptxTask Actions
+
+[cols="1,4", options="header"]
+|===
+| Action | Behaviour
+| `GENERATE` | Write `PresentationPlan` → `.pptx` file via `PptxAdapter`
+| `READ` | Return `Map` of slide metadata (count, titles, notes)
+| `ADD_SLIDE` | Open existing `.pptx`, append one `SlidePlan`
+| `EXTRACT_TEXT` | Return plain `String` of all slide text concatenated
+|===
+
+NOTE: `STTransitionSpeed` is not available in `poi-ooxml:5.3.0` (requires `poi-ooxml-full`).
+Transitions apply type (FADE/PUSH/WIPE etc.) without an explicit speed override.
+See <<poi-dependencies>> for details.
+
+---
+
+== TaskFactory Integration
+
+All three task types are registered in `TaskType` and wired in `TaskFactory`. Use
+`createXlsxTask()` / `createDocxTask()` / `createPptxTask()` — these automatically
+inject the appropriate adapter via the `AdapterFactory`:
+
+[source,groovy]
+----
+def graph = TaskGraph.build {
+
+    // Upstream: fetch data into WorkingMemory
+    sqlTask('fetch-sales') {
+        provider   'groovy'
+        query      'SELECT region, revenue FROM sales WHERE quarter = ?'
+        params     [3]
+        outputKey  'salesData'
+    }
+
+    // Generate Excel report using DSL + WorkingMemory data
+    xlsxTask('gen-report') {
+        dependsOn 'fetch-sales'
+        file      '/output/q3-report.xlsx'
+        outputKey 'reportPath'
+
+        workbook {
+            style('header') { font bold: true, color: '#FFFFFF'; fill color: '#1F497D' }
+            style('money')  { currency() }
+
+            sheet('Results') {
+                row 1, style: 'header', values: ['Region', 'Revenue']
+                rows dataKey: 'salesData', startAt: 2, style: 'money'
+            }
+        }
+    }
+
+    // Generate Word summary
+    docxTask('gen-summary') {
+        dependsOn 'fetch-sales'
+        file      '/output/q3-summary.docx'
+
+        document {
+            title 'Q3 Sales Summary'
+            section {
+                heading 'Overview', 1
+                text    'Generated from live sales data.'
+            }
+        }
+    }
+
+    // Generate PowerPoint deck
+    pptxTask('gen-deck') {
+        dependsOn 'gen-report'
+        file      '/output/q3-deck.pptx'
+
+        presentation {
+            slide { layout 'TITLE'; title 'Q3 Sales Review' }
+            slide {
+                layout 'TITLE_CONTENT'
+                title  'Revenue by Region'
+                shape {
+                    type 'IMAGE'; image '/charts/revenue.png'
+                    positionInches 1.0, 1.5; sizeInches 8.0, 5.0
+                }
+            }
+        }
+    }
+}
+
+def result = graph.run().get()
+----
+
+---
+
+== EffectClass Computation
+
+Each task computes `effectClass` from its `action` field:
+
+[cols="2,2,2,2", options="header"]
+|===
+| Action | XlsxTask | DocxTask | PptxTask
+| `READ` / `EXTRACT_TEXT` | `PURE` | `PURE` | `PURE`
+| `QUERY` | `PURE` | — | —
+| `GENERATE` / `WRITE` | `IDEMPOTENT` | `IDEMPOTENT` | `IDEMPOTENT`
+| `APPEND` / `ADD_SLIDE` | `EFFECTFUL` | `EFFECTFUL` | `EFFECTFUL`
+| `TRANSFORM` / `MERGE` | `EFFECTFUL` | `EFFECTFUL` | —
+| `SCRIPT` | `IDEMPOTENT` | `IDEMPOTENT` | `IDEMPOTENT`
+|===
+
+---
+
+[[poi-dependencies]]
+== Apache POI Dependencies
+
+[source,groovy]
+----
+// build.gradle — required for office adapter functionality
+implementation 'org.apache.poi:poi:5.3.0'
+implementation 'org.apache.poi:poi-ooxml:5.3.0'
+
+// For tests — brings in full ooxml schema bindings (CTPageMar, CTPageSz etc.)
+testImplementation 'org.apache.poi:poi-ooxml-full:5.3.0'
+----
+
+[WARNING]
+====
+`poi-ooxml:5.3.0` ships with `poi-ooxml-lite` (stripped schema bindings).
+Classes in `org.openxmlformats.schemas.*` (e.g. `CTPageMar`, `CTPageSz`,
+`STTransitionSpeed`, `STConformanceClass`) are *only* available in `poi-ooxml-full`.
+If you see `ClassNotFoundException` for schema classes, add `poi-ooxml-full` to your
+dependencies.
+
+`STTransitionSpeed` is intentionally not used in `PptxAdapter` to avoid the full
+schema dependency in production — transitions apply type (FADE/PUSH etc.) without
+an explicit speed setting.
+====
+
+[WARNING]
+====
+*Groovy + POI:* Never use fully-qualified class names inline in Groovy closure bodies
+or static contexts. Groovy's compiler treats `org.apache.poi.xssf.usermodel.XSSFWorkbook`
+as a property-access chain, not a type reference, and fails to resolve it.
+
+Always import every POI/ooxml class at the top of the file using named imports.
+Wildcard imports (`import org.apache.poi.xssf.usermodel.*`) may mask missing types
+at compile time and are not recommended.
+====
+
+---
+
+== Class Summary
+
+=== xlsx package (`org.softwood.dag.task.xlsx`)
+
+[cols="2,4", options="header"]
+|===
+| Class | Purpose
+| `WorkbookPlan` | Immutable workbook model (+ SheetPlan, RowSpec, CellSpec, StyleSpec, RangeSpec, etc.)
+| `XlsxWorkbookDsl` | Entry-point DSL builder → `WorkbookPlan`
+| `SheetDsl` | Sheet builder with row sequencer → `SheetPlan`
+| `RowDsl` | Row builder → `RowSpec`
+| `CellDsl` | Cell builder with richText/link/comment → `CellSpec`
+| `ColumnDsl` | Column width/style/autoSize builder → `ColumnSpec`
+| `RangeDsl` | Range style/formula/validation builder → `RangeSpec`
+| `StyleDsl` | Named style builder with format shortcuts + `extend()` → `StyleSpec`
+| `StyleResolver` | Resolves `extendsStyle` chain at write time; cycle detection
+| `FormulaResolver` | `#{Name}` named-range substitution; `{r}` column-formula placeholder
+| `QueryDsl` | Query plan builder → `QueryPlan`
+| `QueryExecutor` | Executes `QueryPlan` against an open `XSSFWorkbook`
+| `XlsxAdapter` | POI write/read for GENERATE/READ/QUERY/APPEND/TRANSFORM
+| `model/LinkSpec` | Typed hyperlink model (URL / EMAIL / FILE / INTERNAL)
+| `model/RichRun` | Single rich-text run (text + bold/italic/underline/color/font)
+|===
+
+=== docx package (`org.softwood.dag.task.docx`)
+
+[cols="2,4", options="header"]
+|===
+| Class | Purpose
+| `DocumentPlan` | Immutable document model (+ SectionSpec, TableSpec, PageSpec)
+| `DocumentDsl` | Entry-point DSL builder → `DocumentPlan`
+| `SectionDsl` | Section builder (heading/text/richText/table/bullets/numbered) → `SectionSpec`
+| `TableDsl` | Table builder (headers/rows/styles/columnWidths) → `TableSpec`
+| `DocxAdapter` | POI write/read for GENERATE/READ/EXTRACT_TEXT/MERGE
+|===
+
+=== pptx package (`org.softwood.dag.task.pptx`)
+
+[cols="2,4", options="header"]
+|===
+| Class | Purpose
+| `PresentationPlan` | Immutable presentation model (+ SlidePlan, ShapeSpec, SlideLayoutSpec, TransitionSpec)
+| `PresentationDsl` | Entry-point DSL builder → `PresentationPlan`
+| `SlideDsl` | Slide builder (title/layout/notes/shapes/transition) → `SlidePlan`
+| `ShapeDsl` | Shape builder (text/richText/table/image/position/size) → `ShapeSpec`
+| `PptxAdapter` | POI write/read for GENERATE/READ/ADD_SLIDE/EXTRACT_TEXT
+|===
+
+=== Root task package (`org.softwood.dag.task`)
+
+[cols="2,4", options="header"]
+|===
+| Class | Purpose
+| `XlsxTask` | TaskBase subclass; resolver-aware fields; DSL closure wiring; query() method
+| `DocxTask` | TaskBase subclass; resolver-aware fields; DSL closure wiring
+| `PptxTask` | TaskBase subclass; resolver-aware fields; DSL closure wiring
+| `XlsxAdapterFactory` | `inject(XlsxTask)` — sets `task.xlsxCallFn = XlsxAdapter.asFn()`
+| `DocxAdapterFactory` | `inject(DocxTask)` — sets `task.docxCallFn = DocxAdapter.asFn()`
+| `PptxAdapterFactory` | `inject(PptxTask)` — sets `task.pptxCallFn = PptxAdapter.asFn()`
+|===
+
+---
+
+== Next Steps
+
+* **Chapter 13** — All other concrete task types (SqlTask, HttpTask, FileTask, etc.)
+* **Chapter 11** — TaskBase reference (resolver-aware fields, effectClass, retry, circuit breaker)
+* **Chapter 7** — Task DAG usage examples
+* **mcp-groovy-filesystem-server docs** — `OfficeDocumentHandler` bridge (Phase 7) wires these adapters into the MCP tool surface (`read_office` / `write_office` actions)

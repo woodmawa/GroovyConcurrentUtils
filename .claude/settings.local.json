@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__context-server__context_lifecycle",
+      "mcp__context-server__context_read",
+      "mcp__groovy-filesystem__file_read",
+      "mcp__groovy-filesystem__file_write",
+      "mcp__context-server__context_write",
+      "mcp__groovy-filesystem__file_lifecycle",
+      "mcp__groovy-filesystem__execute",
+      "mcp__groovy-filesystem__file_search"
+    ]
+  }
+}

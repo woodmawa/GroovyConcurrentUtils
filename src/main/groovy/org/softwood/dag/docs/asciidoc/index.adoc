@@ -39,7 +39,7 @@ This guide is structured as a progressive learning experience:
 . **Part I (Chapters 1-5)**: Foundation - Architecture, design philosophy, and core concepts
 . **Part II (Chapters 6-8)**: Usage - Practical guides and examples
 . **Part III (Chapters 9-10)**: Operations - Security, monitoring, and production deployment
-. **Part IV (Chapters 11-13)**: Reference - Deep dive into components and task types
+. **Part IV (Chapters 11-15)**: Reference - Deep dive into components, task types, and the Office Document DSL
 
 You can read sequentially or jump to specific chapters based on your needs.
 
@@ -80,6 +80,8 @@ include::chapters/11-taskbase.adoc[]
 include::chapters/12-gateways.adoc[]
 
 include::chapters/13-task-types.adoc[]
+
+include::chapters/15-office-task-dsl.adoc[]
 
 [appendix]
 == Appendix A: Migration Guide

@@ -2,6 +2,7 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.xlsx.QueryPlan
 
 /**
  * A DAG task that reads from or writes to Excel workbooks (.xlsx).
@@ -214,5 +215,20 @@ class XlsxTask extends TaskBase<Object> {
                 log.debug "XlsxTask '${id}': stored result under sharedFacts['${key}']"
             }
         }
+    }
+
+    /**
+     * Execute a structured query against an Excel file, returning a filtered,
+     * optionally coerced list of rows.
+     *
+     * <p>Full implementation is wired up in Turn 4 via the injected
+     * {@code xlsxCallFn} adapter.  This stub allows DSL-built tasks to compile
+     * and be wired before the adapter is ready.</p>
+     *
+     * @param plan the query descriptor built by {@link org.softwood.dag.task.xlsx.QueryDsl}
+     * @return List of rows in the format specified by {@link org.softwood.dag.task.xlsx.QueryPlan#format}
+     */
+    List query(QueryPlan plan) {
+        throw new UnsupportedOperationException('XlsxTask.query() — implemented in Turn 4')
     }
 }

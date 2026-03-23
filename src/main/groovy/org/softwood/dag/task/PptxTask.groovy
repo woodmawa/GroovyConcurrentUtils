@@ -2,6 +2,8 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.pptx.PresentationDsl
+import org.softwood.dag.task.pptx.PresentationPlan
 
 /**
  * A DAG task that reads from or generates PowerPoint presentations (.pptx).
@@ -12,93 +14,136 @@ import org.softwood.promise.Promise
  *
  * <h3>Actions:</h3>
  * <pre>
- *   READ         – Read slide content, returns List&lt;Map&gt; of slide descriptors.
+ *   READ         – Read slide content; returns List&lt;Map&gt; of slide descriptors.
  *   GENERATE     – Create a new presentation from templatePath or scratch.
  *   ADD_SLIDE    – Append one or more slides to an existing presentation.
  *   EXTRACT_TEXT – Return all text from all slides as a single String.
+ *   MERGE        – Merge slides from multiple source files into one output.
+ *   CONVERT      – Convert slides to another format (e.g. PDF, PNG).
+ *   SCRIPT       – Use a {@link PresentationDsl} closure to describe the deck.
  * </pre>
  *
- * <h3>Params:</h3>
+ * <h3>DSL usage:</h3>
  * <pre>
- *   filePath     – Required. Absolute path to the .pptx file.
- *   templatePath – Optional. Master/theme template .pptx for GENERATE.
- *   outputKey    – WorkingMemory key to store result under (optional).
- *   slides       – List of slide descriptor maps (see structure below).
- *   slidesKey    – WorkingMemory key to pull slides from (alternative to slides).
+ *   pptxTask('generate-deck') {
+ *       file      '/decks/q3-review.pptx'
+ *       outputKey 'deckResult'
+ *       presentation {
+ *           title 'Q3 Financial Review'
+ *           slide { title 'Overview'; shape { text 'Revenue grew 12%' } }
+ *           slide { title 'Data';     shape { table { headers ['Q','Rev']; row ['Q1','1.2M'] } } }
+ *       }
+ *   }
  * </pre>
  *
- * <h3>Slide descriptor structure:</h3>
+ * <h3>Legacy flat-map usage:</h3>
  * <pre>
- *   [
- *     title  : 'Slide Title',
- *     content: 'Body text, or a List&lt;String&gt; for bullet points',
- *     layout : 'TITLE_CONTENT' | 'TITLE_ONLY' | 'BLANK' | 'TWO_CONTENT',
- *     notes  : 'Optional speaker notes'
- *   ]
- * </pre>
- *
- * <h3>LLM chaining pattern:</h3>
- * <pre>
- *   // Prior LlmTask stores structured slide plan to 'deckPlan' in WorkingMemory
- *   // PptxTask picks it up via slidesKey:
- *   pptx("render-deck") {
- *       action = 'GENERATE'
- *       slidesKey = 'deckPlan'
- *       filePath = "output/sprint-report.pptx"
+ *   pptxTask('render-deck') {
+ *       file      '/decks/sprint-report.pptx'
+ *       slidesKey 'deckPlan'              // List&lt;Map&gt; from prior LlmTask
+ *       outputKey 'deckResult'
  *   }
  * </pre>
  *
  * <h3>Injection:</h3>
  * <pre>
- *   task.pptxCallFn = { String action, Map config -&gt; Object result }
+ *   task.pptxCallFn = { String action, Map config -> Object result }
  * </pre>
  *
  * <h3>Effect class:</h3>
- * IDEMPOTENT (GENERATE overwrites same output); PURE for READ/EXTRACT_TEXT.
+ * {@code PURE} for READ / EXTRACT_TEXT; {@code IDEMPOTENT} for all write actions.
  */
 @Slf4j
 class PptxTask extends TaskBase<Object> {
 
+    enum PptxAction { READ, GENERATE, ADD_SLIDE, EXTRACT_TEXT, MERGE, CONVERT, SCRIPT }
+
     // -------------------------------------------------------------------------
-    // Config
+    // Resolver-aware config fields
     // -------------------------------------------------------------------------
 
-    /** Action: READ | GENERATE | ADD_SLIDE | EXTRACT_TEXT */
-    String action = 'GENERATE'
+    /** Absolute path to the .pptx file (resolver-aware). */
+    Object filePathValue
 
-    /** Absolute path to the .pptx file. Required. */
-    String filePath
+    /** WorkingMemory key under which to store the task result (resolver-aware). */
+    Object outputKeyValue
+
+    /** WorkingMemory key to pull slide data from (resolver-aware). */
+    Object slidesKeyValue
+
+    // -------------------------------------------------------------------------
+    // Action
+    // -------------------------------------------------------------------------
+
+    /** Current action. Default {@code GENERATE}. */
+    PptxAction action = PptxAction.GENERATE
+
+    // -------------------------------------------------------------------------
+    // Legacy flat-map fields (backward-compatible)
+    // -------------------------------------------------------------------------
 
     /** Optional master/theme template .pptx for GENERATE action. */
     String templatePath
 
-    /** WorkingMemory key under which to store the task result. */
-    String outputKey
-
     /**
-     * Slide descriptors: List&lt;Map&gt; each with keys: title, content, layout, notes.
-     * Takes precedence over slidesKey if both are set.
-     *
-     * Supported layout values: TITLE_CONTENT (default), TITLE_ONLY, BLANK, TWO_CONTENT.
+     * Slide descriptors: {@code List<Map>} each with keys:
+     * {@code title}, {@code content}, {@code layout}, {@code notes}.
+     * Takes precedence over {@link #slidesKeyValue} if both are set.
      */
     List<Map<String, Object>> slides
 
+    // -------------------------------------------------------------------------
+    // DSL hook
+    // -------------------------------------------------------------------------
+
     /**
-     * WorkingMemory key to pull slide data from.
-     * Expects a List&lt;Map&gt; in the same structure as slides.
-     * Typically populated by a prior LlmTask with outputSchema set.
+     * Presentation DSL closure — set by {@link #presentation(Closure)}.
+     * When non-null, action is set to {@code SCRIPT} automatically.
      */
-    String slidesKey
+    Closure presentationDslClosure
+
+    // -------------------------------------------------------------------------
+    // Injected adapter
+    // -------------------------------------------------------------------------
 
     /**
      * The POI implementation injected by the server factory.
-     * Signature: { String action, Map config -&gt; Object result }
+     * Signature: {@code { String action, Map config -> Object result }}
      * Must be non-null at execution time.
      */
     Closure<Object> pptxCallFn
 
-    /** Effect class: IDEMPOTENT (generates/overwrites same output file). */
-    final EffectClass effectClass = EffectClass.IDEMPOTENT
+    // -------------------------------------------------------------------------
+    // Fluent setters
+    // -------------------------------------------------------------------------
+
+    void file(Object v)       { filePathValue  = v }
+    void outputKey(Object v)  { outputKeyValue = v }
+    void slidesKey(Object v)  { slidesKeyValue = v }
+
+    void action(String a)     { action = PptxAction.valueOf(a.toUpperCase()) }
+
+    /**
+     * Attach a DSL presentation closure. Sets {@code action = SCRIPT}.
+     * <pre>
+     *   presentation {
+     *       title 'Q3 Review'
+     *       slide { title 'Overview'; shape { text 'Revenue grew 12%' } }
+     *   }
+     * </pre>
+     */
+    void presentation(@DelegatesTo(PresentationDsl) Closure cl) {
+        presentationDslClosure = cl
+        action                 = PptxAction.SCRIPT
+    }
+
+    // -------------------------------------------------------------------------
+    // Effect class — computed from action
+    // -------------------------------------------------------------------------
+
+    EffectClass getEffectClass() {
+        action in [PptxAction.READ, PptxAction.EXTRACT_TEXT] ? EffectClass.PURE : EffectClass.IDEMPOTENT
+    }
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -117,6 +162,10 @@ class PptxTask extends TaskBase<Object> {
         if (!pptxCallFn) {
             throw new IllegalStateException("PptxTask '${id}': pptxCallFn has not been injected by the server factory")
         }
+
+        String filePath  = evaluateValue(filePathValue,  ctx, prevValue) as String
+        String outputKey = evaluateValue(outputKeyValue, ctx, prevValue) as String
+
         if (!filePath) {
             throw new IllegalStateException("PptxTask '${id}': filePath is required")
         }
@@ -124,10 +173,22 @@ class PptxTask extends TaskBase<Object> {
         Map<String, Object> memory = resolveWorkingMemory(ctx)
 
         return ctx.promiseFactory.executeAsync {
-            Map config = buildConfig(memory, prevValue)
-            log.debug "PptxTask '${id}': executing action=${action} on ${filePath}"
+            Map<String, Object> config
 
-            Object result = pptxCallFn.call(action.toUpperCase(), config)
+            if (presentationDslClosure) {
+                // DSL path — build a PresentationPlan from the closure
+                def dsl = new PresentationDsl(ctx, prevValue)
+                executeDeferredConfig(presentationDslClosure, dsl, ctx, prevValue)
+                PresentationPlan plan = dsl.build()
+                config = [filePath: filePath, action: 'SCRIPT', presentationPlan: plan]
+            } else {
+                // Legacy flat-map path
+                config = buildConfig(memory, prevValue)
+                config.filePath = filePath
+            }
+
+            log.debug "PptxTask '${id}': executing action=${action} on ${filePath}"
+            Object result = pptxCallFn.call(action.name(), config)
 
             if (outputKey && result != null) {
                 storeResult(ctx, outputKey, result)
@@ -139,33 +200,45 @@ class PptxTask extends TaskBase<Object> {
     }
 
     // -------------------------------------------------------------------------
-    // Config builder
+    // Config builder (legacy path)
     // -------------------------------------------------------------------------
 
     private Map<String, Object> buildConfig(Map<String, Object> memory, Object prevValue) {
         Map<String, Object> config = [
-            filePath : filePath,
-            action   : action.toUpperCase()
+            action: action.name()
         ] as Map<String, Object>
 
         if (templatePath) config.templatePath = templatePath
 
-        // Resolve slides: explicit slides > slidesKey from memory > prevValue (if List)
+        // Resolve slides: explicit field > slidesKey from memory > prevValue (if List)
+        String sk = evaluateValue(slidesKeyValue, null, prevValue) as String
         if (slides) {
             config.slides = slides
-        } else if (slidesKey) {
-            def memSlides = memory?.sharedFacts?.get(slidesKey) ?:
-                            memory?.runContext?.get(slidesKey)
-            if (memSlides instanceof List) {
-                config.slides = memSlides
-            } else if (prevValue instanceof List) {
-                config.slides = prevValue
-            }
+        } else if (sk) {
+            def memSlides = memory?.sharedFacts?.get(sk) ?: memory?.runContext?.get(sk)
+            config.slides = (memSlides instanceof List) ? memSlides
+                          : (prevValue instanceof List)  ? prevValue
+                          : null
         } else if (prevValue instanceof List) {
             config.slides = prevValue
         }
 
         return config
+    }
+
+    // -------------------------------------------------------------------------
+    // Stub — full implementation wired in Turn 5
+    // -------------------------------------------------------------------------
+
+    /**
+     * Execute a structured query against a PowerPoint presentation.
+     * Full implementation injected in Turn 5 via the adapter.
+     *
+     * @param plan the query / extraction descriptor
+     * @return structured result (format defined by the adapter)
+     */
+    PresentationPlan query(PresentationPlan plan) {
+        throw new UnsupportedOperationException('PptxTask.query() — implemented in Turn 5')
     }
 
     // -------------------------------------------------------------------------

@@ -2,6 +2,8 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.docx.DocumentDsl
+import org.softwood.dag.task.docx.DocumentPlan
 
 /**
  * A DAG task that reads from or generates Word documents (.docx).
@@ -17,67 +19,76 @@ import org.softwood.promise.Promise
  *   APPEND_SECTION   – Append content after the last paragraph / end of doc.
  *   REPLACE_SECTION  – Replace the content under a named heading.
  *   EXTRACT_TEXT     – Return full plain-text content as a String.
+ *   SCRIPT           – Use a {@link DocumentDsl} closure to describe the document.
  * </pre>
  *
- * <h3>Params:</h3>
+ * <h3>DSL usage:</h3>
  * <pre>
- *   filePath      – Required. Absolute path to the .docx file (output or input).
- *   templatePath  – Optional. Merge-field template .docx for GENERATE action.
- *   outputKey     – WorkingMemory key to store result under (optional).
- *   content       – Map&lt;String,Object&gt; of sectionName -&gt; content for GENERATE/APPEND.
- *   contentKey    – WorkingMemory key to pull content map from (alternative to content).
- *   targetSection – Heading text to target for REPLACE_SECTION.
+ *   docxTask('generate-report') {
+ *       file      '/reports/q3.docx'
+ *       outputKey 'reportResult'
+ *       document {
+ *           title 'Q3 Report'
+ *           section { heading 'Summary'; text 'Revenue grew 12%...' }
+ *           section { heading 'Risks', 2; bullets ['Volatility', 'Supply chain'] }
+ *       }
+ *   }
  * </pre>
  *
- * <h3>Content map structure for GENERATE:</h3>
+ * <h3>Legacy flat-map usage:</h3>
  * <pre>
- *   [
- *     'Executive Summary': 'Summary text...',
- *     'Key Risks': ['Risk 1', 'Risk 2'],   // List becomes bullet list
- *     'Appendix': 'Appendix text...'
- *   ]
+ *   docxTask('generate-doc') {
+ *       file      '/reports/q3.docx'
+ *       content   ['Summary': 'text...', 'Risks': ['r1', 'r2']]
+ *       outputKey 'docResult'
+ *   }
  * </pre>
  *
  * <h3>Injection:</h3>
  * <pre>
- *   task.docxCallFn = { String action, Map config -&gt; Object result }
+ *   task.docxCallFn = { String action, Map config -> Object result }
  * </pre>
  *
  * <h3>Effect class:</h3>
- * IDEMPOTENT (GENERATE/REPLACE overwrite same output file); PURE for READ/EXTRACT_TEXT.
+ * {@code PURE} for READ / EXTRACT_TEXT; {@code IDEMPOTENT} for all write actions.
  */
 @Slf4j
 class DocxTask extends TaskBase<Object> {
 
+    enum DocxAction { READ, GENERATE, APPEND_SECTION, REPLACE_SECTION, EXTRACT_TEXT, SCRIPT }
+
     // -------------------------------------------------------------------------
-    // Config
+    // Resolver-aware config fields
     // -------------------------------------------------------------------------
 
-    /** Action: READ | GENERATE | APPEND_SECTION | REPLACE_SECTION | EXTRACT_TEXT */
-    String action = 'GENERATE'
+    /** Absolute path to the .docx file (resolver-aware). */
+    Object filePathValue
 
-    /** Absolute path to the .docx file. Required. */
-    String filePath
+    /** WorkingMemory key under which to store the task result (resolver-aware). */
+    Object outputKeyValue
+
+    /** WorkingMemory key to pull the content map from (resolver-aware). */
+    Object contentKeyValue
+
+    // -------------------------------------------------------------------------
+    // Action
+    // -------------------------------------------------------------------------
+
+    /** Current action. Default {@code GENERATE}. */
+    DocxAction action = DocxAction.GENERATE
+
+    // -------------------------------------------------------------------------
+    // Legacy flat-map fields (backward-compatible)
+    // -------------------------------------------------------------------------
 
     /** Optional merge-field template .docx for GENERATE action. */
     String templatePath
 
-    /** WorkingMemory key under which to store the task result. */
-    String outputKey
-
     /**
-     * Content map for GENERATE/APPEND_SECTION:
-     * sectionHeading -&gt; String (paragraph) or List&lt;String&gt; (bullet list).
-     * Takes precedence over contentKey if both are set.
+     * Content map for GENERATE / APPEND_SECTION:
+     * sectionHeading → String (paragraph) or List&lt;String&gt; (bullet list).
      */
     Map<String, Object> content
-
-    /**
-     * WorkingMemory key to pull the content map from.
-     * Expects a Map&lt;String,Object&gt; in the same structure as content.
-     * Used when LLM output (from a prior LlmTask) drives doc generation.
-     */
-    String contentKey
 
     /**
      * Target section heading for REPLACE_SECTION action.
@@ -85,15 +96,58 @@ class DocxTask extends TaskBase<Object> {
      */
     String targetSection
 
+    // -------------------------------------------------------------------------
+    // DSL hook
+    // -------------------------------------------------------------------------
+
+    /**
+     * Document DSL closure — set by {@link #document(Closure)}.
+     * When non-null, action is set to {@code SCRIPT} automatically.
+     */
+    Closure documentDslClosure
+
+    // -------------------------------------------------------------------------
+    // Injected adapter
+    // -------------------------------------------------------------------------
+
     /**
      * The POI implementation injected by the server factory.
-     * Signature: { String action, Map config -&gt; Object result }
+     * Signature: {@code { String action, Map config -> Object result }}
      * Must be non-null at execution time.
      */
     Closure<Object> docxCallFn
 
-    /** Effect class: IDEMPOTENT (writes overwrite same output). */
-    final EffectClass effectClass = EffectClass.IDEMPOTENT
+    // -------------------------------------------------------------------------
+    // Fluent setters
+    // -------------------------------------------------------------------------
+
+    void file(Object v)       { filePathValue  = v }
+    void outputKey(Object v)  { outputKeyValue = v }
+    void contentKey(Object v) { contentKeyValue = v }
+
+    void action(String a)     { action = DocxAction.valueOf(a.toUpperCase()) }
+
+    /**
+     * Attach a DSL document closure. Sets {@code action = SCRIPT}.
+     * <pre>
+     *   document {
+     *       title 'Q3 Report'
+     *       section { heading 'Summary'; text '...' }
+     *   }
+     * </pre>
+     */
+    void document(@DelegatesTo(DocumentDsl) Closure cl) {
+        documentDslClosure = cl
+        action             = DocxAction.SCRIPT
+    }
+
+    // -------------------------------------------------------------------------
+    // Effect class — computed from action
+    // -------------------------------------------------------------------------
+
+    EffectClass getEffectClass() {
+        action in [DocxAction.READ, DocxAction.EXTRACT_TEXT] ? EffectClass.PURE : EffectClass.IDEMPOTENT
+    }
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -112,6 +166,10 @@ class DocxTask extends TaskBase<Object> {
         if (!docxCallFn) {
             throw new IllegalStateException("DocxTask '${id}': docxCallFn has not been injected by the server factory")
         }
+
+        String filePath  = evaluateValue(filePathValue,  ctx, prevValue) as String
+        String outputKey = evaluateValue(outputKeyValue, ctx, prevValue) as String
+
         if (!filePath) {
             throw new IllegalStateException("DocxTask '${id}': filePath is required")
         }
@@ -119,10 +177,22 @@ class DocxTask extends TaskBase<Object> {
         Map<String, Object> memory = resolveWorkingMemory(ctx)
 
         return ctx.promiseFactory.executeAsync {
-            Map config = buildConfig(memory, prevValue)
-            log.debug "DocxTask '${id}': executing action=${action} on ${filePath}"
+            Map<String, Object> config
 
-            Object result = docxCallFn.call(action.toUpperCase(), config)
+            if (documentDslClosure) {
+                // DSL path — build a DocumentPlan from the closure
+                def dsl = new DocumentDsl(ctx, prevValue)
+                executeDeferredConfig(documentDslClosure, dsl, ctx, prevValue)
+                DocumentPlan plan = dsl.build()
+                config = [filePath: filePath, action: 'SCRIPT', documentPlan: plan]
+            } else {
+                // Legacy flat-map path
+                config = buildConfig(memory, prevValue)
+                config.filePath = filePath
+            }
+
+            log.debug "DocxTask '${id}': executing action=${action} on ${filePath}"
+            Object result = docxCallFn.call(action.name(), config)
 
             if (outputKey && result != null) {
                 storeResult(ctx, outputKey, result)
@@ -134,34 +204,46 @@ class DocxTask extends TaskBase<Object> {
     }
 
     // -------------------------------------------------------------------------
-    // Config builder
+    // Config builder (legacy path)
     // -------------------------------------------------------------------------
 
     private Map<String, Object> buildConfig(Map<String, Object> memory, Object prevValue) {
         Map<String, Object> config = [
-            filePath : filePath,
-            action   : action.toUpperCase()
+            action: action.name()
         ] as Map<String, Object>
 
-        if (templatePath)   config.templatePath  = templatePath
-        if (targetSection)  config.targetSection = targetSection
+        if (templatePath)  config.templatePath  = templatePath
+        if (targetSection) config.targetSection = targetSection
 
-        // Resolve content: explicit content > contentKey from memory > prevValue (if Map)
+        // Resolve content: explicit field > contentKey from memory > prevValue (if Map)
+        String ck = evaluateValue(contentKeyValue, null, prevValue) as String
         if (content) {
             config.content = content
-        } else if (contentKey) {
-            def memContent = memory?.sharedFacts?.get(contentKey) ?:
-                             memory?.runContext?.get(contentKey)
-            if (memContent instanceof Map) {
-                config.content = memContent
-            } else if (prevValue instanceof Map) {
-                config.content = prevValue
-            }
+        } else if (ck) {
+            def memContent = memory?.sharedFacts?.get(ck) ?: memory?.runContext?.get(ck)
+            config.content = (memContent instanceof Map) ? memContent
+                           : (prevValue instanceof Map)  ? prevValue
+                           : null
         } else if (prevValue instanceof Map) {
             config.content = prevValue
         }
 
         return config
+    }
+
+    // -------------------------------------------------------------------------
+    // Stub — full implementation wired in Turn 4
+    // -------------------------------------------------------------------------
+
+    /**
+     * Execute a structured query against a Word document.
+     * Full implementation injected in Turn 4 via the adapter.
+     *
+     * @param plan the query / extraction descriptor
+     * @return structured result (format defined by the adapter)
+     */
+    DocumentPlan query(DocumentPlan plan) {
+        throw new UnsupportedOperationException('DocxTask.query() — implemented in Turn 4')
     }
 
     // -------------------------------------------------------------------------

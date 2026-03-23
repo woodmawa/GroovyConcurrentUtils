@@ -458,6 +458,40 @@ class TaskFactory {
     }
 
     // =========================================================================
+    // Office Document Task Creation
+    // =========================================================================
+
+    /**
+     * Create an XlsxTask - Excel spreadsheet read/write/DSL task.
+     */
+    static XlsxTask createXlsxTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating XlsxTask: id=$id, name=$name")
+        return new XlsxTask(id, name, ctx)
+    }
+
+    /**
+     * Create a DocxTask - Word document read/write/DSL task.
+     */
+    static DocxTask createDocxTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating DocxTask: id=$id, name=$name")
+        return new DocxTask(id, name, ctx)
+    }
+
+    /**
+     * Create a PptxTask - PowerPoint presentation read/write/DSL task.
+     */
+    static PptxTask createPptxTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating PptxTask: id=$id, name=$name")
+        return new PptxTask(id, name, ctx)
+    }
+
+    // =========================================================================
     // Type-Safe Factory Methods (Using Enum)
     // =========================================================================
 
@@ -553,6 +587,15 @@ class TaskFactory {
 
             case TaskType.NOSQL:
                 return createNoSqlTask(id, name, ctx)
+
+            case TaskType.XLSX:
+                return createXlsxTask(id, name, ctx)
+
+            case TaskType.DOCX:
+                return createDocxTask(id, name, ctx)
+
+            case TaskType.PPTX:
+                return createPptxTask(id, name, ctx)
 
             default:
                 throw new IllegalArgumentException("Unsupported task type: $type")

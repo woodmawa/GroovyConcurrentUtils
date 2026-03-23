@@ -229,6 +229,8 @@ class XlsxTask extends TaskBase<Object> {
      * @return List of rows in the format specified by {@link org.softwood.dag.task.xlsx.QueryPlan#format}
      */
     List query(QueryPlan plan) {
-        throw new UnsupportedOperationException('XlsxTask.query() — implemented in Turn 4')
+        if (!xlsxCallFn) throw new IllegalStateException("XlsxTask '${id}': xlsxCallFn has not been injected by the server factory")
+        if (!filePath)   throw new IllegalStateException("XlsxTask '${id}': filePath is required for query()")
+        return xlsxCallFn.call('QUERY', [query: plan, filePath: filePath]) as List
     }
 }

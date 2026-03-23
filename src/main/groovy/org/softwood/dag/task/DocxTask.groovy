@@ -243,7 +243,7 @@ class DocxTask extends TaskBase<Object> {
      * @return structured result (format defined by the adapter)
      */
     DocumentPlan query(DocumentPlan plan) {
-        throw new UnsupportedOperationException('DocxTask.query() — implemented in Turn 4')
+        throw new UnsupportedOperationException('DocxTask does not support query operations')
     }
 
     // -------------------------------------------------------------------------

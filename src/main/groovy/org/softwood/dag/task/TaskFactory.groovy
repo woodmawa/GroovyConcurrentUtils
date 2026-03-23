@@ -468,7 +468,9 @@ class TaskFactory {
         validateTaskId(id)
         validateTaskName(name)
         log.debug("Creating XlsxTask: id=$id, name=$name")
-        return new XlsxTask(id, name, ctx)
+        XlsxTask task = new XlsxTask(id, name, ctx)
+        XlsxAdapterFactory.inject(task)
+        return task
     }
 
     /**
@@ -478,7 +480,9 @@ class TaskFactory {
         validateTaskId(id)
         validateTaskName(name)
         log.debug("Creating DocxTask: id=$id, name=$name")
-        return new DocxTask(id, name, ctx)
+        DocxTask task = new DocxTask(id, name, ctx)
+        DocxAdapterFactory.inject(task)
+        return task
     }
 
     /**
@@ -488,7 +492,9 @@ class TaskFactory {
         validateTaskId(id)
         validateTaskName(name)
         log.debug("Creating PptxTask: id=$id, name=$name")
-        return new PptxTask(id, name, ctx)
+        PptxTask task = new PptxTask(id, name, ctx)
+        PptxAdapterFactory.inject(task)
+        return task
     }
 
     // =========================================================================

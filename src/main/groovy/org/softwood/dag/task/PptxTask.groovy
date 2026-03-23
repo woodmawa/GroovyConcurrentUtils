@@ -238,7 +238,7 @@ class PptxTask extends TaskBase<Object> {
      * @return structured result (format defined by the adapter)
      */
     PresentationPlan query(PresentationPlan plan) {
-        throw new UnsupportedOperationException('PptxTask.query() — implemented in Turn 5')
+        throw new UnsupportedOperationException('PptxTask does not support query operations')
     }
 
     // -------------------------------------------------------------------------

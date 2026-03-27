@@ -965,27 +965,116 @@ def result = ctx.globals.get('upstreamNodeId')
 def all = ctx.globals.getAll()
 ----
 
-=== GCU enhancement backlog (for future TaskBinding work)
+=== GCU enhancement status
 
-The following capabilities would reduce context explosion in consuming frameworks:
+[cols="3,1,4", options="header"]
+|===
+| Capability | Status | Notes
+| `ctx.globals.getPage(int page, int pageSize)` | ✅ Delivered (v1.1.1) | See <<globals-paging,Paged Globals Access>> section below
+| `ctx.globals.pageKeys(int page, int pageSize)` | ✅ Delivered (v1.1.1) | Returns key names only for the given page
+| `ctx.globals.getFiltered(String prefix)` | Backlog | Return only keys matching prefix
+| `ctx.globals.getJson(String key)` | Backlog | Return shaped value as parsed Map
+| `WorkingMemory.streamNodeResult(nodeId)` | Backlog | Field-by-field streaming for large results
+|===
 
-* `ctx.globals.getFiltered(String prefix)` — return only keys matching prefix
-* `ctx.globals.getJson(String key)` — return shaped value as parsed Map
-* `ctx.globals.getPage(int offset, int size)` — paginated globals read
-* `WorkingMemory.streamNodeResult(nodeId)` — field-by-field streaming for large results
+For `getPage` / `pageKeys` usage patterns, see the <<globals-paging,Paged Globals Access>> section.
 
-These are tracked as GCU enhancements. Current workaround: shape results at the task level
-before storing in globals.
+[[globals-paging]]
+== Paged Globals Access (GCU v1.1.1+)
 
-== TaskContext and GCU Version (1.1.0)
+`TaskBinding` (exposed as `ctx.globals`) gained paged read access in GCU v1.1.1, addressing
+the token-cost problem of bulk `getAll()` calls in long flows.
 
-`TaskContext` is implemented in GCU v1.1.0 as `org.softwood.dag.task.TaskContext`.
-`TaskBinding` (`ctx.globals`) is a concurrent, scope-aware binding that threads through
+=== API
+
+[source,groovy]
+----
+// Returns List<String> of key names for page N (0-indexed, default pageSize 20)
+List<String> keys = ctx.globals.pageKeys(int page, int pageSize)
+
+// Returns Map<String, Object> of entries for page N
+Map<String, Object> entries = ctx.globals.getPage(int page, int pageSize)
+----
+
+Iteration order reflects insertion order — `TaskBinding` uses a `LinkedHashMap` under its
+concurrent wrapper, so page slices are stable for the duration of a flow run.
+
+=== When to use
+
+[cols="2,3", options="header"]
+|===
+| Situation | Recommended call
+| Single key lookup | `ctx.globals[key]` — direct, zero overhead
+| Summarise first N results | `ctx.globals.getPage(0, 20)` — page 0 only
+| Full scan (diagnostic only) | Loop `getPage(n, 20)` until returned map is empty
+| Template token resolution | `${nodeId.field}` — resolved via WorkingMemory, not globals scan
+|===
+
+NEVER call `ctx.globals.getAll()` in task closures or `ITaskProvider` implementations.
+It is reserved for diagnostic tooling only.
+
+=== Full scan loop (diagnostic/audit)
+
+[source,groovy]
+----
+def page = 0
+def pageSize = 20
+def allKeys = []
+while (true) {
+    def slice = ctx.globals.getPage(page++, pageSize)
+    if (!slice) break
+    allKeys += slice.keySet().findAll { !it.startsWith('__') }
+}
+// allKeys: all node-result keys in insertion order
+----
+
+=== Filter infrastructure keys
+
+[source,groovy]
+----
+// Infrastructure keys use '__' prefix; O365 defaults use '.'
+def nodeResults = ctx.globals.getPage(0, 20)
+    .findAll { k, v -> !k.startsWith('__') }
+----
+
+=== Producing a token-efficient summary from groovy.eval
+
+[source,groovy]
+----
+def page = ctx.globals.getPage(0, 20)
+def lines = page
+    .findAll { k, v -> !k.startsWith('__') }
+    .collect { k, v -> "${k}: ${v?.toString()?.take(120)}" }
+[_shaped: true, nodeCount: lines.size(), nodeSummary: lines.join('\n')]
+----
+
+=== Double-shaping guard
+
+When used with `mcp-agentic-workflow`, values stored in globals are already shaped by AW's
+`ResultShaper` before being written. Reading them back via `getPage()` does NOT re-shape —
+`ResultShaper` detects the `_shaped: true` marker and applies only its soft-cap guard.
+GCU itself applies no size cap; capping remains the consuming framework's responsibility.
+
+=== Size reference
+
+For a 20-node flow with worst-case 2000-char string values per node:
+
+* 20 node keys × 2000 chars ≈ 40 KB worst case
+* ~10 infrastructure keys × ~100 chars ≈ 1 KB
+* `getPage(0, 20)` → at most ~41 KB per call
+* Typical shaped values are 200–500 chars → 4–10 KB per page in practice
+
+== TaskContext and GCU Version
+
+`TaskContext` is implemented in GCU v1.1.1 as `org.softwood.dag.task.TaskContext`.
+`TaskBinding` (`ctx.globals`) is a concurrent, insertion-ordered binding that threads through
 all nodes in a `TaskGraph` run via `wrappedAction` closures.
 
 Key implementation notes:
+
 * `TaskBinding` writes are not size-capped at the GCU layer — capping is the responsibility
-  of the consuming framework (e.g. AW's ResultShaper)
+  of the consuming framework (e.g. AW's `ResultShaper`)
 * `ctx.globals['__workingMemory']` holds the `WorkingMemory` instance for the current run
 * `ctx.promiseFactory` is a `DataflowPromiseFactory` — `executeAsync { }` returns a
   `DataflowPromise`, not a `CompletableFuture`
+* Paged access (`getPage`, `pageKeys`) was added in v1.1.1 — not available in v1.1.0

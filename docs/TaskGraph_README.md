@@ -856,6 +856,7 @@ graph.run()
 
 ---
 
-**Version**: 2.1.0 (March 2026)  
+**Version**: 1.1.1 (March 2026)  
 **License**: Apache 2.0  
-**What's new in 2.1.0**: Office Document DSL (XlsxTask, DocxTask, PptxTask) with Apache POI adapters, WorkbookPlan/DocumentPlan/PresentationPlan domain model, style inheritance, rich text, formula resolution, query DSL.
+**What's new in 1.1.1**: `IBinding.getPage(page, pageSize)` default method + `TaskBinding` override — paged globals access for token-safe iteration over large flow run state. 15 new `TaskBindingSpec` tests.  
+**What's new in 1.1.0 / 2.1.0 docs**: Office Document DSL (XlsxTask, DocxTask, PptxTask) with Apache POI adapters, WorkbookPlan/DocumentPlan/PresentationPlan domain model, style inheritance, rich text, formula resolution, query DSL.

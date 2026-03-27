@@ -190,6 +190,19 @@ class TaskBinding implements IBinding {
         variables.containsKey(key)
     }
 
+    /**
+     * Return a paginated slice of all entries, ordered by key.
+     * More efficient than the IBinding default: sorts directly from ConcurrentHashMap, no intermediate copy.
+     * @param offset zero-based start index
+     * @param size   max entries to return (0 = return all from offset)
+     * @return ordered map slice, empty map if offset >= total entries
+     */
+    Map<String, Object> getPage(int offset, int size) {
+        def sorted = variables.entrySet().sort { it.key }
+        def slice  = (size > 0) ? sorted.drop(offset).take(size) : sorted.drop(offset)
+        slice.collectEntries { [(it.key): it.value] }
+    }
+
     // =========================================================================
     // Backward Compatibility Methods
     // =========================================================================

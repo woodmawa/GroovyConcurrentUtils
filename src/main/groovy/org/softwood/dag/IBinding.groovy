@@ -137,4 +137,16 @@ interface IBinding {
     default boolean containsKey(String key) {
         has(key)
     }
+
+    /**
+     * Return a paginated slice of all entries, ordered by key.
+     * @param offset zero-based start index
+     * @param size   max entries to return
+     * @return ordered map slice, empty map if offset >= total entries
+     */
+    default Map<String, Object> getPage(int offset, int size) {
+        def sorted = getAll().entrySet().sort { it.key }
+        def slice  = sorted.drop(offset).take(size)
+        slice.collectEntries { [(it.key): it.value] }
+    }
 }

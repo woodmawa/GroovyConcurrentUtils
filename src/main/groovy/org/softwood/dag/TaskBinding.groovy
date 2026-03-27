@@ -140,22 +140,66 @@ class TaskBinding implements IBinding {
     }
     
     // =========================================================================
+    // Filtered Globals Methods (flow-template-friendly aliases)
+    // For use in groovy.eval scripts: ctx.globals.getKeys(), ctx.globals.getFiltered('mail.*')
+    // =========================================================================
+
+    /**
+     * Get all keys in the binding.
+     * Alias for keys() with a more discoverable name for flow template authors.
+     */
+    Set<String> getKeys() {
+        keys()
+    }
+
+    /**
+     * Get keys matching a regex pattern.
+     * @param pattern Java regex applied to key names
+     * @return set of matching keys
+     */
+    Set<String> getKeys(String pattern) {
+        def regex = Pattern.compile(pattern)
+        variables.keySet().findAll { regex.matcher(it).matches() } as Set<String>
+    }
+
+    /**
+     * Get all entries whose key matches a regex pattern.
+     * Alias for filter(pattern) with a more descriptive name.
+     * @param keyPattern Java regex applied to key names
+     * @return immutable map of matching entries
+     */
+    Map<String, Object> getFiltered(String keyPattern) {
+        filter(keyPattern)
+    }
+
+    /**
+     * Get a value with a default, returning defaultValue when key is absent or value is null.
+     * Distinct from get(key, default) which only substitutes on absence.
+     * @return stored value, or defaultValue if absent or null
+     */
+    Object getOrDefault(String key, Object defaultValue) {
+        def v = variables.get(key)
+        v != null ? v : defaultValue
+    }
+
+    /**
+     * Check whether a key exists in the binding.
+     * Alias for has(key) matching the Map.containsKey() convention.
+     */
+    boolean containsKey(String key) {
+        variables.containsKey(key)
+    }
+
+    // =========================================================================
     // Backward Compatibility Methods
     // =========================================================================
-    
+
     /**
      * Backward compatibility with Map.put()
      */
     Object put(String key, Object value) {
         set(key, value)
         return value
-    }
-    
-    /**
-     * Backward compatibility with Map.getOrDefault()
-     */
-    Object getOrDefault(String key, Object defaultValue) {
-        get(key, defaultValue)
     }
     
     // =========================================================================

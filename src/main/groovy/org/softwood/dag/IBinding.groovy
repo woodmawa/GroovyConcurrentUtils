@@ -104,4 +104,37 @@ interface IBinding {
      * @return map of matching entries
      */
     Map<String, Object> prefix(String prefix)
+
+    // -------------------------------------------------------------------------
+    // Filtered globals defaults — flow-template-friendly aliases
+    // Implementations may override for efficiency; defaults delegate to getAll()/keys()/filter().
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get all keys. Alias for keys() with a more discoverable name.
+     */
+    default Set<String> getKeys() {
+        keys()
+    }
+
+    /**
+     * Get keys matching a regex pattern.
+     */
+    default Set<String> getKeys(String pattern) {
+        filter(pattern).keySet()
+    }
+
+    /**
+     * Get entries whose key matches a regex pattern. Alias for filter().
+     */
+    default Map<String, Object> getFiltered(String keyPattern) {
+        filter(keyPattern)
+    }
+
+    /**
+     * Check whether a key exists. Alias for has() matching Map.containsKey() convention.
+     */
+    default boolean containsKey(String key) {
+        has(key)
+    }
 }

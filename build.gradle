@@ -16,7 +16,7 @@ plugins {
 }
 
 group = 'org.softwood'
-version = '1.0-SNAPSHOT'
+version = '1.1.0'
 
 repositories {
     mavenCentral()
@@ -85,8 +85,8 @@ dependencies {
     testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
     testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
     testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
-    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
-    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.20"
+    testFixturesImplementation "org.slf4j:slf4j-api:2.0.+"
+    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.+"
 }
 
 jar {

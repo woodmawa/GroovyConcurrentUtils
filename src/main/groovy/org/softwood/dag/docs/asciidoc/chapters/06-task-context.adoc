@@ -929,3 +929,63 @@ TaskContext is the glue that binds workflows together, providing a consistent ex
 * **Chapter 7** - Practical examples using TaskContext
 * **Chapter 9** - Security features in TaskContext
 * **Chapter 10** - Observability with events
+
+
+== Context Explosion Protection
+
+When workflows process large external payloads (API responses, document content), `TaskContext`
+can accumulate significant data in globals. The following patterns keep context manageable.
+
+=== ResultShaper integration
+
+`mcp-agentic-workflow` (built on GCU) uses a `ResultShaper` that applies tiered size caps
+to values stored in globals. The pattern to follow when writing task closures:
+
+[source,groovy]
+----
+// \u2705 Good — project before storing in globals, mark as shaped
+ctx.globals['myNode'] = [
+    _shaped: true,
+    count:   items.size(),
+    preview: items.take(3).collect { [id: it.id, name: it.name] }
+]
+
+// \u274c Bad — storing raw API response (may be 10KB+)
+ctx.globals['myNode'] = rawApiResponse
+----
+
+=== Prefer explicit key access
+
+[source,groovy]
+----
+// \u2705 Good — targeted read
+def result = ctx.globals.get('upstreamNodeId')
+
+// \u274c Avoid — iterates all globals, expensive
+def all = ctx.globals.getAll()
+----
+
+=== GCU enhancement backlog (for future TaskBinding work)
+
+The following capabilities would reduce context explosion in consuming frameworks:
+
+* `ctx.globals.getFiltered(String prefix)` — return only keys matching prefix
+* `ctx.globals.getJson(String key)` — return shaped value as parsed Map
+* `ctx.globals.getPage(int offset, int size)` — paginated globals read
+* `WorkingMemory.streamNodeResult(nodeId)` — field-by-field streaming for large results
+
+These are tracked as GCU enhancements. Current workaround: shape results at the task level
+before storing in globals.
+
+== TaskContext and GCU Version (1.1.0)
+
+`TaskContext` is implemented in GCU v1.1.0 as `org.softwood.dag.task.TaskContext`.
+`TaskBinding` (`ctx.globals`) is a concurrent, scope-aware binding that threads through
+all nodes in a `TaskGraph` run via `wrappedAction` closures.
+
+Key implementation notes:
+* `TaskBinding` writes are not size-capped at the GCU layer — capping is the responsibility
+  of the consuming framework (e.g. AW's ResultShaper)
+* `ctx.globals['__workingMemory']` holds the `WorkingMemory` instance for the current run
+* `ctx.promiseFactory` is a `DataflowPromiseFactory` — `executeAsync { }` returns a
+  `DataflowPromise`, not a `CompletableFuture`

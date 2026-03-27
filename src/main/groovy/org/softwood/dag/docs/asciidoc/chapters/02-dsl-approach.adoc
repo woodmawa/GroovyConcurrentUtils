@@ -702,3 +702,66 @@ This makes TaskGraph workflows easy to write, maintain, and evolve.
 
 * **Chapter 3** - Understand the foundation libraries (Pool & Promises)
 * **Chapter 7** - See practical examples of DSL usage
+
+
+== SPI Extension: Custom Task Types via ITaskProvider
+
+`TaskGraph` uses a `ServiceLoader` SPI to discover custom task types, enabling third-party
+DSL method names without modifying GCU core.
+
+=== Implementing ITaskProvider
+
+[source,groovy]
+----
+// 1. Implement the SPI
+class O365TaskProvider implements ITaskProvider {
+
+    @Override
+    boolean supports(String typeString) {
+        O365TaskType.fromString(typeString) != null
+    }
+
+    @Override
+    ITask createTask(String typeString, String id, String name, TaskContext ctx) {
+        switch (O365TaskType.fromString(typeString)) {
+            case O365TaskType.MAIL:     return new GraphMailTask(id, name, ctx, facade)
+            case O365TaskType.CALENDAR: return new GraphCalendarTask(id, name, ctx, facade)
+            // ...
+        }
+    }
+
+    @Override
+    int getPriority() { 50 }  // Higher = tried first
+}
+
+// 2. Register via META-INF/services/org.softwood.dag.task.spi.ITaskProvider
+// File content: com.example.O365TaskProvider
+
+// 3. Use in DSL — methodMissing routes to the provider
+TaskGraph.build {
+    graphMailTask('read-inbox') {
+        userId 'user@corp.com'
+        mode 'READ'
+        maxItems 10
+    }
+}
+----
+
+=== Key rules
+
+* `ITaskProvider` instances are loaded via `ServiceLoader` — **Spring injection is unavailable**
+* Use a `static volatile` facade field, set by a Spring `@PostConstruct` before the graph runs
+* `getPriority()` — higher number = higher priority; built-in GCU providers use 0
+* `supports()` must return `false` quickly for unknown types — it is called for every method missing invocation
+* The SPI is the correct extension point for custom task types. Do NOT modify `FlowTypeRegistry`
+  for DSL-mode tasks — `FlowTypeRegistry` is for flow/template mode only.
+
+=== Two integration modes (mcp-agentic-workflow pattern)
+
+|===
+| Mode | Mechanism | When used
+| Flow template (YAML) | `FlowTypeRegistry.register('o365.mail') { ... }` | `start_flow mode=flow`
+| DSL script | `ITaskProvider` SPI via META-INF | `start_flow mode=dsl`
+|===
+
+Both are registered in the same Spring `@PostConstruct` by `O365Config`.

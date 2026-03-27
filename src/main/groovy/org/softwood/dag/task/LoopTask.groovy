@@ -346,14 +346,16 @@ class LoopTask extends TaskBase<Object> {
         
         // Process in batches
         def batches = items.collate(parallelism)
-        
+        int batchStartIndex = 0
+
         for (def batch : batches) {
             if (broken) break
-            
+
             def promises = []
-            
+            def currentBatchStart = batchStartIndex
+
             batch.eachWithIndex { item, batchIndex ->
-                def globalIndex = items.indexOf(item)
+                def globalIndex = currentBatchStart + batchIndex
                 
                 // Check break condition (not fully reliable in parallel)
                 if (breakCondition && !broken) {
@@ -411,6 +413,7 @@ class LoopTask extends TaskBase<Object> {
             
             // Wait for batch to complete
             Promises.all(promises).get()
+            batchStartIndex += batch.size()
         }
         
         // Check if we had errors

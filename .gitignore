@@ -86,3 +86,7 @@ graphState/
 **/graphState/
 build/test-snapshots/
 
+
+### Agent scratch logs — redirected gradle output written into the repo root by tooling
+aw-*.txt
+gcu-*.txt

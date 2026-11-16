@@ -84,6 +84,8 @@ interface GraphEventListener {
      * @return listener name
      */
     default String getName() {
-        return this.class.simpleName
+        // getClass(), not this.class: on Groovy 6 the property form inside an interface default method throws
+        // MissingPropertyException (No such property: class) for the implementing class.
+        return this.getClass().simpleName
     }
 }

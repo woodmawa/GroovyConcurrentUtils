@@ -16,7 +16,7 @@ plugins {
 }
 
 group = 'org.softwood'
-version = '1.1.1'   // 1.1.1: P4 add IBinding.getPage(offset,size) default + TaskBinding override; TaskBindingSpec 15 tests
+version = '1.1.2'   // 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0 (no API change). 1.1.1: P4 IBinding.getPage(offset,size)
 
 repositories {
     mavenCentral()
@@ -73,11 +73,11 @@ dependencies {
     testFixturesImplementation 'org.junit.jupiter:junit-jupiter-api'
     testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
     testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
-    testImplementation 'org.apache.groovy:groovy-test:5.0.2'
+    testImplementation "org.apache.groovy:groovy-test:$groovyVersion"
     testImplementation 'io.vertx:vertx-junit5:5.0.5'
     testImplementation("io.projectreactor:reactor-test:3.8.0")
     testImplementation 'org.awaitility:awaitility:4.3.0'
-    testImplementation 'org.spockframework:spock-core:2.4-groovy-5.0'
+    testImplementation 'org.spockframework:spock-core:2.5-groovy-6.0'
     testImplementation 'org.wiremock:wiremock:3.3.1'
     testImplementation 'com.h2database:h2:2.2.224'
 
@@ -87,6 +87,13 @@ dependencies {
     testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
     testFixturesImplementation "org.slf4j:slf4j-api:2.0.+"
     testFixturesImplementation "ch.qos.logback:logback-classic:1.5.+"
+}
+
+// Groovy 6.0.0 (2026-11-16): compileTestGroovy runs in a Gradle compiler worker, whose default 512m heap the
+// Groovy 6 compiler exhausts on this test source set ("Java heap space" from ApiGroovyCompiler in WorkerDaemonServer).
+// The daemon's own heap (org.gradle.jvmargs) is not the constraint -- a 6g daemon failed the same way.
+tasks.withType(GroovyCompile).configureEach {
+    groovyOptions.forkOptions.memoryMaximumSize = '4g'
 }
 
 jar {

@@ -43,7 +43,21 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     TaskState getState() { _state.get() }
     // Legacy setter kept so execute() / emitEvent() bare assignments still compile;
     // prefer the transitionState() guard below for all new code.
-    void setState(TaskState s) { _state.set(s) }
+    //
+    // 1.2.0 (H3): the setter is guarded. It used to be a raw set, and executeTaskWithRetry() assigns
+    // `state = ...` throughout, so a task cancelled or skipped by the graph was overwritten with
+    // RUNNING / COMPLETED / FAILED by its own worker. Now an assignment is a transitionState() call and
+    // an illegal one (anything out of a terminal state) is ignored.
+    // The one exception is an explicit reset to CREATED or SCHEDULED, which callers use to re-run a
+    // standalone task; that stays unconditional.
+    void setState(TaskState s) {
+        if (s == null) return
+        if (s == TaskState.CREATED || s == TaskState.SCHEDULED) {
+            _state.set(s)
+            return
+        }
+        transitionState(s)
+    }
     TaskEventDispatch eventDispatcher
 
     // L16 fix: typed as TaskContext (was 'def' - duck typing not needed here)
@@ -66,6 +80,19 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     protected IdempotencyPolicy idempotencyPolicy = new IdempotencyPolicy()
     protected MemoPolicy memoPolicy = new MemoPolicy()
     private Long taskTimeoutMillis = null  // Legacy - kept for backwards compatibility
+
+    /**
+     * 1.2.0 (D6): opt-in. When true, a task timeout also cancels the promise returned by runTask()
+     * with mayInterruptIfRunning=true, so work started through promiseFactory.executeAsync is interrupted.
+     * Default false: the task is reported failed and its work is left to finish, as in 1.1.x.
+     */
+    boolean interruptOnTimeout = false
+
+    /** 1.2.0 (D6): the promise of the attempt currently running, for TaskGraph.interruptOnCancel. */
+    private volatile Promise<?> inFlight = null
+
+    /** DSL form: {@code interruptOnTimeout true}. */
+    void interruptOnTimeout(boolean enabled) { this.interruptOnTimeout = enabled }
     protected Throwable lastError = null
 
     Promise<?> completionPromise = null
@@ -136,6 +163,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     boolean transitionState(TaskState next) {
         while (true) {
             TaskState current = _state.get()
+            if (current == next) return false   // already there: not a transition, not worth a log line
             if (!current.canTransitionTo(next)) {
                 log.debug "Task ${id}: rejected transition ${current} -> ${next} (illegal)"
                 return false
@@ -176,6 +204,65 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     void markCancelled() {
         if (transitionState(TaskState.CANCELLED)) {
             emitEvent(TaskState.CANCELLED)
+        }
+    }
+
+    // ----------------------------------------------------
+    // 1.2.0 (H2/H4): cancellation
+    // ----------------------------------------------------
+
+    /** True once this task was cancelled, or its graph was aborted or timed out. */
+    protected boolean isCancelRequested() {
+        return _state.get() == TaskState.CANCELLED || (ctx != null && ctx.isCancelRequested())
+    }
+
+    private void throwIfCancelled() {
+        if (isCancelRequested()) {
+            throw new java.util.concurrent.CancellationException("Task ${id}: cancelled before the attempt started")
+        }
+    }
+
+    /**
+     * An interrupt or a cancellation, directly or as a cause. DataflowPromise.get() wraps
+     * InterruptedException in a RuntimeException, so the cause chain is checked (bounded).
+     */
+    protected static boolean isCancellation(Throwable err) {
+        Throwable t = err
+        int depth = 0
+        while (t != null && depth < 6) {
+            if (t instanceof InterruptedException || t instanceof java.util.concurrent.CancellationException) return true
+            t = t.cause
+            depth++
+        }
+        return false
+    }
+
+    /** Mark this task CANCELLED and return the exception that ends executeTaskWithRetry(). Never retried. */
+    private java.util.concurrent.CancellationException cancelledBy(Throwable err) {
+        if (err instanceof InterruptedException) Thread.currentThread().interrupt()
+        lastError = err
+        markCancelled()
+        if (err instanceof java.util.concurrent.CancellationException) {
+            return (java.util.concurrent.CancellationException) err
+        }
+        def ce = new java.util.concurrent.CancellationException(
+                "Task ${id}: cancelled (${err.class.simpleName}: ${err.message})".toString())
+        ce.initCause(err)
+        return ce
+    }
+
+    /**
+     * 1.2.0 (D6): cancel the attempt that is running now, with an interrupt. Used by TaskGraph when
+     * interruptOnCancel is set. A no-op when nothing is in flight.
+     */
+    void interruptInFlight() {
+        Promise<?> p = inFlight
+        if (p != null && !p.isDone()) {
+            try {
+                p.cancel(true)
+            } catch (Exception e) {
+                log.debug "Task ${id}: could not interrupt in-flight work: ${e.class.simpleName}: ${e.message}"
+            }
         }
     }
 
@@ -807,6 +894,12 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     // ----------------------------------------------------
     Promise execute(Promise<?> previousPromise) {
 
+        // 1.2.0 (H3): execute() on a task that already finished is an explicit re-run (standalone
+        // Tasks.* use, loops). Restart it from CREATED; a CANCELLED or SKIPPED task stays as it is.
+        TaskState before = _state.get()
+        if (before == TaskState.COMPLETED || before == TaskState.FAILED) {
+            _state.compareAndSet(before, TaskState.CREATED)
+        }
         transitionState(TaskState.RUNNING)
         // NOTE: RUNNING event emitted by executeTaskWithRetry() inside runAttempt().
         // Do NOT emit here — would cause duplicate TASK_STARTED per node.
@@ -837,8 +930,10 @@ abstract class TaskBase<T> implements IGraphNode<T> {
         attemptPromise.onError { Throwable err ->
             log.error "Task ${id}: failed with error: ${err.message}"
             lastError = err
-            transitionState(TaskState.FAILED)
-            emitErrorEvent(err)
+            // 1.2.0 (H3): a cancelled or skipped task is not re-reported as FAILED.
+            if (transitionState(TaskState.FAILED) || isFailed()) {
+                emitErrorEvent(err)
+            }
             resultHolder.reject(err)   // signal failure to waiting successors
         }
 
@@ -919,6 +1014,8 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                 long attemptStartTime = System.currentTimeMillis()  // Track individual attempt start
 
                 try {
+                    // 1.2.0 (H2): a cancelled task, or a task in an aborted graph, does not start another attempt.
+                    throwIfCancelled()
                     state = TaskState.RUNNING
 
                     // Emit event with attempt number for retries
@@ -1037,6 +1134,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                     }
                     
                     Promise<T> promise = runTask(ctx, prevValue)  // Pass raw value (may be null)
+                    inFlight = promise
 
                     log.debug "Task ${id}: runTask() returned promise, waiting for result"
                     
@@ -1046,20 +1144,6 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         
                         try {
                             result = promise.get(effectiveTimeoutMillis, TimeUnit.MILLISECONDS)
-                        } catch (java.lang.IllegalStateException raceErr) {
-                            // DataflowPromise race condition: error state detected but error value not yet set
-                            // Wait a moment and try again to get the actual error
-                            if (raceErr.message?.contains("Error state detected but error value is null")) {
-                                Thread.sleep(10)  // Brief delay to let error propagate
-                                try {
-                                    result = promise.get(effectiveTimeoutMillis, TimeUnit.MILLISECONDS)
-                                } catch (Throwable actualErr) {
-                                    // Now we should get the real error
-                                    throw actualErr
-                                }
-                            } else {
-                                throw raceErr
-                            }
                         } catch (TimeoutException timeoutEx) {
                             def elapsed = System.currentTimeMillis() - startTime
                             
@@ -1072,6 +1156,15 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                                 }
                             }
                             
+                            // 1.2.0 (D6): opt-in interrupt of the timed-out work. Off by default.
+                            if (interruptOnTimeout) {
+                                try {
+                                    promise.cancel(true)
+                                } catch (Exception cancelErr) {
+                                    log.debug "Task ${id}: could not cancel timed-out work: ${cancelErr.class.simpleName}: ${cancelErr.message}"
+                                }
+                            }
+
                             // Throw custom timeout exception
                             throw new TaskTimeoutException(
                                 id,
@@ -1100,15 +1193,6 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                                 "which creates a nested-promise deadlock. See TaskBase.runTask() javadoc for the correct pattern.",
                                 safetyTimeout
                             )
-                        } catch (java.lang.IllegalStateException raceErr) {
-                            // DataflowPromise race condition: error state detected but error value not yet set
-                            // Wait a moment and try again to get the actual error
-                            if (raceErr.message?.contains("Error state detected but error value is null")) {
-                                Thread.sleep(10)  // Brief delay to let error propagate
-                                result = promise.get(safetyTimeoutMs, TimeUnit.MILLISECONDS)
-                            } else {
-                                throw raceErr
-                            }
                         }
                     }
 
@@ -1154,6 +1238,19 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                     return result
 
                 } catch (Throwable err) {
+                    // 1.2.0 (H4): an interrupt or a cancellation ends the task as CANCELLED. It is never retried
+                    // and never sent to the dead letter queue.
+                    if (isCancellation(err)) {
+                        log.debug "Task ${id}: attempt $attempt cancelled: ${err.class.simpleName}: ${err.message}"
+                        throw cancelledBy(err)
+                    }
+                    // 1.2.0 (H4): a JVM-level error is not a transient failure.
+                    if (err instanceof VirtualMachineError || err instanceof LinkageError) {
+                        lastError = err
+                        state = TaskState.FAILED
+                        emitErrorEvent(err)
+                        throw err
+                    }
                     lastError = err
                     log.error "Task ${id}: attempt $attempt failed: ${err.message}"
                     
@@ -1243,7 +1340,16 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         eventDispatcher.emit(retryingEvent)
                     }
 
-                    Thread.sleep(delay)
+                    // 1.2.0 (H2/H4): the wait between attempts ends on cancel or interrupt instead of retrying.
+                    try {
+                        Thread.sleep(delay)
+                    } catch (InterruptedException ie) {
+                        throw cancelledBy(ie)
+                    }
+                    if (isCancelRequested()) {
+                        throw cancelledBy(new java.util.concurrent.CancellationException(
+                                "Task ${id}: cancelled while waiting to retry".toString()))
+                    }
                     delay = (long) (delay * retryPolicy.backoffMultiplier)
                     attempt++
                 }

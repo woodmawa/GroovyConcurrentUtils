@@ -596,6 +596,11 @@ class TaskGraphDsl {
      *   graphTimeout "5 minutes"
      *   graphTimeout "1 hour"
      */
+    void interruptOnCancel(boolean enabled) {
+        // 1.2.0 (D6): opt-in. abortFlow() and a graph timeout interrupt work that is already running.
+        graph.interruptOnCancel = enabled
+    }
+
     void graphTimeout(String timeoutStr) {
         graph.graphTimeout = parseDuration(timeoutStr)
     }

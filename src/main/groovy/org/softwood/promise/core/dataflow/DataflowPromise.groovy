@@ -255,9 +255,11 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     T get() throws Exception {
-        CompletableFuture<T> f = variable.toFuture()
+        // 1.2.0 (DF2): read the variable's own future. toFuture() built a second future completed by
+        // listeners, and a listener registered while the variable was being bound could be missed,
+        // leaving this get() blocked for ever.
         try {
-            return f.get()
+            return variable.get()
         } catch (ExecutionException e) {
             Throwable c = e.cause ?: e
             if (c instanceof Exception) throw (Exception)c
@@ -270,9 +272,9 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     T get(long timeout, TimeUnit unit) throws TimeoutException, Exception {
-        CompletableFuture<T> f = variable.toFuture()
+        // 1.2.0 (DF2): as get() above.
         try {
-            return f.get(timeout, unit)
+            return variable.get(timeout, unit)
         } catch (TimeoutException e) {
             throw e
         } catch (ExecutionException e) {
@@ -329,6 +331,10 @@ class DataflowPromise<T> implements Promise<T> {
             variable.bindCancelled(new CancellationException("Promise was explicitly cancelled"))
         } catch (IllegalStateException e) {
         }
+
+        // 1.2.0 (DF3): a promise from executeAsync has no taskHandle; its work runs as a pool Future held
+        // by the variable. Cancel that too, so mayInterruptIfRunning=true really interrupts the work.
+        variable.cancelTask(mayInterruptIfRunning)
 
         // Propagate cancellation to all dependents
         dependents.each { Promise<?> d -> d.cancel(mayInterruptIfRunning) }

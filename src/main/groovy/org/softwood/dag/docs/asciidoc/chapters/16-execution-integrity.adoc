@@ -1,0 +1,210 @@
+= Execution Integrity: Validation, State, Cancellation and Delivery
+
+[abstract]
+--
+This chapter states what a TaskGraph run guarantees as of version 1.2.0: which graphs are refused before they start, how task state behaves, what abort and timeout do and do not stop, and what the dataflow layer underneath guarantees about delivering results. Every statement here is covered by `CoreHardeningSpec` or `DataflowIntegritySpec`.
+--
+
+== Overview
+
+A TaskGraph run rests on three layers:
+
+* *Dataflow* (`DataflowVariable`, `DataflowPromise`) carries every task result and every completion callback.
+* *TaskBase* runs one task: attempts, retries, timeout, state.
+* *TaskGraph* schedules tasks, propagates failure, and decides when the run is over.
+
+Version 1.2.0 closed defects in all three that could leave a run hanging, report it finished twice, or overwrite a cancelled task with a later state. The capability is summarised below and detailed in the sections that follow.
+
+[cols="2,5",options="header"]
+|===
+| Capability | What it gives you
+
+| Graph validation
+| A graph with a dependency cycle, or an edge to a task that does not exist, is refused by `start()` with a message naming the tasks. It used to return a promise that never resolved.
+
+| Guarded task state
+| A task that is CANCELLED or SKIPPED stays that way. Its own worker can no longer overwrite the state with RUNNING, COMPLETED or FAILED.
+
+| Single outcome
+| A run has exactly one outcome and one terminal graph event, claimed by normal completion, `abortFlow()` or a graph timeout, whichever comes first.
+
+| Cancellation
+| `abortFlow()` and a graph timeout stop new attempts and retries, keep cancelled tasks cancelled, schedule no successors, and resolve `graphCompletionPromise`.
+
+| Interrupt handling
+| An interrupted task ends CANCELLED and is never retried.
+
+| Optional interruption
+| `interruptOnTimeout` (task) and `interruptOnCancel` (graph) additionally interrupt work that is already running. Both are off by default.
+
+| Delivery guarantee
+| A callback registered on a promise or dataflow variable is always delivered, and `get()` always returns once the value is set, including when registration races completion.
+|===
+
+== Graph Validation
+
+`TaskGraph.validate()` checks that the graph can run to completion. `start()` calls it before the graph is consumed, so a refused graph has not been used up. It is public, so a caller can check a built graph without running it.
+
+It refuses:
+
+* a predecessor or successor id that is not a task in the graph;
+* any dependency cycle, which includes a non-empty graph with no root task.
+
+[source,groovy]
+----
+def graph = TaskGraph.build {
+    serviceTask('a') { action { ctx, prev -> 'a' } }
+    serviceTask('b') { action { ctx, prev -> 'b' } }
+}
+graph.tasks['a'].dependsOn('b')
+graph.tasks['b'].dependsOn('a')
+
+graph.start()
+// IllegalStateException: TaskGraph '...' cannot run: dependency cycle involving 'a', 'b'
+----
+
+All problems found are reported in one message. The top-level DSL form `dependsOn(taskId, upstreamId)` already rejected unknown ids at build time; validation also covers edges added directly on a task or after the DSL closure has run.
+
+NOTE: Validation is structural. It does not check that a router's targets are reachable or that a task's action is defined.
+
+== Task State
+
+[source,groovy]
+----
+CREATED -> SCHEDULED -> RUNNING -> COMPLETED | FAILED | SKIPPED | CANCELLED
+----
+
+COMPLETED, FAILED, SKIPPED and CANCELLED are terminal. Every state change goes through `transitionState()`, which rejects a move out of a terminal state.
+
+Two deliberate exceptions exist for re-running a task:
+
+* assigning `task.state = TaskState.CREATED` or `TaskState.SCHEDULED` is an explicit reset and is applied unconditionally;
+* calling `execute()` on a task that is COMPLETED or FAILED restarts it. A CANCELLED or SKIPPED task is not restarted.
+
+`TaskGraph.reset()` resets every task and clears the cancellation signal on the context.
+
+== How a Run Ends
+
+A run ends in exactly one of three ways. Whichever happens first claims the outcome; the others then do nothing.
+
+[cols="2,3,3",options="header"]
+|===
+| Outcome | `graphCompletionPromise` | Terminal graph event
+
+| All tasks terminal, none failed or cancelled
+| completes with the terminal result(s)
+| `GRAPH_COMPLETED`, once
+
+| All tasks terminal, at least one failed or cancelled
+| fails with the first failure, or a `CancellationException` naming the cancelled task
+| `GRAPH_FAILED`, once
+
+| `abortFlow(reason)`
+| fails with `RuntimeException("Flow aborted: <reason>")`
+| none. The caller that aborted owns the reporting.
+
+| Graph timeout
+| fails with `GraphTimeoutException`, as does the promise `start()` returned
+| none
+|===
+
+A graph that contains a cancelled task never reports `GRAPH_COMPLETED`.
+
+== Cancellation
+
+=== What abort and timeout do
+
+`abortFlow()` and a graph timeout:
+
+. claim the run's outcome;
+. set the cancellation signal on the `TaskContext`;
+. mark every task that is not already terminal as CANCELLED.
+
+From then on:
+
+* no task starts a new attempt;
+* a task waiting between retries stops at the end of its wait instead of retrying;
+* a task whose work finishes afterwards stays CANCELLED, schedules no successor, and its dependants are skipped;
+* no `GRAPH_COMPLETED` or `GRAPH_FAILED` is emitted.
+
+=== What they do not do by default
+
+Work that is already running is *not* interrupted. A task in the middle of an HTTP call, a file operation or a sleep runs that operation to the end; only its result is discarded. This is the 1.1.x behaviour and remains the default, because interrupting a call whose far side carries on can leave the two sides disagreeing about what happened.
+
+=== Opting in to interruption
+
+[source,groovy]
+----
+def graph = TaskGraph.build {
+    interruptOnCancel true            // abortFlow() and graph timeout interrupt running work
+
+    serviceTask('slow') {
+        timeout Duration.ofSeconds(30)
+        interruptOnTimeout true       // a task timeout interrupts this task's work
+        action { ctx, prev -> longRunningCall() }
+    }
+}
+----
+
+Interruption reaches work started through `ctx.promiseFactory.executeAsync { ... }` (which is how `serviceTask` runs its action). It is delivered as a thread interrupt, so it only stops code that responds to interruption: blocking I/O, `sleep`, `wait`, lock acquisition. A tight CPU loop that never checks the interrupt flag is not stopped.
+
+=== The cancellation signal
+
+`TaskContext.requestCancel()`, `isCancelRequested()` and `clearCancel()` expose the signal. A long-running action can poll it to stop early without being interrupted:
+
+[source,groovy]
+----
+serviceTask('batch') {
+    action { ctx, prev ->
+        for (item in items) {
+            if (ctx.isCancelRequested()) return 'stopped early'
+            process(item)
+        }
+        'done'
+    }
+}
+----
+
+A context shared by several graphs, such as a sub-graph running on its parent's context, shares the signal.
+
+== Timeouts
+
+A task timeout (`timeout Duration.ofSeconds(30)`, or the `timeout { ... }` block with `timeout`, `warningThreshold` and `onTimeout`) fails the task with `TaskTimeoutException`. Timeouts are not retried.
+
+By default the timed-out work is left running. With `interruptOnTimeout true` it is interrupted, subject to the limits described above.
+
+A task with no timeout configured is still bounded by a 5-minute safety timeout on waiting for its result.
+
+A graph timeout (`graphTimeout Duration.ofMinutes(5)`) cancels the run as described under <<Cancellation>>.
+
+== Interrupts and Retries
+
+* An `InterruptedException`, or a `CancellationException`, raised by a task or found in the cause chain of its failure ends the task as CANCELLED. It is not retried and is not sent to the dead letter queue.
+* `VirtualMachineError` (for example `OutOfMemoryError`, `StackOverflowError`) and `LinkageError` fail the task at once and are not retried.
+* `IllegalStateException`, `IllegalArgumentException`, `NullPointerException`, timeouts, open circuit breakers and rate-limit rejections are not retried, as before.
+* Everything else is retried according to the retry policy.
+
+== Dataflow Delivery Guarantees
+
+TaskGraph depends on the dataflow layer for every result and callback. As of 1.2.0:
+
+* *Callbacks are always delivered.* A listener registered with `whenBound`, `whenAvailable`, `whenError`, or through a promise's `onComplete`, `onError`, `then`, `recover`, `flatMap`, `zip` or `whenComplete`, fires exactly once whether it is registered before, after or during completion.
+* *`get()` returns.* `DataflowPromise.get()` and `get(timeout, unit)` read the variable's own completion, so a value that has been set is always observed.
+* *An error state always has its error.* `hasError()` is never true while `getError()` is null.
+* *`cancel(true)` interrupts.* On a promise created by `executeAsync`, `cancel(true)` interrupts the running work; `cancel(false)` marks the promise cancelled and leaves running work to finish.
+* *Errors propagate through `Dataflows` wiring.* Assigning one dataflow variable to another propagates a failure as a failure.
+* *Listener errors are bounded.* The process-wide listener error list holds at most 100 entries.
+
+.Behaviour change in 1.2.0
+WARNING: Before 1.2.0, `cancel(true)` on an `executeAsync` promise did not interrupt anything. Code that passed `true` and relied on the work finishing will now see it interrupted. Pass `false` to keep the old behaviour.
+
+== Known Limits
+
+These are not addressed in 1.2.0:
+
+* `ScriptTask`'s default "sandbox" (`SecureScriptBase`) restricts only unresolved calls made on the script object itself. It does not prevent a script from running processes, reading files or reaching the network. Treat every script as trusted code. See the Security chapter.
+* `ControlTask` evaluates rule conditions as unrestricted Groovy.
+* `HttpTaskSecurityConfig` is not applied by `HttpTask`.
+* Task results appear unredacted in debug logs, task events and persisted state.
+* `TaskBinding.set(key, null)` throws `NullPointerException`.
+* Pause and resume are not implemented.

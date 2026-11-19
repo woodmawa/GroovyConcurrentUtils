@@ -7,6 +7,20 @@ This chapter covers TaskGraph's comprehensive security features including script
 
 == Overview
 
+.Status as of 1.2.0 (security review, 2026-11-18)
+[IMPORTANT]
+====
+Parts of this chapter describe the intended design, not what the code enforces. Checked against the source:
+
+* *Script sandboxing is not isolation.* The default base class (`SecureScriptBase`) intercepts only unresolved method and property access on the script object itself. A sandboxed script can still call `"cmd".execute()`, `System.getenv()`, `new File(...)`, `new ProcessBuilder(...)` and `Class.forName(...)`. Scripts in other languages run through JSR-223 with no restriction, `scriptTimeout` is not enforced, and the script is handed the whole `TaskContext`, including `credentials`. Treat every script as trusted code.
+* *`sandboxConfig { ... }` does not exist.* The only controls are `sandboxed true|false` and `customScriptBaseClass`.
+* *`ControlTask` rule conditions* are evaluated as unrestricted Groovy.
+* *Network security is not applied.* `HttpTaskSecurityConfig` implements URL allow-listing, private-network and cloud-metadata blocking and redirect validation, but `HttpTask` never calls it, and follows redirects automatically.
+* *File system security is applied only when configured.* `FileTask` validates paths through `FileTaskSecurityValidator`, but a task with no `securityConfig` gets `FileTaskSecurityConfig.permissive()` (refused only when `ENVIRONMENT` is production, prod, live or staging). Use `FileTaskSecurityConfig.strict(allowedDirectories)` to enforce an allow-list.
+
+These gaps are tracked in the core hardening brief (WP3 and WP4) and are not closed in 1.2.0. For what a run does guarantee, see the Execution Integrity chapter.
+====
+
 TaskGraph implements a "secure by default" architecture with multiple layers of protection:
 
 * **Script sandboxing** - Restrict dangerous operations in scripts
@@ -48,7 +62,7 @@ SecConfig <--> SharedSec : shared implementation
 
 == Script Sandboxing
 
-TaskGraph sandboxes Groovy scripts by default to prevent malicious code execution.
+TaskGraph compiles Groovy scripts against a restricted script base class by default. This blocks a small set of unresolved calls on the script itself; it does not prevent malicious code execution (see the status note at the top of this chapter). The "Blocked operations" listed in the example below are *not* blocked as of 1.2.0.
 
 === Default Sandbox Behavior
 

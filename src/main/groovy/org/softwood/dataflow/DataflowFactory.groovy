@@ -56,15 +56,28 @@ class DataflowFactory {
 
     <T> DataflowVariable<T> task(Closure<T> task) {
         DataflowVariable<T> variable = new DataflowVariable<T>(pool)
-        pool.executor.submit {
+        // 1.2.0 (DF3): keep the Future so DataflowPromise.cancel(true) can interrupt the running work.
+        // 1.2.0 (DF6): a variable already completed elsewhere (cancelled, timed out) must not turn this
+        // task's own late completion into a second exception that is lost inside the discarded Future.
+        def future = pool.executor.submit {
             try {
                 T result = task.call()
                 variable.setValue(result)
             } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("Task(): Task execution failed", e)
+                if (e instanceof InterruptedException) Thread.currentThread().interrupt()
+                try {
+                    if (variable.isBound()) {
+                        log.debug("Task(): finished after its variable was already completed: {}", e.toString())
+                    } else {
+                        variable.bindError(e)
+                        log.error("Task(): Task execution failed", e)
+                    }
+                } catch (IllegalStateException alreadyBound) {
+                    log.debug("Task(): variable completed concurrently: {}", alreadyBound.message)
+                }
             }
         }
+        variable.attachTask(future)
         return variable
     }
 

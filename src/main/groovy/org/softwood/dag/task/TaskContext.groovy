@@ -53,6 +53,21 @@ class TaskContext implements Closeable {
     def graph = null
 
     /**
+     * 1.2.0 (H2): cancellation signal for everything running on this context.
+     * Set by TaskGraph.abortFlow() and by a graph timeout. TaskBase checks it before each attempt and
+     * after each retry wait, so a cancelled graph starts no new work. It does not interrupt work that
+     * is already running. A context shared by several graphs (sub-graphs) shares the signal.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean cancelFlag = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    void requestCancel() { cancelFlag.set(true) }
+
+    boolean isCancelRequested() { cancelFlag.get() }
+
+    /** Clear the signal so the context can run another graph (TaskGraph.reset()). */
+    void clearCancel() { cancelFlag.set(false) }
+
+    /**
      * Default constructor - creates a dag-pool and wires it into the PromiseFactory.
      * This ensures the hardened ConcurrentPool backs all async task execution.
      */

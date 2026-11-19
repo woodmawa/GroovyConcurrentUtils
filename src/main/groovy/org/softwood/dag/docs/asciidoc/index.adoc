@@ -22,7 +22,8 @@ TaskGraph provides a powerful, type-safe DSL for building complex workflow graph
 * **Parallel processing** with configurable concurrency
 * **Error handling and retry logic** built-in at every layer
 * **Observability and monitoring** with event listeners
-* **Security by default** with sandboxed execution
+* **Execution integrity**: validated graphs, guarded task state, defined cancellation, guaranteed result delivery (chapter 16)
+* **Security controls** for file access, credentials and TLS. Script execution is restricted, not isolated: see the Security chapter for what is and is not enforced
 * **Extensibility** through SPI and custom implementations
 
 === Who Should Read This Guide
@@ -39,7 +40,7 @@ This guide is structured as a progressive learning experience:
 . **Part I (Chapters 1-5)**: Foundation - Architecture, design philosophy, and core concepts
 . **Part II (Chapters 6-8)**: Usage - Practical guides and examples
 . **Part III (Chapters 9-10)**: Operations - Security, monitoring, and production deployment
-. **Part IV (Chapters 11-15)**: Reference - Deep dive into components, task types, and the Office Document DSL
+. **Part IV (Chapters 11-16)**: Reference - Deep dive into components, task types, the Office Document DSL, and execution integrity (validation, state, cancellation, delivery)
 
 You can read sequentially or jump to specific chapters based on your needs.
 
@@ -82,6 +83,8 @@ include::chapters/12-gateways.adoc[]
 include::chapters/13-task-types.adoc[]
 
 include::chapters/15-office-task-dsl.adoc[]
+
+include::chapters/16-execution-integrity.adoc[]
 
 [appendix]
 == Appendix A: Migration Guide

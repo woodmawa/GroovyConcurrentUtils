@@ -228,8 +228,13 @@ class Dataflows extends GroovyObjectSupport {
             DataflowVariable<?> source = (DataflowVariable<?>) newValue
             source.whenBound("Dataflows::bindToDFV") { v ->
                 try {
-                    target.bind(v)
-                } catch (DataflowException ignored) {
+                    // 1.2.0 (DF5): a failed source fails the target. It used to bind null as a success.
+                    if (source.hasError()) {
+                        target.bindError(source.getError())
+                    } else {
+                        target.bind(v)
+                    }
+                } catch (DataflowException | IllegalStateException ignored) {
                     log.debug "DFV '$key' already bound during wiring completion"
                 }
             }

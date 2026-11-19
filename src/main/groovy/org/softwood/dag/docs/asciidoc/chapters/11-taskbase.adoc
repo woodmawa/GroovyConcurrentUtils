@@ -5,6 +5,12 @@
 Complete reference for TaskBase, the abstract base class that provides cross-cutting concerns for all tasks. This chapter documents every feature, method, and configuration option available to task implementations.
 --
 
+.Accuracy of this chapter (checked 2026-11-18 against 1.2.0)
+[IMPORTANT]
+====
+Several examples in this chapter describe an API that was designed but not built. Each is marked where it occurs. In short: `TaskBase` has no `start()`, `pause()`, `resume()`, `cancel()`, `onCancelled`, `task.on(...)` or `retryPolicy { }` / `timeoutPolicy { }` blocks. The real entry points are `execute(previousPromise)` (called by the graph), `retry { }`, `timeout ...` and `interruptOnTimeout`. The Execution Integrity chapter is authoritative for task state, cancellation, timeouts and retries.
+====
+
 == Overview
 
 TaskBase is the foundation of all tasks in TaskGraph, providing:
@@ -146,6 +152,8 @@ def result = task.start().get()
 
 === Pausing and Resuming
 
+WARNING: Not implemented. `TaskBase` has no `pause()`, `resume()`, `isPaused()` or `pausable`. The example below is a design sketch only.
+
 [source,groovy]
 ----
 // Pause execution (if pausable)
@@ -164,6 +172,8 @@ task.pausable = true  // Default: false
 ----
 
 === Cancellation
+
+WARNING: `TaskBase` has no `cancel()` or `onCancelled`; the example below is a design sketch. Cancellation is driven by the graph: `TaskGraph.abortFlow(reason)` or a graph timeout marks unfinished tasks CANCELLED and sets `ctx.isCancelRequested()`, which an action can poll. `task.isCancelled()` is real. From 1.2.0 a cancelled task stays CANCELLED even if its work finishes later. See the Execution Integrity chapter.
 
 [source,groovy]
 ----
@@ -187,6 +197,25 @@ task.onCancelled {
 Configure automatic retry on failure.
 
 === Basic Retry Configuration
+
+[WARNING]
+====
+The `retryPolicy { }` block and the `delay`, `exponentialBackoff` and `maxDelay` settings below do not exist. The real DSL is:
+
+[source,groovy]
+----
+task("retry-task") {
+    retry {
+        maxAttempts 3
+        initialDelay Duration.ofSeconds(1)
+        backoffMultiplier 2.0
+    }
+    // or a preset: retry "aggressive" | "moderate" | "conservative"
+}
+----
+
+There is no maximum delay and no jitter. From 1.2.0 an interrupt or cancellation is never retried, and an abort ends the wait between attempts.
+====
 
 [source,groovy]
 ----
@@ -323,6 +352,8 @@ Control execution time limits.
 
 === Basic Timeout
 
+NOTE: `timeout` takes a `java.time.Duration` (`timeout Duration.ofSeconds(30)`), a preset name, or a `timeout { }` block. The bare millisecond form shown below is not accepted; use `timeoutMillis = 30000` for the legacy millisecond setting.
+
 [source,groovy]
 ----
 task("time-limited") {
@@ -336,6 +367,25 @@ task("time-limited") {
 ----
 
 === Advanced Timeout Configuration
+
+[WARNING]
+====
+`timeoutPolicy { }`, `hardTimeout`, `timeoutAction` and `fallback` below do not exist. The real DSL is:
+
+[source,groovy]
+----
+task("timeout-config") {
+    timeout {
+        timeout Duration.ofSeconds(30)
+        warningThreshold Duration.ofSeconds(20)
+        onTimeout { ctx -> log.warn("timed out") }
+    }
+    interruptOnTimeout true   // 1.2.0, opt-in: interrupt the timed-out work (default false)
+}
+----
+
+A timeout fails the task with `TaskTimeoutException` and is not retried. Unless `interruptOnTimeout` is set, the timed-out work is left to finish.
+====
 
 [source,groovy]
 ----

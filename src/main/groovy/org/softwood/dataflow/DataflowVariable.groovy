@@ -87,6 +87,26 @@ class DataflowVariable<T> extends DataflowExpression<T> {
     // Binding Operations (Success / Error / Cancellation)
     // =====================================================================================================
 
+    /** 1.2.0 (DF3): the pool Future running this variable's task, when it was started by DataflowFactory.task. */
+    private volatile java.util.concurrent.Future<?> taskFuture
+
+    /** 1.2.0 (DF3): record the Future that is computing this variable. */
+    void attachTask(java.util.concurrent.Future<?> future) {
+        this.taskFuture = future
+    }
+
+    /**
+     * 1.2.0 (DF3): cancel the task computing this variable, if there is one.
+     * With mayInterruptIfRunning=true the worker thread is interrupted; with false a running task is left to finish.
+     * Does not complete the variable: the caller binds the outcome.
+     *
+     * @return true if a task was attached and its Future accepted the cancel
+     */
+    boolean cancelTask(boolean mayInterruptIfRunning) {
+        java.util.concurrent.Future<?> f = taskFuture
+        return f != null ? f.cancel(mayInterruptIfRunning) : false
+    }
+
     /**
      * Bind this variable to a final value.
      *

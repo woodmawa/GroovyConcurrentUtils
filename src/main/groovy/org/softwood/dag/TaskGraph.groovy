@@ -55,6 +55,22 @@ class TaskGraph {
     
     /** Reuse guard - ensures graph can only be started once */
     private volatile boolean hasStarted = false
+
+    /** 1.2.0 (H6): start() is claimed atomically; hasStarted stays as the readable flag. */
+    private final java.util.concurrent.atomic.AtomicBoolean startClaimed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 1.2.0 (H6/H2): the run's outcome is claimed exactly once, by whichever comes first: normal
+     * completion, abortFlow() or a graph timeout. Only the claimant resolves graphCompletionPromise
+     * and emits a terminal graph event.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean completionClaimed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 1.2.0 (D6): opt-in. When true, abortFlow() and a graph timeout also cancel the in-flight work of
+     * running tasks with an interrupt. Default false: running work is left to finish, as in 1.1.x.
+     */
+    boolean interruptOnCancel = false
     
     /**
      * Unique run ID for this execution instance, generated fresh on each {@link #start()} call.
@@ -190,6 +206,9 @@ class TaskGraph {
      */
     void reset() {
         hasStarted = false
+        startClaimed.set(false)
+        completionClaimed.set(false)
+        ctx?.clearCancel()
         completedTaskCount = 0
         totalTaskCount = 0
         graphCompletionPromise = null
@@ -558,6 +577,66 @@ class TaskGraph {
         }
     }
 
+    /**
+     * 1.2.0 (H1): check that this graph can run to completion. Called by start(); public so a caller
+     * can check a built graph without running it.
+     *
+     * <p>Refuses a predecessor or successor id that is not a task in this graph, and any dependency
+     * cycle (which includes a non-empty graph with no root). Either used to leave start() returning a
+     * promise that never resolved.</p>
+     *
+     * @throws IllegalStateException naming every problem found
+     */
+    void validate() {
+        List<String> problems = []
+        Map<String, Set<String>> preds = [:]
+        tasks.keySet().each { String tid -> preds[tid] = new LinkedHashSet<String>() }
+
+        tasks.each { String tid, ITask t ->
+            t.predecessors.each { String p ->
+                if (tasks.containsKey(p)) preds[tid] << p
+                else problems << "task '${tid}' depends on unknown task '${p}'".toString()
+            }
+            t.successors.each { String s ->
+                if (tasks.containsKey(s)) preds[s] << tid
+                else problems << "task '${tid}' has unknown successor '${s}'".toString()
+            }
+        }
+
+        // Kahn's algorithm over the union of both edge directions: whatever cannot be ordered is in,
+        // or downstream of, a cycle.
+        Map<String, List<String>> succs = [:]
+        Map<String, Integer> remaining = [:]
+        preds.each { String tid, Set<String> ps ->
+            remaining[tid] = ps.size()
+            ps.each { String p ->
+                if (!succs.containsKey(p)) succs[p] = []
+                succs[p] << tid
+            }
+        }
+        Deque<String> ready = new ArrayDeque<String>()
+        remaining.each { String tid, Integer n -> if (n == 0) ready.add(tid) }
+        int ordered = 0
+        while (!ready.isEmpty()) {
+            String done = ready.poll()
+            ordered++
+            (succs[done] ?: []).each { String next ->
+                int left = remaining[next] - 1
+                remaining[next] = left
+                if (left == 0) ready.add(next)
+            }
+        }
+        if (ordered < tasks.size()) {
+            List<String> stuck = remaining.findAll { it.value > 0 }.keySet().sort().collect { "'${it}'".toString() }
+            problems << ("dependency cycle involving " + stuck.join(', ')).toString()
+        }
+
+        if (problems) {
+            throw new IllegalStateException(
+                ("TaskGraph '${id ?: 'unnamed'}' cannot run: " + problems.join('; ')).toString())
+        }
+    }
+
     // --------------------------------------------------------------------
     // EXECUTION
     // --------------------------------------------------------------------
@@ -643,7 +722,16 @@ class TaskGraph {
                 "use TaskGraphFactory.define { ... }.create() to create fresh instances."
             )
         }
+        // 1.2.0 (H1): wire and validate BEFORE the graph is consumed, so a refused graph is not used up.
+        finalizeWiring()
+        validate()
+
+        // 1.2.0 (H6): claim the start atomically; two racing start() calls cannot both pass the check above.
+        if (!startClaimed.compareAndSet(false, true)) {
+            throw new IllegalStateException("TaskGraph has already been started and cannot be reused.")
+        }
         hasStarted = true
+        completionClaimed.set(false)
         seenTaskEvents.clear()  // Reset dedup set for this run
         
         finalizeWiring()
@@ -718,6 +806,10 @@ class TaskGraph {
                     
                     log.error "Graph timeout exceeded: ${elapsed} > ${timeout} (completed: ${completed}/${totalTaskCount})"
                     
+                    // 1.2.0 (H6/H2): claim the outcome before cancelling, so a task that finishes during
+                    // the cancel cannot report the run as completed or failed.
+                    boolean claimedByTimeout = completionClaimed.compareAndSet(false, true)
+
                     // Cancel all running/scheduled tasks
                     cancelRemainingTasks()
                     
@@ -734,6 +826,12 @@ class TaskGraph {
                     // Finalize persistence with timeout failure
                     finalizePersistence(true, "<graph-timeout>", timeoutError)
                     
+                    // 1.2.0 (H2): resolve the graph's own promise too. A caller awaiting the public
+                    // graphCompletionPromise used to wait for ever after a timeout.
+                    if (claimedByTimeout && graphCompletionPromise != null) {
+                        graphCompletionPromise.fail(timeoutError)
+                    }
+
                     // Fail the wrapped promise
                     wrappedPromise.fail(timeoutError)
                 }
@@ -753,12 +851,19 @@ class TaskGraph {
     // H9 fix: use markCancelled() so timeout-cancelled tasks are distinguishable
     // from genuinely failed tasks in health/observability output.
     private void cancelRemainingTasks() {
+        // 1.2.0 (H2): tell every task on this context to start no further attempt.
+        ctx?.requestCancel()
         synchronized (this) {
             tasks.values().each { task ->
                 if (!task.isCompleted() && !task.isFailed() && !task.isSkipped() &&
                         !(task instanceof org.softwood.dag.task.TaskBase && task.isCancelled())) {
                     // H9: mark CANCELLED not FAILED - these were cut short by timeout, not errors
                     task.markCancelled()
+
+                    // 1.2.0 (D6): opt-in interrupt of work that is already running.
+                    if (interruptOnCancel && task instanceof org.softwood.dag.task.TaskBase) {
+                        ((org.softwood.dag.task.TaskBase) task).interruptInFlight()
+                    }
 
                     // Persist CANCELLED state (map to FAILED for persistence layer which may not know CANCELLED)
                     persistTaskStateChange(task.id, PersistenceTaskState.FAILED, [
@@ -788,8 +893,11 @@ class TaskGraph {
      */
     void abortFlow(String reason = 'Flow aborted') {
         log.warn 'TaskGraph.abortFlow: aborting runId={} reason={}', runId, reason
+        // 1.2.0 (H6/H2): claim the run's outcome first. Once an abort holds it, a task that finishes late
+        // can no longer produce GRAPH_COMPLETED or GRAPH_FAILED: the abort is the only terminal outcome.
+        boolean claimed = completionClaimed.compareAndSet(false, true)
         cancelRemainingTasks()
-        if (graphCompletionPromise != null && !graphCompletionPromise.isDone()) {
+        if (claimed && graphCompletionPromise != null && !graphCompletionPromise.isDone()) {
             graphCompletionPromise.fail(new RuntimeException("Flow aborted: ${reason}"))
         }
     }
@@ -958,12 +1066,16 @@ class TaskGraph {
 
         synchronized (this) {
             int terminal = tasks.values().count { task ->
-                task.isCompleted() || task.isFailed() || task.isSkipped()
+                task.isCompleted() || task.isFailed() || task.isSkipped() || task.isCancelled()
             }
 
-            if (terminal == totalTaskCount && graphCompletionPromise != null && !graphCompletionPromise.isDone()) {
+            // 1.2.0 (H6): the claim is taken inside the lock. Before it, two tasks finishing together both
+            // saw "all terminal, promise not done" and each emitted the terminal graph event.
+            if (terminal == totalTaskCount && graphCompletionPromise != null && !graphCompletionPromise.isDone()
+                    && completionClaimed.compareAndSet(false, true)) {
                 shouldComplete = true
-                def failedTasks = tasks.values().findAll { it.isFailed() }
+                // 1.2.0 (H2): a cancelled task makes the run a failure, never GRAPH_COMPLETED.
+                def failedTasks = tasks.values().findAll { it.isFailed() } ?: tasks.values().findAll { it.isCancelled() }
                 if (failedTasks) {
                     hasFailed = true
                     firstFailure = failedTasks[0]
@@ -1004,7 +1116,8 @@ class TaskGraph {
                 }
             }
 
-            graphCompletionPromise.fail(firstFailure.error)
+            graphCompletionPromise.fail(firstFailure.error ?: new java.util.concurrent.CancellationException(
+                    "Task '${firstFailure.id}' was cancelled".toString()))
 
         } else {
             // Collect terminal results outside the lock - tasks are COMPLETED so their
@@ -1088,6 +1201,15 @@ class TaskGraph {
         // -------------------------
         execPromise.onComplete { result ->
             log.debug "Task ${t.id} completed with result: $result"
+
+            // 1.2.0 (H2): the work of a cancelled task may still finish. The task stays CANCELLED,
+            // schedules nothing, and whatever depends on it is skipped.
+            if (t.isCancelled()) {
+                markDownstreamAsSkipped(t)
+                checkGraphCompletion()
+                return
+            }
+
             t.markCompleted()
             
             // Persist COMPLETED state
@@ -1109,6 +1231,19 @@ class TaskGraph {
         }
 
         execPromise.onError { error ->
+            // 1.2.0 (H2/H4): a cancelled or interrupted task is not a failed task.
+            if (t.isCancelled()) {
+                log.debug "Task ${t.id} ended cancelled: $error"
+                persistTaskStateChange(t.id, PersistenceTaskState.FAILED, [
+                    errorMessage: "Cancelled: ${error?.message}".toString()
+                ])
+                publishTaskStateToCluster(t.id, "CANCELLED", error?.message)
+                updateClusterGraphState(t.id, "CANCELLED")
+                markDownstreamAsSkipped(t)
+                checkGraphCompletion()
+                return
+            }
+
             log.error "Task ${t.id} failed: $error"
             t.markFailed(error)
             

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = 'org.softwood'
-version = '1.1.2'   // 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0 (no API change). 1.1.1: P4 IBinding.getPage(offset,size)
+version = '1.2.0'   // 1.2.0: core hardening - dataflow delivery, graph validation, guarded task state, cancellation (see CHANGENOTE.md). 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
 
 repositories {
     mavenCentral()
@@ -85,8 +85,10 @@ dependencies {
     testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
     testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
     testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
-    testFixturesImplementation "org.slf4j:slf4j-api:2.0.+"
-    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.+"
+    // Pinned to the same versions as the main dependencies: a dynamic version (2.0.+) cannot be
+    // expressed in a Maven POM and produced a publication warning.
+    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
+    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.20"
 }
 
 // Groovy 6.0.0 (2026-11-16): compileTestGroovy runs in a Gradle compiler worker, whose default 512m heap the
@@ -160,6 +162,11 @@ publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
+
+            // The test-fixtures variants carry a Gradle capability that a Maven POM cannot express.
+            // Gradle consumers read the .module file, which is complete, so the POM warning is noise.
+            suppressPomMetadataWarningsFor('testFixturesApiElements')
+            suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
 
             pom {
                 name.set(providers.gradleProperty('pomName').orElse('GroovyFX'))

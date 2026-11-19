@@ -222,9 +222,10 @@ class DataflowExpression<T> {
                 throw new IllegalStateException("DataflowExpression can only be completed once (state=" +
                         state.get() + ", attempted setError(" + t + "))")
             }
-            state.set(State.ERROR)
-            completedAt = LocalDateTime.now()
+            // 1.2.0 (H5): publish the error BEFORE the state. A reader that sees ERROR must also see the error.
             error = t
+            completedAt = LocalDateTime.now()
+            state.set(State.ERROR)
             future.completeExceptionally(new CompletionException(t))
             pcs.firePropertyChange("error", null, t)
         } finally {
@@ -256,9 +257,10 @@ class DataflowExpression<T> {
                 throw new IllegalStateException("DataflowExpression can only be completed once (state=" +
                         state.get() + ", attempted setCancelled(" + cancelled + "))")
             }
-            state.set(State.CANCELLED)
-            completedAt = LocalDateTime.now()
+            // 1.2.0 (H5): publish the error BEFORE the state, as in setError.
             error = cancelled
+            completedAt = LocalDateTime.now()
+            state.set(State.CANCELLED)
             future.completeExceptionally(new CompletionException(cancelled))
             pcs.firePropertyChange("error", null, cancelled)
         } finally {
@@ -288,12 +290,8 @@ class DataflowExpression<T> {
      * if it completed successfully
      */
     Throwable getError() {
-        // DEFENSIVE: If state indicates error but error field is null,
-        // create a generic error to prevent null propagation
-        if (hasError() && error == null) {
-            log.warn("getError() called with hasError()=true but error=null - creating defensive error")
-            return new IllegalStateException("Error state detected but error value is null (possible race condition)")
-        }
+        // 1.2.0 (H5): setError/setCancelled assign the error before the state, so an error state
+        // always has its error. The defensive substitute error that used to live here is gone.
         return error
     }
 
@@ -370,7 +368,11 @@ class DataflowExpression<T> {
             // Run asynchronously on the pool to avoid surprising synchronous re-entrancy.
             scheduleListener(listener, getSafeValueForListeners(), "whenBound")
         } else {
-            whenBoundListeners.add(listener)
+            // 1.2.0 (DF1): the bound check above is lock-free; enqueue under the completion lock so a
+            // bind that lands between the check and the add cannot miss this listener.
+            if (!enqueueIfPending(whenBoundListeners, listener)) {
+                scheduleListener(listener, getSafeValueForListeners(), "whenBound")
+            }
         }
         this
     }
@@ -390,7 +392,9 @@ class DataflowExpression<T> {
         if (isBound()) {
             scheduleListener(listener, getSafeValueForListeners(), "whenBoundAsync")
         } else {
-            asyncWhenBoundListeners.add(listener)
+            if (!enqueueIfPending(asyncWhenBoundListeners, listener)) {
+                scheduleListener(listener, getSafeValueForListeners(), "whenBoundAsync")
+            }
         }
         this
     }
@@ -414,6 +418,24 @@ class DataflowExpression<T> {
             invokeListener(listener, v, message)
         }
         return whenBound(wrapped)
+    }
+
+    /**
+     * 1.2.0 (DF1): add a listener only while still PENDING, decided under the completion lock.
+     * setValue/setError/setCancelled change the state under the same lock and snapshot the listener
+     * lists afterwards, so a listener is either in the snapshot or told here that it must fire now.
+     *
+     * @return true if queued; false if the expression completed first and the caller must schedule it
+     */
+    private boolean enqueueIfPending(List<Closure> queue, Closure listener) {
+        completionLock.lock()
+        try {
+            if (state.get() != State.PENDING) return false
+            queue.add(listener)
+            return true
+        } finally {
+            completionLock.unlock()
+        }
     }
 
     /**
@@ -504,7 +526,7 @@ class DataflowExpression<T> {
         } catch (Throwable t) {
             String errorMsg = "Error in ${message} listener for ${type?.simpleName ?: 'Object'}: ${t.message}"
             log.error(errorMsg, t)
-            listenerErrors.offer(errorMsg)
+            collectListenerError(errorMsg)   // 1.2.0 (DF4): bounded, was an uncapped offer
         }
     }
 

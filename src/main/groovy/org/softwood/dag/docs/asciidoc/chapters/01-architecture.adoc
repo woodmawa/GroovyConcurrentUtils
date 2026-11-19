@@ -17,11 +17,13 @@ TaskGraph is a workflow orchestration framework built on three core pillars:
 
 === Secure by Default
 
+WARNING: As of 1.2.0 two of the controls listed here are weaker than this section says. The default script "sandbox" does not stop a script from running a process or reading a file (the commented "Blocked" line in the example below does run), and `HttpTask` does not apply `HttpTaskSecurityConfig`. See the status note at the top of the Security chapter. What a run does guarantee is set out in the Execution Integrity chapter.
+
 TaskGraph follows a "secure by default" philosophy where security controls are enabled automatically:
 
-* Script sandboxing enabled by default
+* Script restriction enabled by default (a restriction on the script object, not isolation)
 * File access restricted to approved directories
-* HTTP requests validate URLs and block SSRF attacks
+* URL allow-listing and SSRF blocking are defined in `HttpTaskSecurityConfig` (not yet applied by `HttpTask`)
 * Credentials never hardcoded, always from secure sources
 
 [source,groovy]

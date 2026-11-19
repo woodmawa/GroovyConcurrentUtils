@@ -58,17 +58,9 @@ class ServiceTask extends TaskBase<Object> {
 
             // If the action returned a Promise, unwrap it to get the actual value
             if (result instanceof Promise) {
-                try {
-                    return ((Promise) result).get()
-                } catch (java.lang.IllegalStateException raceErr) {
-                    // DataflowPromise race condition: error state detected but error value not yet set
-                    if (raceErr.message?.contains("Error state detected but error value is null")) {
-                        Thread.sleep(10)
-                        return ((Promise) result).get()
-                    } else {
-                        throw raceErr
-                    }
-                }
+                // 1.2.0 (H5): the retry-on-"error value is null" workaround that used to wrap this get()
+                // is gone; DataflowExpression now publishes the error before the error state.
+                return ((Promise) result).get()
             }
 
             // Action returned a plain value

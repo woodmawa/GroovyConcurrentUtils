@@ -104,7 +104,12 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      */
     boolean cancelTask(boolean mayInterruptIfRunning) {
         java.util.concurrent.Future<?> f = taskFuture
-        return f != null ? f.cancel(mayInterruptIfRunning) : false
+        if (f == null) return false
+        // GCU 1.2.2 (DF15): work started by task(...) on this variable runs through the pool's own submit
+        // path, and that path's CompletableFuture interrupts the worker on any cancel. A cancel that
+        // must not interrupt therefore leaves it alone: the running work finishes, as documented.
+        if (f instanceof CompletableFuture && !mayInterruptIfRunning) return false
+        return f.cancel(mayInterruptIfRunning)
     }
 
     /**
@@ -223,21 +228,48 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Closure<T> closure) {
+        return startTask('Closure', { closure.call() } as Callable<T>)
+    }
+
+    /**
+     * GCU 1.2.2 (DF15): the one path behind the three task(...) overloads, given the treatment
+     * DataflowFactory.task(Closure) got in 1.2.0:
+     * <ul>
+     *   <li>the running work is recorded on the variable, so {@code DataflowPromise.cancel(true)}
+     *       interrupts it (DF3);</li>
+     *   <li>work that ends after the variable was completed elsewhere (cancelled, timed out) is logged
+     *       at debug; it used to throw a second exception from inside its own error handler (DF6).</li>
+     * </ul>
+     */
+    private DataflowVariable<T> startTask(String kind, Callable<T> work) {
         try {
-            pool.execute {
+            CompletableFuture started = pool.execute({
                 try {
-                    T result = closure.call()
-                    this.setValue(result)
+                    this.setValue(work.call())
                 } catch (Throwable e) {
-                    this.bindError(e)
-                    log.error("DataflowVariable.task(Closure): execution failed", e)
+                    if (e instanceof InterruptedException) Thread.currentThread().interrupt()
+                    completeWithTaskError(kind, e)
                 }
-            }
-        } catch (IllegalStateException e) {
-            this.bindError(e)
-            log.error("DataflowVariable.task(Closure): pool is closed", e)
+            } as Runnable)
+            attachTask(started)
+        } catch (IllegalStateException | java.util.concurrent.RejectedExecutionException e) {
+            // the pool is closed, or refused the work
+            completeWithTaskError(kind, e)
         }
         return this
+    }
+
+    private void completeWithTaskError(String kind, Throwable e) {
+        try {
+            if (isBound()) {
+                log.debug("DataflowVariable.task({}): ended after the variable was already completed: {}", kind, e.toString())
+            } else {
+                bindError(e)
+                log.error("DataflowVariable.task(${kind}): execution failed", e)
+            }
+        } catch (IllegalStateException alreadyBound) {
+            log.debug("DataflowVariable.task({}): variable completed concurrently: {}", kind, alreadyBound.message)
+        }
     }
 
     /**
@@ -256,21 +288,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Callable<T> callable) {
-        try {
-            pool.execute {
-                try {
-                    T result = callable.call()
-                    this.setValue(result)
-                } catch (Throwable e) {
-                    this.bindError(e)
-                    log.error("DataflowVariable.task(Callable): execution failed", e)
-                }
-            }
-        } catch (IllegalStateException e) {
-            this.bindError(e)
-            log.error("DataflowVariable.task(Callable): pool is closed", e)
-        }
-        return this
+        return startTask('Callable', callable)
     }
 
     /**
@@ -289,21 +307,7 @@ class DataflowVariable<T> extends DataflowExpression<T> {
      * @return this DataflowVariable for fluent chaining
      */
     DataflowVariable<T> task(Supplier<T> supplier) {
-        try {
-            pool.execute {
-                try {
-                    T result = supplier.get()
-                    this.setValue(result)
-                } catch (Throwable e) {
-                    this.bindError(e)
-                    log.error("DataflowVariable.task(Supplier): execution failed", e)
-                }
-            }
-        } catch (IllegalStateException e) {
-            this.bindError(e)
-            log.error("DataflowVariable.task(Supplier): pool is closed", e)
-        }
-        return this
+        return startTask('Supplier', { supplier.get() } as Callable<T>)
     }
 
 
@@ -730,9 +734,26 @@ class DataflowVariable<T> extends DataflowExpression<T> {
         return then { T a -> (a instanceof Number && other instanceof Number) ? (a / other) : a }
     }
 
-    /** Fallback to underlying value for other methods. */
+    /**
+     * GCU 1.2.2 (DF12): how long a method call forwarded to the value (see methodMissing) waits for
+     * the variable to be bound. Null, the default, waits for ever, as before. Set it and a call on a
+     * variable nobody binds ends in a TimeoutException instead of a thread parked for good.
+     */
+    volatile Duration readTimeout = null
+
+    /** Fallback to underlying value for other methods. Blocks until bound; see {@link #readTimeout}. */
     Object methodMissing(String name, Object args) {
-        T val = get()
+        Duration limit = readTimeout
+        T val
+        if (limit == null) {
+            val = get()
+        } else {
+            try {
+                val = get(limit)
+            } catch (TimeoutException e) {
+                throw new TimeoutException("DataflowVariable was not bound within " + limit + "; '" + name + "' was not called")
+            }
+        }
         return InvokerHelper.invokeMethod(val, name, args)
     }
 }

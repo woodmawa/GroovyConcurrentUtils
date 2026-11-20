@@ -39,7 +39,7 @@ class ConditionalForkTask extends RouterTask {
             // CRITICAL: Store input data for TaskGraph to pass to selected tasks
     routerInputData = prevValue
 
-    log.debug("ConditionalForkTask($id): prevValue = $prevValue")
+    log.debug("ConditionalForkTask($id): prevValue = ${redacted(prevValue)}")
 
     // --------------------------------------
     // Evaluate routing rules
@@ -65,7 +65,7 @@ class ConditionalForkTask extends RouterTask {
     @Override
     protected List<String> route(Object prevValue) {
 
-        log.debug("ConditionalForkTask($id): evaluating routing for prevValue=$prevValue")
+        log.debug("ConditionalForkTask($id): evaluating routing for prevValue=${redacted(prevValue)}")
 
         def selected = []
 

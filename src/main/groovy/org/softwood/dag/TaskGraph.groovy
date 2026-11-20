@@ -1155,7 +1155,7 @@ class TaskGraph {
 
             def result = terminalResults.size() == 1 ? terminalResults[0] : terminalResults
             graphCompletionPromise.accept(result)
-            log.debug "Graph execution completed with result: $result"
+            log.debug "Graph execution completed with result: ${ctx.redact(null, result)}"
         }
     }
 
@@ -1200,7 +1200,7 @@ class TaskGraph {
         // Completion callbacks
         // -------------------------
         execPromise.onComplete { result ->
-            log.debug "Task ${t.id} completed with result: $result"
+            log.debug "Task ${t.id} completed with result: ${ctx.redact(t.id, result)}"
 
             // 1.2.0 (H2): the work of a cancelled task may still finish. The task stays CANCELLED,
             // schedules nothing, and whatever depends on it is skipped.
@@ -1213,7 +1213,8 @@ class TaskGraph {
             t.markCompleted()
             
             // Persist COMPLETED state
-            persistTaskStateChange(t.id, PersistenceTaskState.COMPLETED, [result: result])
+            // 1.2.2 (M1): with a redactor on the context, the snapshot holds the redacted form.
+            persistTaskStateChange(t.id, PersistenceTaskState.COMPLETED, [result: ctx.redact(t.id, result)])
             
             // Publish to cluster
             publishTaskStateToCluster(t.id, "COMPLETED")

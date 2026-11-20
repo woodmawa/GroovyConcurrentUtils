@@ -4,8 +4,11 @@ import groovy.lang.GroovyObjectSupport
 import groovy.util.logging.Slf4j
 import org.codehaus.groovy.runtime.InvokerInvocationException
 
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Dynamic, thread-safe namespace of {@link DataflowVariable} instances.
@@ -33,6 +36,45 @@ class Dataflows extends GroovyObjectSupport {
 
     /** Factory used to create new DataflowVariables for this namespace. */
     private final DataflowFactory factory
+
+    /**
+     * GCU 1.2.2 (DF12): how long a blocking read ({@code df.x}, {@code df[i]}) waits for the variable
+     * to be bound. Null, the default, waits for ever, as before.
+     */
+    private volatile Duration readTimeout = null
+
+    /** @return the read timeout, or null when reads wait for ever */
+    Duration getReadTimeout() {
+        return readTimeout
+    }
+
+    /**
+     * GCU 1.2.2 (DF12): bound the blocking reads of this namespace. A read creates the variable it
+     * names, so a mistyped name is a variable nobody will ever bind and the read waits for ever. With a
+     * timeout set, that read ends in a TimeoutException naming the variable. The variable itself is
+     * untouched and can still be bound later.
+     *
+     * <p>{@code readTimeout} is now a real property of this class: it is no longer available as the
+     * name of a dataflow variable through {@code df.readTimeout} (use {@code df['readTimeout']}).</p>
+     *
+     * @param timeout the limit, or null to wait for ever
+     */
+    void setReadTimeout(Duration timeout) {
+        this.readTimeout = timeout
+    }
+
+    private Object blockingRead(Object key) {
+        DataflowVariable<?> dfv = ensureDFV(key)
+        Duration limit = readTimeout
+        if (limit == null) {
+            return dfv.getValue()
+        }
+        try {
+            return dfv.getValue(limit.toMillis(), TimeUnit.MILLISECONDS)
+        } catch (TimeoutException e) {
+            throw new TimeoutException("Dataflows: '" + key + "' was not bound within " + limit)
+        }
+    }
 
     // ---------------------------------------------------------------------
     // Constructors
@@ -101,7 +143,7 @@ class Dataflows extends GroovyObjectSupport {
 
         log.trace "getAt: $index (blocking)"
         try {
-            return ensureDFV(index).getValue()
+            return blockingRead(index)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
             throw new InvokerInvocationException(e)
@@ -138,7 +180,7 @@ class Dataflows extends GroovyObjectSupport {
     Object propertyMissing(String name) {
         log.trace "propertyMissing(read): $name"
         try {
-            return ensureDFV(name).getValue()
+            return blockingRead(name)
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
             throw new InvokerInvocationException(e)

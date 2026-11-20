@@ -18,7 +18,7 @@ plugins {
 }
 
 group = 'org.softwood'
-version = '1.2.1'   // 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
+version = '1.2.2'   // 1.2.2: defects - TaskContext builder config and lazy caches, one promise state, dataflow listeners/timeouts/interrupts/task overloads, actor mailbox resize, JWT with no exp, opt-in result redaction (see CHANGENOTE.md). 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
 
 // Repositories are declared once, in settings.gradle (dependencyResolutionManagement, PREFER_SETTINGS).
 

@@ -89,7 +89,13 @@ or failed returns `false` and leaves its outcome alone, but still cancels its de
 
 `get()` blocks until the promise is done and returns the value or throws the error.
 `get(timeout, unit)` does the same with a limit and throws `TimeoutException`. `isDone()`,
-`isCompleted()`, `isFailed()` and `isCancelled()` report state without blocking.
+`isCompleted()`, `isFailed()` and `isCancelled()` report state without blocking. From 1.2.2
+the default promise reads these from its dataflow variable, so `isDone()` is true exactly when
+`get()` would return.
+
+If the work behind a promise ended with `InterruptedException`, `get()` throws a
+`RuntimeException` wrapping it and does not set the reading thread's interrupt flag. The flag
+is set only when the reading thread itself was interrupted while waiting.
 
 Blocking is cheap on a virtual thread, which is where promise work runs by default. Prefer
 callbacks and composition anyway when the code is on a thread it does not own.

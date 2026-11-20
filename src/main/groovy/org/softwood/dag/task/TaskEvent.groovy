@@ -34,6 +34,13 @@ class TaskEvent {
     // Task result (non-null only for COMPLETED events)
     final Object result
 
+    /**
+     * GCU 1.2.2 (M1): the result as it may be logged, stored or shown.
+     * With no redactor on the TaskContext this is {@link #result} itself. A listener that writes events
+     * somewhere durable should write this and not {@code result}; {@code result} is never altered.
+     */
+    final Object redactedResult
+
     // Extensible metadata
     final Map<String, Object> metadata
 
@@ -59,6 +66,7 @@ class TaskEvent {
         this.graphId = null
         this.runId = null
         this.result = null
+        this.redactedResult = null
         this.metadata = [:]
     }
 
@@ -90,6 +98,40 @@ class TaskEvent {
         this.graphId = graphId
         this.runId = runId
         this.result = result
+        this.redactedResult = result
+        this.metadata = metadata ?: [:]
+    }
+
+    /**
+     * GCU 1.2.2 (M1): the full constructor plus the redacted form of the result.
+     */
+    TaskEvent(
+        String taskId,
+        String taskName,
+        TaskState taskState,
+        Throwable error,
+        Instant timestamp,
+        Long executionTimeMs,
+        Long waitTimeMs,
+        Integer attemptNumber,
+        String graphId,
+        String runId,
+        Object result,
+        Map<String, Object> metadata,
+        Object redactedResult
+    ) {
+        this.taskId = taskId
+        this.taskName = taskName ?: taskId
+        this.taskState = taskState
+        this.error = error
+        this.timestamp = timestamp ?: Instant.now()
+        this.executionTimeMs = executionTimeMs
+        this.waitTimeMs = waitTimeMs
+        this.attemptNumber = attemptNumber ?: 1
+        this.graphId = graphId
+        this.runId = runId
+        this.result = result
+        this.redactedResult = redactedResult
         this.metadata = metadata ?: [:]
     }
 
@@ -128,6 +170,8 @@ class TaskEvent {
         private String graphId
         private String runId
         private Object result
+        private Object redactedResult
+        private boolean redactedResultSet = false
         private Map<String, Object> metadata = [:]
 
         Builder(String taskId, TaskState state) {
@@ -144,6 +188,8 @@ class TaskEvent {
         Builder graphId(String id) { this.graphId = id; return this }
         Builder runId(String id) { this.runId = id; return this }
         Builder result(Object result) { this.result = result; return this }
+        /** GCU 1.2.2 (M1): the form of the result that may be shown; defaults to the result itself. */
+        Builder redactedResult(Object shown) { this.redactedResult = shown; this.redactedResultSet = true; return this }
         Builder metadata(Map<String, Object> meta) { this.metadata = meta; return this }
         Builder addMetadata(String key, Object value) { this.metadata[key] = value; return this }
 
@@ -151,7 +197,8 @@ class TaskEvent {
             return new TaskEvent(
                 taskId, taskName, taskState, error,
                 timestamp, executionTimeMs, waitTimeMs, attemptNumber,
-                graphId, runId, result, metadata
+                graphId, runId, result, metadata,
+                redactedResultSet ? redactedResult : result
             )
         }
     }

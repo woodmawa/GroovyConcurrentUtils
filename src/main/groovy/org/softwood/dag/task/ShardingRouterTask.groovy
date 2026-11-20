@@ -54,7 +54,7 @@ class ShardingRouterTask extends RouterTask {
         if (shardCount <= 0)
             throw new IllegalStateException("ShardingRouterTask($id) shardCount must be >= 1")
 
-        log.debug("ShardingRouterTask($id): computing shard source from prevValue=$prevValue")
+        log.debug("ShardingRouterTask($id): computing shard source from prevValue=${redacted(prevValue)}")
 
         def collection = shardSource(prevValue)
 

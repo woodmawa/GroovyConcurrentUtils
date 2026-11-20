@@ -151,7 +151,14 @@ class JwtTokenService {
         def payload = parseJson(payloadJson) as Map
 
         // Verify expiry
-        def exp = payload.exp as long
+        // GCU 1.2.2 (S3): a signed token with no exp (or one that is not a number) is an invalid token.
+        // It used to fail on the cast below with a NullPointerException, which callers that catch
+        // InvalidTokenException to mean "reject this caller" did not catch.
+        Object expClaim = payload.get('exp')
+        if (!(expClaim instanceof Number)) {
+            throw new InvalidTokenException("Token has no valid expiry (exp) claim")
+        }
+        long exp = ((Number) expClaim).longValue()
         def now = Instant.now().epochSecond
 
         if (now >= exp) {
@@ -161,7 +168,8 @@ class JwtTokenService {
         // Extract claims
         def subject = payload.sub as String
         def roles = (payload.roles ?: []) as List<String>
-        def issuedAt = Instant.ofEpochSecond(payload.iat as long)
+        Object iatClaim = payload.get('iat')
+        Instant issuedAt = (iatClaim instanceof Number) ? Instant.ofEpochSecond(((Number) iatClaim).longValue()) : null
         def expiresAt = Instant.ofEpochSecond(exp)
 
         log.debug("Validated JWT for subject '${subject}' with roles ${roles}")

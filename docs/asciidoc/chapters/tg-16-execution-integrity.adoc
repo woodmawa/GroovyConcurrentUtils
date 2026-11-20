@@ -196,16 +196,23 @@ TaskGraph depends on the dataflow layer for every result and callback. As of 1.2
 * *Errors propagate through `Dataflows` wiring.* Assigning one dataflow variable to another propagates a failure as a failure.
 * *Listener errors are bounded.* The process-wide listener error list holds at most 100 entries.
 
+Added in 1.2.2:
+
+* *A promise has one state.* `isDone()` on a task's promise is true exactly when its value can be read. The promise no longer keeps a state of its own beside its variable's.
+* *A callback still runs after the pool is closed.* A completion callback that falls due after `TaskContext.close()` runs on the completing thread. It used to be dropped, which left a node that never finished or a successor that never started.
+* *A reader is not marked interrupted by the task's interrupt.* When a task's work ends with `InterruptedException`, the thread waiting on its promise gets the error and keeps a clean interrupt flag.
+* *Derived promises are released.* A promise forgets a promise derived from it once that one completes.
+* *The context's lazy services are created once.* The idempotency cache, memo cache and dead letter queue are the same object for every task in the run.
+
 .Behaviour change in 1.2.0
 WARNING: Before 1.2.0, `cancel(true)` on an `executeAsync` promise did not interrupt anything. Code that passed `true` and relied on the work finishing will now see it interrupted. Pass `false` to keep the old behaviour.
 
 == Known Limits
 
-These are not addressed in 1.2.0:
+These are not addressed at version {gcu-version}. <<ch-security-controls>> has the plan for each.
 
 * `ScriptTask`'s default "sandbox" (`SecureScriptBase`) restricts only unresolved calls made on the script object itself. It does not prevent a script from running processes, reading files or reaching the network. Treat every script as trusted code. See the Security chapter.
 * `ControlTask` evaluates rule conditions as unrestricted Groovy.
 * `HttpTaskSecurityConfig` is not applied by `HttpTask`.
-* Task results appear unredacted in debug logs, task events and persisted state.
-* `TaskBinding.set(key, null)` throws `NullPointerException`.
+* Task results appear unredacted in debug logs, task events and persisted state unless a `resultRedactor` is set on the context (1.2.2, <<tg-06>>).
 * Pause and resume are not implemented.

@@ -37,14 +37,47 @@ class TaskContext implements Closeable {
     // Resilience service registries
     final RateLimiterRegistry rateLimiters = new RateLimiterRegistry()
     
+    // GCU 1.2.2 (M4): the three lazy services below are created at most once. The getters used to be an
+    // unguarded check-then-create, so tasks starting together each got their own cache or queue.
+    private final Object lazyLock = new Object()
+
     // Dead Letter Queue (optional - set by TaskGraph or manually)
-    DeadLetterQueue deadLetterQueue = null
+    volatile DeadLetterQueue deadLetterQueue = null
     
     // Idempotency Cache (optional - set by TaskGraph or manually)
-    IdempotencyCache idempotencyCache = null
+    volatile IdempotencyCache idempotencyCache = null
 
     // Memo Cache (optional - session-scoped performance cache, set on demand)
-    MemoCache memoCache = null
+    volatile MemoCache memoCache = null
+
+    /**
+     * GCU 1.2.2 (M1): optional redaction hook, off by default (null).
+     *
+     * <p>When set, the library passes a task result through it before writing the result to a log line,
+     * to graph persistence, and to {@link TaskEvent#getRedactedResult()}. It never changes what tasks
+     * receive from their predecessors, and it never changes {@link TaskEvent#result}.</p>
+     *
+     * <p>The closure takes {@code (value)} or {@code (taskId, value)} and returns what may be shown.</p>
+     */
+    volatile Closure resultRedactor = null
+
+    /** What {@link #redact} returns when the redactor itself fails: the value is hidden, not let through. */
+    static final String REDACTED = '[REDACTED]'
+
+    /**
+     * GCU 1.2.2 (M1): the form of a task result that may be logged, persisted or shown.
+     * With no redactor this is the value itself.
+     */
+    Object redact(String taskId, Object value) {
+        Closure r = resultRedactor
+        if (r == null) return value
+        try {
+            return r.maximumNumberOfParameters >= 2 ? r.call(taskId, value) : r.call(value)
+        } catch (Throwable t) {
+            log.warn("TaskContext.redact(): redactor failed for task '{}' ({}); value hidden", taskId, t.toString())
+            return REDACTED
+        }
+    }
     
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
@@ -85,6 +118,16 @@ class TaskContext implements Closeable {
      */
     TaskContext(ExecutorPool pool, PromiseFactory promiseFactory) {
         this.config = ConfigLoader.loadConfig()
+        this.pool   = pool
+        this.promiseFactory = promiseFactory
+    }
+
+    /**
+     * GCU 1.2.2 (M3): pool, factory and config all supplied. Used by the builder, whose config(...)
+     * was read and then dropped. A null or empty config loads the default.
+     */
+    TaskContext(ExecutorPool pool, PromiseFactory promiseFactory, Map config) {
+        this.config = config ?: ConfigLoader.loadConfig()
         this.pool   = pool
         this.promiseFactory = promiseFactory
     }
@@ -134,6 +177,8 @@ class TaskContext implements Closeable {
         }
 
         TaskContext build() {
+            // GCU 1.2.2 (M3): the config given to the builder is the context's config. It used to be
+            // read here and then dropped. Null or empty still loads the default, as TaskContext(Map) does.
             Map cfg = config ?: ConfigLoader.loadConfig()
 
             if (!pool) {
@@ -146,7 +191,7 @@ class TaskContext implements Closeable {
                 promiseFactory = new DataflowPromiseFactory(pool)
             }
 
-            return new TaskContext(pool, promiseFactory)
+            return new TaskContext(pool, promiseFactory, cfg)
         }
     }
 
@@ -173,30 +218,51 @@ class TaskContext implements Closeable {
      * Get or create the Dead Letter Queue for this context.
      */
     DeadLetterQueue getDeadLetterQueue() {
-        if (deadLetterQueue == null) {
-            deadLetterQueue = new DeadLetterQueue()
+        DeadLetterQueue q = this.@deadLetterQueue
+        if (q == null) {
+            synchronized (lazyLock) {
+                q = this.@deadLetterQueue
+                if (q == null) {
+                    q = new DeadLetterQueue()
+                    this.@deadLetterQueue = q
+                }
+            }
         }
-        return deadLetterQueue
+        return q
     }
     
     /**
      * Get or create the Idempotency Cache for this context.
      */
     IdempotencyCache getIdempotencyCache() {
-        if (idempotencyCache == null) {
-            idempotencyCache = new IdempotencyCache()
+        IdempotencyCache c = this.@idempotencyCache
+        if (c == null) {
+            synchronized (lazyLock) {
+                c = this.@idempotencyCache
+                if (c == null) {
+                    c = new IdempotencyCache()
+                    this.@idempotencyCache = c
+                }
+            }
         }
-        return idempotencyCache
+        return c
     }
 
     /**
      * Get or create the Memo Cache for this context.
      */
     MemoCache getMemoCache() {
-        if (memoCache == null) {
-            memoCache = new MemoCache()
+        MemoCache c = this.@memoCache
+        if (c == null) {
+            synchronized (lazyLock) {
+                c = this.@memoCache
+                if (c == null) {
+                    c = new MemoCache()
+                    this.@memoCache = c
+                }
+            }
         }
-        return memoCache
+        return c
     }
 
     /**

@@ -484,10 +484,13 @@ class DataflowExpression<T> {
                 invokeListener(listener, value, message)
             } as Runnable)
         } catch (Exception e) {
-            // Pool may be closed/shutting down - log and record but don't throw
-            String errorMsg = "Failed to schedule ${message} listener (pool unavailable): ${e.message}"
-            log.warn(errorMsg)
-            collectListenerError(errorMsg)
+            // GCU 1.2.2 (DF11): the pool is closed or refused the task. The listener used to be dropped
+            // with a warning, and a dropped listener is a promise callback that never fires: a node that
+            // never finishes, a successor that never starts. It now runs here, on the thread that
+            // completed the expression (or that registered the listener after completion). Listeners are
+            // never called under the completion lock, so this cannot deadlock on it.
+            log.debug("{} listener run on the calling thread, pool unavailable: {}", message, e.toString())
+            invokeListener(listener, value, message)
         }
     }
 

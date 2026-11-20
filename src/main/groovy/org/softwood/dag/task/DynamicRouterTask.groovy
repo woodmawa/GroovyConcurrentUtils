@@ -34,7 +34,7 @@ class DynamicRouterTask extends RouterTask {
         if (routingLogic == null)
             throw new IllegalStateException("DynamicRouterTask($id) requires routingLogic closure")
 
-        log.debug("DynamicRouterTask($id): running routingLogic for prevValue=$prevValue")
+        log.debug("DynamicRouterTask($id): running routingLogic for prevValue=${redacted(prevValue)}")
 
         def raw = routingLogic(prevValue)
 

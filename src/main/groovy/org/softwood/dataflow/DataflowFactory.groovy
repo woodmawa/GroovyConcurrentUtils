@@ -86,37 +86,50 @@ class DataflowFactory {
     // -------------------------------------------------------------------------
 
     /**
+     * GCU 1.2.2 (DF15): the one path behind the Callable, Supplier, Runnable and Function overloads,
+     * given the treatment task(Closure) got in 1.2.0. The Future is kept on the variable, so
+     * DataflowPromise.cancel(true) interrupts the work (DF3); and work that ends after its variable was
+     * completed elsewhere is logged at debug where it used to throw a second exception into a Future
+     * nobody held (DF6).
+     *
+     * Like task(Closure) this submits to the pool's raw executor, not through ConcurrentPool.execute:
+     * see DF10 in the dataflow chapter for why that is left as it is.
+     */
+    private <T> DataflowVariable<T> submitWork(String kind, Callable<T> work) {
+        DataflowVariable<T> variable = new DataflowVariable<T>(pool)
+        def future = pool.executor.submit({
+            try {
+                variable.setValue(work.call())
+            } catch (Throwable e) {
+                if (e instanceof InterruptedException) Thread.currentThread().interrupt()
+                try {
+                    if (variable.isBound()) {
+                        log.debug("DataflowFactory.task({}): finished after its variable was already completed: {}", kind, e.toString())
+                    } else {
+                        variable.bindError(e)
+                        log.error("DataflowFactory.task(${kind}): execution failed", e)
+                    }
+                } catch (IllegalStateException alreadyBound) {
+                    log.debug("DataflowFactory.task({}): variable completed concurrently: {}", kind, alreadyBound.message)
+                }
+            }
+        } as Runnable)
+        variable.attachTask(future)
+        return variable
+    }
+
+    /**
      * Execute a Callable asynchronously.
      */
     def <T> DataflowVariable<T> task(Callable<T> callable) {
-        DataflowVariable<T> variable = new DataflowVariable<T>(pool)
-        pool.executor.submit {
-            try {
-                T result = callable.call()
-                variable.setValue(result)
-            } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("DataflowFactory.task(Callable): execution failed", e)
-            }
-        }
-        return variable
+        return submitWork('Callable', callable)
     }
 
     /**
      * Execute a Supplier asynchronously.
      */
     def <T> DataflowVariable<T> task(Supplier<T> supplier) {
-        DataflowVariable<T> variable = new DataflowVariable<T>(pool)
-        pool.executor.submit {
-            try {
-                T result = supplier.get()
-                variable.setValue(result)
-            } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("DataflowFactory.task(Supplier): execution failed", e)
-            }
-        }
-        return variable
+        return submitWork('Supplier', { supplier.get() } as Callable<T>)
     }
 
     /**
@@ -124,34 +137,14 @@ class DataflowFactory {
      * Produces a DataflowVariable<Void>.
      */
     DataflowVariable<Void> task(Runnable runnable) {
-        DataflowVariable<Void> variable = new DataflowVariable<Void>(pool)
-        pool.executor.submit {
-            try {
-                runnable.run()
-                variable.setValue(null)
-            } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("DataflowFactory.task(Runnable): execution failed", e)
-            }
-        }
-        return variable
+        return submitWork('Runnable', { runnable.run(); return null } as Callable<Void>)
     }
 
     /**
      * Execute a Function<T,R> asynchronously with a provided input.
      */
     def <T, R> DataflowVariable<R> task(Function<T, R> fn, T input) {
-        DataflowVariable<R> variable = new DataflowVariable<R>(pool)
-        pool.executor.submit {
-            try {
-                R result = fn.apply(input)
-                variable.setValue(result)
-            } catch (Throwable e) {
-                variable.bindError(e)
-                log.error("DataflowFactory.task(Function,input): execution failed", e)
-            }
-        }
-        return variable
+        return submitWork('Function', { fn.apply(input) } as Callable<R>)
     }
 
     ExecutorService getExecutor() {

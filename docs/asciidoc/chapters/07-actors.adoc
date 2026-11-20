@@ -143,6 +143,11 @@ when the check fails.
 The mailbox is unbounded unless `setMaxMailboxSize(n)` is called; zero means unbounded. When a
 bounded mailbox is full, new messages are rejected and counted.
 
+From 1.2.2 the size can be changed on a running actor. Queued messages are carried over in
+order and the actor carries on from the new mailbox; before 1.2.2 its loop stayed on the old
+queue and processed nothing more. A size smaller than the number of messages already queued
+is refused with `IllegalStateException` and nothing changes.
+
 An exception thrown by a handler does not stop the actor. It is counted, kept in a bounded
 list of recent errors (100 by default) and passed to the handler registered with
 `onError { e -> ... }`, and the supervision strategy then decides what happens next.

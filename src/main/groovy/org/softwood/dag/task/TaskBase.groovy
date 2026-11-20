@@ -921,7 +921,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
         // holds a reference to and can be GC'd before it fires, silently dropping the
         // callback and leaving resultHolder unresolved forever).
         attemptPromise.onComplete { T result ->
-            log.debug "Task ${id}: completed with result: $result"
+            log.debug "Task ${id}: completed with result: ${redacted(result)}"
             transitionState(TaskState.COMPLETED)
             // NOTE: COMPLETED event emitted by executeTaskWithRetry() at return point.
             // Do NOT emit here — would cause duplicate TASK_COMPLETED per node.
@@ -1039,7 +1039,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         log.debug "Task ${id}: unwrapping predecessor promise"
                         prevValue = previousPromise.get()  // Block and get the value
 
-                        log.debug "Task ${id}: raw unwrapped value: $prevValue (${prevValue?.getClass()?.simpleName})"
+                        log.debug "Task ${id}: raw unwrapped value: ${redacted(prevValue)} (${prevValue?.getClass()?.simpleName})"
 
                         // If the value is itself a Promise, unwrap it again (this can happen with nested promises)
                         while (prevValue instanceof Promise) {
@@ -1050,10 +1050,10 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         // Handle List results from multiple predecessors
                         if (prevValue instanceof List && ((List) prevValue).size() == 1) {
                             prevValue = ((List) prevValue)[0]
-                            log.debug "Task ${id}: unwrapped single-element list to: $prevValue"
+                            log.debug "Task ${id}: unwrapped single-element list to: ${redacted(prevValue)}"
                         }
 
-                        log.debug "Task ${id}: final unwrapped prevValue: $prevValue"
+                        log.debug "Task ${id}: final unwrapped prevValue: ${redacted(prevValue)}"
                     }
 
                     // Check rate limit BEFORE calling runTask()
@@ -1196,7 +1196,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         }
                     }
 
-                    log.debug "Task ${id}: got result: $result"
+                    log.debug "Task ${id}: got result: ${redacted(result)}"
 
                     // Store result in idempotency cache if enabled
                     if (idempotencyPolicy.enabled) {
@@ -1228,6 +1228,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         .graphId(ctx?.globals?.get('graphId'))
                         .runId(ctx?.globals?.get('runId'))
                         .result(result)
+                        .redactedResult(redacted(result))   // 1.2.2 (M1): result itself is never altered
                         .addMetadata('totalTimeMs', totalTimeMs)
                         .addMetadata('retriesUsed', attempt - 1)
                         .build()
@@ -1360,6 +1361,15 @@ abstract class TaskBase<T> implements IGraphNode<T> {
     // ----------------------------------------------------
     // Task Event helpers
     // ----------------------------------------------------
+
+    /**
+     * GCU 1.2.2 (M1): a task value as it may be written to a log line or shown on an event.
+     * The value itself when the context has no redactor (the default). See TaskContext.redact.
+     */
+    protected Object redacted(Object value) {
+        TaskContext c = ctx
+        return c != null ? c.redact(id, value) : value
+    }
 
     private void emitEvent(TaskState newState) {
         state = newState

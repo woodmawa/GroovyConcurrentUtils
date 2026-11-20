@@ -101,8 +101,11 @@ assert claims.subject == 'order-service'
 ----
 
 * The secret must be at least 32 characters; a shorter one is refused at construction.
-* `validateToken` throws `InvalidTokenException` for a malformed token or a bad signature and
-  `ExpiredTokenException` for one past its expiry.
+* `validateToken` throws `InvalidTokenException` for a malformed token, a bad signature, or
+  (from 1.2.2) a token with no numeric `exp` claim, and `ExpiredTokenException` for one past
+  its expiry. `ExpiredTokenException` is an `InvalidTokenException`, so catching the one type
+  rejects every token that should not be accepted. A token with no `iat` claim validates with
+  `issuedAt` null.
 * The signature comparison is constant-time, and the secret is held as bytes that
   `destroy()` zeroes.
 

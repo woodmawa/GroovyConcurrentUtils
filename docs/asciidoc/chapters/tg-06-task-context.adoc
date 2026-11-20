@@ -1079,3 +1079,57 @@ Key implementation notes:
 * `ctx.promiseFactory` is a `DataflowPromiseFactory` — `executeAsync { }` returns a
   `DataflowPromise`, not a `CompletableFuture`
 * Paged access (`getPage`, `pageKeys`) was added in v1.1.1 — not available in v1.1.0
+
+== Builder Config, Lazy Services and Result Redaction (GCU 1.2.2)
+
+=== The builder's config is used
+
+`TaskContext.builder().config(map).build()` returns a context whose `config` is that map.
+Before 1.2.2 `build()` read the map and then created the context from the default
+configuration, so the setting had no effect. A null or empty map still loads the default, as
+`new TaskContext(map)` does. `new TaskContext(pool, promiseFactory, config)` is the
+constructor behind it.
+
+=== Lazy services are created once
+
+`getIdempotencyCache()`, `getMemoCache()` and `getDeadLetterQueue()` create their object on
+first use. From 1.2.2 that happens at most once per context, whatever number of tasks ask at
+the same moment. Before, tasks that started together could each be handed a different cache
+or queue, and all but one of those were then lost: an idempotent result not found on the
+retry, a dead letter in a queue nobody reads.
+
+=== Result redaction
+
+A context can be given a redactor. It is off by default.
+
+[source,groovy]
+----
+graph.ctx.resultRedactor = { String taskId, Object value ->
+    value instanceof Map && value.containsKey('token') ? value + [token: '***'] : value
+}
+----
+
+The closure takes `(value)` or `(taskId, value)` and returns what may be shown. With one set,
+the library passes a task's result through it before it writes that result to:
+
+* its own log lines (the debug lines of `TaskBase`, `ServiceTask`, `TaskGraph` and the
+  router tasks that print a result or a predecessor's value);
+* graph persistence (the result stored in a task's snapshot);
+* `TaskEvent.redactedResult`, a new field beside `result`.
+
+What it does not touch:
+
+* `TaskEvent.result`, which is always the task's real result, of its real type;
+* the value a task receives from its predecessor, and `ctx.globals`;
+* anything application code logs or stores itself.
+
+A listener that writes events somewhere durable should write `redactedResult`. With no
+redactor it is the same object as `result`, so a listener can use it unconditionally.
+
+If the redactor throws, the value is replaced by the text `[REDACTED]` and a warning is
+logged: a broken redactor hides data, it does not let it through. `ctx.redact(taskId, value)`
+applies the redactor from application code.
+
+With a redactor set, a persisted snapshot holds the redacted result, not the real one. A flow
+that is to be resumed from a snapshot needs a redactor that leaves the values it resumes from
+intact.

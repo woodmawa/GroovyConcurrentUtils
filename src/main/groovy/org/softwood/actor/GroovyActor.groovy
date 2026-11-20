@@ -49,7 +49,10 @@ class GroovyActor implements Actor {
     private final Closure handler
 
     /** Mailbox for incoming messages */
-    private BlockingQueue<MessageEnvelope> mailbox
+    private volatile BlockingQueue<MessageEnvelope> mailbox
+
+    /** GCU 1.2.2 (A5): serialises mailbox swaps (setMaxMailboxSize). Senders and the loop never take it. */
+    private final Object mailboxSwapLock = new Object()
 
     /** Executor pool for mailbox loop */
     private final ExecutorPool pool
@@ -285,6 +288,9 @@ class GroovyActor implements Actor {
 
     /** Private stop marker, compared by identity: no message a caller can send is mistaken for it. */
     private static final Object STOP_SIGNAL = new Object()
+
+    /** GCU 1.2.2 (A5): wakes a loop blocked on a mailbox that has just been replaced. Never processed. */
+    private static final Object RESIZE_SIGNAL = new Object()
 
     /** The thread running the mailbox loop, so stop() can tell when it is being called from a handler. */
     private volatile Thread loopThread
@@ -685,29 +691,49 @@ class GroovyActor implements Actor {
             throw new IllegalArgumentException("Max mailbox size cannot be negative")
         }
         
-        // Note: Changing mailbox size on a running actor is not recommended
-        // as it requires draining and recreating the queue.
-        // This is mainly provided for testing/debugging.
-        log.warn("[$name] Changing mailbox size on running actor is not recommended")
-        
-        this.maxMailboxSize = max
-        
-        // Recreate mailbox with new size (bounded or unbounded)
-        BlockingQueue<MessageEnvelope> newMailbox
-        if (max > 0) {
-            newMailbox = new LinkedBlockingQueue<>(max)
-        } else {
-            newMailbox = new LinkedBlockingQueue<>()
+        // GCU 1.2.2 (A5): safe on a running actor. The queue is replaced, as before, but:
+        //  - the loop, which may be blocked on the old queue, is woken and moves to the new one
+        //    (it used to stay on the old queue for ever while senders filled the new one);
+        //  - a message a sender puts on the old queue around the swap is carried over, by the second
+        //    transfer below or by the sender itself (see enqueueMessage);
+        //  - shrinking below what is queued is refused before anything is touched (it used to drain the
+        //    old queue and then fail, losing the messages).
+        synchronized (mailboxSwapLock) {
+            BlockingQueue<MessageEnvelope> old = mailbox
+            if (max > 0 && old != null && old.size() > max) {
+                throw new IllegalStateException(
+                        "Actor [" + name + "]: cannot set max mailbox size to " + max + " while " + old.size() + " messages are queued")
+            }
+
+            BlockingQueue<MessageEnvelope> fresh = (max > 0)
+                    ? new LinkedBlockingQueue<MessageEnvelope>(max)
+                    : new LinkedBlockingQueue<MessageEnvelope>()
+
+            this.maxMailboxSize = max
+            if (old != null) transferMailbox(old, fresh)
+            this.mailbox = fresh
+            if (old != null) {
+                transferMailbox(old, fresh)
+                // wake the loop if it is waiting on the old queue; harmless otherwise
+                old.offer(new MessageEnvelope(RESIZE_SIGNAL))
+            }
         }
-        
-        // Transfer existing messages
-        if (mailbox != null) {
-            List<MessageEnvelope> existingMessages = []
-            mailbox.drainTo(existingMessages)
-            newMailbox.addAll(existingMessages)
+    }
+
+    /** Moves everything queued on one mailbox to another, in order. What does not fit is rejected. */
+    private void transferMailbox(BlockingQueue<MessageEnvelope> from, BlockingQueue<MessageEnvelope> to) {
+        List<MessageEnvelope> moved = new ArrayList<MessageEnvelope>()
+        from.drainTo(moved)
+        for (MessageEnvelope e : moved) {
+            if (e.payload.is(RESIZE_SIGNAL)) continue
+            if (!to.offer(e)) {
+                mailboxRejections.incrementAndGet()
+                if (e.isAsk() && !e.replyFuture.isDone()) {
+                    e.replyFuture.completeExceptionally(
+                            new RejectedExecutionException("Actor [" + name + "] mailbox full - message rejected"))
+                }
+            }
         }
-        
-        this.mailbox = newMailbox
     }
 
     @Override
@@ -840,6 +866,12 @@ class GroovyActor implements Actor {
                 while (true) {
                     MessageEnvelope envelope = mailbox.take()
 
+                    // GCU 1.2.2 (A5): the mailbox was replaced while this loop waited on the old one.
+                    // Go round again: the next take() reads the new queue.
+                    if (envelope.payload.is(RESIZE_SIGNAL)) {
+                        continue
+                    }
+
                     if (envelope.payload.is(STOP_SIGNAL)) {
                         log.debug("[$name] Stop signal received")
                         break
@@ -897,7 +929,14 @@ class GroovyActor implements Actor {
 
     private void signalStop() {
         try {
-            mailbox.put(new MessageEnvelope(STOP_SIGNAL))
+            MessageEnvelope stop = new MessageEnvelope(STOP_SIGNAL)
+            BlockingQueue<MessageEnvelope> q = mailbox
+            q.put(stop)
+            // GCU 1.2.2 (A5): if the mailbox was replaced meanwhile, follow it (see enqueueMessage)
+            while (!q.is(mailbox) && q.remove(stop)) {
+                q = mailbox
+                q.put(stop)
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
         }
@@ -965,7 +1004,18 @@ class GroovyActor implements Actor {
 
         try {
             // Use offer without timeout for immediate non-blocking attempt
-            boolean added = mailbox.offer(new MessageEnvelope(msg, future, sender))
+            MessageEnvelope envelope = new MessageEnvelope(msg, future, sender)
+            BlockingQueue<MessageEnvelope> q = mailbox
+            boolean added = q.offer(envelope)
+
+            // GCU 1.2.2 (A5): setMaxMailboxSize may have replaced the mailbox between reading the field
+            // and the offer. If so, take the message back off the old queue and put it on the current
+            // one. If it is no longer on the old queue, the swap (or the loop) already has it.
+            while (added && !q.is(mailbox)) {
+                if (!q.remove(envelope)) break
+                q = mailbox
+                added = q.offer(envelope)
+            }
             
             if (!added) {
                 // Queue is full - reject

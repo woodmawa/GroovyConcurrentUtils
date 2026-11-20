@@ -3,6 +3,66 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 1.2.2 (2026-11-20): defects in TaskContext, dataflow, actors and tokens; opt-in result redaction
+
+Source: release 1 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 5). Nothing here needs a consumer to change code.
+Tests: 2132 passing, 0 failing (2110 before, plus 22 in `Hardening122Spec`: 15 features, two of them run once per overload). All 22 were run red on 1.2.1 before the fixes; the first failure was M3, the builder's config not on the context.
+
+### Fixed
+
+TaskGraph
+
+- **`TaskContext.builder().config(...)` was ignored (M3).** `build()` read the map and then created the context from the default configuration. The context now has the config it was given. A null or empty map still loads the default.
+- **Lazy caches were created more than once (M4).** `getIdempotencyCache()`, `getMemoCache()` and `getDeadLetterQueue()` were an unguarded check-then-create. Tasks starting together were each handed a different object and all but one were lost. In the red test, 8 threads asking a fresh context got more than one instance in 570 of 600 cases. Each is now created at most once per context.
+
+Promises and dataflow
+
+- **A promise had two states (DF7).** `DataflowPromise` kept its own state beside its variable's and moved it first, so `isDone()` could be true while `get()` still blocked. The promise now reads its state from the variable. A side effect: two listeners per promise that only kept the second state in step are gone.
+- **Derived promises were never released (DF9).** A promise kept every promise derived from it (`then`, `flatMap`, `filter`, `accept`) for its whole life. Each is now dropped when it completes.
+- **A listener due after pool shutdown was dropped (DF11).** It was logged and never ran, which for a promise callback means a node that never finishes. It now runs on the calling thread.
+- **Blocking reads had no timeout (DF12).** `Dataflows` property and index reads, and method calls forwarded by a `DataflowVariable`, waited for ever on a name nobody binds. Both now take an optional `readTimeout`; unset, they wait as before.
+- **A task's own `InterruptedException` interrupted the reader (DF13).** `DataflowPromise.get()` could not tell the task's error from an interrupt of the waiting thread and set the waiter's interrupt flag. The flag is now set only when the waiter was interrupted. The exception the caller sees is unchanged.
+- **Only one `task` overload could be cancelled (DF15).** `DataflowFactory.task` for `Callable`, `Supplier`, `Runnable` and `Function`, and all three `DataflowVariable.task` forms, now keep the handle of their work, so `cancel(true)` interrupts it; and work that ends after its variable was completed elsewhere no longer throws from inside its own error handler.
+
+Actors
+
+- **`setMaxMailboxSize` on a running actor stopped it processing (A5).** The mailbox was replaced while the loop waited on the old one. The loop now moves to the new mailbox, queued messages are carried over in order, and a message sent during the change is not lost.
+
+Security services
+
+- **A signed token with no `exp` gave a `NullPointerException` (S3).** `JwtTokenService.validateToken` now throws `InvalidTokenException`, as it does for every other token it will not accept.
+
+### Added
+
+- **Result redaction, off by default (M1).** `TaskContext.resultRedactor` is a closure, `(value)` or `(taskId, value)`, that returns the form of a task result that may be shown. When set it is applied to the library's own log lines that print a result, to the result stored in a persisted snapshot, and to a new field `TaskEvent.redactedResult`. `TaskEvent.result` is never altered. A redactor that throws hides the value. `ctx.redact(taskId, value)` applies it from application code.
+- `Dataflows.readTimeout` and `DataflowVariable.readTimeout` (DF12, above).
+- `TaskContext(pool, promiseFactory, config)` constructor; `TaskEvent.Builder.redactedResult(...)` and a `TaskEvent` constructor taking it.
+
+### What a consumer may notice
+
+None of these needs a change. They are the places where behaviour differs from 1.2.1.
+
+1. A context built with `TaskContext.builder().config(map)` now uses `map`. Code that passed a config there and was unknowingly running on the default will see its own settings take effect.
+2. A listener or promise callback that falls due after its pool was shut down now runs, on the completing thread. Before, it did not run at all.
+3. `setMaxMailboxSize(n)` with fewer than the queued number of messages throws `IllegalStateException` and changes nothing. Before, it threw after emptying the mailbox.
+4. `validateToken` on a token with no `iat` returns claims with `issuedAt` null. Before, it threw a `NullPointerException`.
+5. `df.readTimeout` on a `Dataflows` is now the timeout setting, not a dataflow variable of that name. Reach such a variable as `df['readTimeout']`.
+6. `cancel(true)` on a promise wrapping a variable started by any `task` form now interrupts the work. 1.2.0 made this true for the closure form of `DataflowFactory.task`, which is the one `executeAsync` and TaskGraph use; that path is unchanged.
+
+### Left as it is, by decision
+
+- **DF10.** `DataflowFactory.task` still submits to the pool's executor directly, outside `ConcurrentPool` admission control and metrics. Routing it through `execute` deadlocks a task that starts another task and waits for it under a `maxInFlight` limit, which is how TaskGraph nodes run. The dataflow chapter says so.
+
+### Not verified
+
+- No mutation checks were run; the red run on 1.2.1 is the evidence that each spec fails without its fix.
+- Redaction of persisted snapshots has no spec of its own (it needs a live EclipseStore). The redaction of log lines and events is covered.
+- AW has not been run against 1.2.2. Most of this release is on the path AW runs daily: its suite is the acceptance test.
+
+### Documentation
+
+- Dataflow, promises, actors, security services, TaskContext, observability and execution integrity chapters describe the changes. The security controls chapter has a new row and section for result redaction.
+
 ## Security controls chapter and hardening plan (2026-11-20) — documentation only, version stays 1.2.1
 
 - **New chapter, "Security Controls: What Is Enforced and What Is Planned"** (`docs/asciidoc/chapters/12-security-controls.adoc`), in both books. For scripts and rule conditions, shell commands, HTTP calls, file operations, remote actor transports, the cluster, Java deserialisation and configuration files it states what limits each one today, the agreed design, and the release that delivers it, with a status table and a list of how to use the library safely at this version.

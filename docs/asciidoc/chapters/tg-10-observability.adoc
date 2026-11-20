@@ -170,6 +170,13 @@ workflow.addListener(new GraphEventListener() {
 })
 ----
 
+=== Storing a task's result from an event
+
+A `TASK_COMPLETED` event's `TaskEvent` carries the result twice (GCU 1.2.2): `result`, the
+real value, and `redactedResult`, the value as it may be stored or shown. A listener that
+writes results to a log, a database or another service should write `redactedResult`. With
+no redactor on the context the two are the same object. <<tg-06>> describes the redactor.
+
 === Typed Event Handlers
 
 [source,groovy]

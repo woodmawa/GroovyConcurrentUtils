@@ -35,9 +35,9 @@ class DataflowPromise<T> implements Promise<T> {
     /** Backing single-assignment variable */
     private final DataflowVariable<T> variable
 
-    /** Cached lifecycle state for fast checks */
-    private final AtomicReference<PromiseState> state =
-            new AtomicReference<>(PromiseState.PENDING)
+    // GCU 1.2.2 (DF7): there is one state, the variable's. This class used to keep a second
+    // AtomicReference<PromiseState> beside it, moved by accept/fail/cancel before the variable was bound
+    // and by two listeners afterwards. The two could disagree: isDone() true while get() still blocked.
 
     /** Async task handle created by accept(Supplier) (for cancellation) */
     private volatile CompletableFuture<?> taskHandle = null
@@ -54,78 +54,24 @@ class DataflowPromise<T> implements Promise<T> {
 
     DataflowPromise(DataflowVariable<T> variable) {
         this.variable = variable
-
-        // When DFV resolves successfully
-        variable.whenAvailable { T v ->
-            boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
-        }
-
-        // When DFV resolves with an error
-        variable.whenError { Throwable err ->
-            if (err instanceof CancellationException) {
-                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
-            } else {
-                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-            }
-        }
     }
 
     // -------------------------------------------------------------------------
-    // Helper: Synchronize state from DFV
+    // Helper: the promise's state, read from the variable
     // -------------------------------------------------------------------------
 
     private PromiseState deriveStateFromVariable() {
-        PromiseState s = state.get()
-
-        if (s != PromiseState.PENDING) {
-            return s
-        }
-
-        // State is PENDING - check if variable is actually bound
         if (!variable.isBound()) {
-            return s
+            return PromiseState.PENDING
         }
-
-        // Variable is bound - update state based on variable's state
-        if (variable.hasError()) {
-            Throwable err = variable.getError()
-            if (err instanceof CancellationException) {
-                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)
-            } else {
-                boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)
-            }
-        } else {
-            boolean casResult = state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)
+        if (!variable.hasError()) {
+            return PromiseState.COMPLETED
         }
-
-        PromiseState finalState = state.get()
-        return finalState
+        return (variable.getError() instanceof CancellationException) ? PromiseState.CANCELLED : PromiseState.FAILED
     }
 
-    /**
-     * Aggressively check if this promise is done by checking both state and variable.
-     * This is needed because of potential race conditions between state updates and
-     * variable binding.
-     */
     private boolean isDoneInternal() {
-        // First check cached state
-        PromiseState s = state.get()
-
-        if (s != PromiseState.PENDING) {
-            return true
-        }
-
-        // State says PENDING - double-check with variable directly
-        if (variable.isBound()) {
-            // Variable is bound but state hasn't been updated yet
-            // Force synchronization
-            deriveStateFromVariable()
-            PromiseState newState = state.get()
-            boolean result = newState != PromiseState.PENDING
-            return result
-        }
-
-        return false
+        return variable.isBound()
     }
 
     private void registerDependent(Promise<?> other) {
@@ -133,7 +79,14 @@ class DataflowPromise<T> implements Promise<T> {
 
         dependents.add(other)
 
-        // If already cancelled/failed → propagate immediately
+        // GCU 1.2.2 (DF9): forget the dependent once it has completed. The list used only to grow, so a
+        // long-lived promise kept every promise ever derived from it. A completed dependent has nothing
+        // left to be told.
+        if (other instanceof DataflowPromise) {
+            ((DataflowPromise<?>) other).variable.whenBound { dependents.remove(other) }
+        }
+
+        // If already cancelled/failed, propagate immediately
         PromiseState s = deriveStateFromVariable()
         if (s == PromiseState.CANCELLED) {
             other.cancel(false)
@@ -150,11 +103,13 @@ class DataflowPromise<T> implements Promise<T> {
 
     @Override
     Promise<T> accept(T value) {
-        if (state.compareAndSet(PromiseState.PENDING, PromiseState.COMPLETED)) {
-            try {
-                variable.bind(value)
-            } catch (IllegalStateException e) {
-            }
+        // GCU 1.2.2 (DF7): the variable decides. This used to move a state of its own to COMPLETED and
+        // then bind, so isDone() could be true while the variable (and get()) was still unbound.
+        if (variable.isBound()) return this
+        try {
+            variable.bind(value)
+        } catch (IllegalStateException e) {
+            // bound by another thread between the check and the bind: first writer wins
         }
         return this
     }
@@ -232,18 +187,17 @@ class DataflowPromise<T> implements Promise<T> {
             return this
         }
 
-        // CAS PENDING -> FAILED. If already in a terminal state, ignore silently -
-        // single-assignment semantics: first writer wins. Never forcibly overwrite COMPLETED.
-        if (state.compareAndSet(PromiseState.PENDING, PromiseState.FAILED)) {
-            try {
-                variable.bindError(error)
-            } catch (IllegalStateException e) {
-                // Variable was already bound (race with another thread) - state is consistent
-                log.debug("fail(): variable already bound during CAS-PENDING->FAILED transition")
-            }
-        } else {
-            PromiseState currentState = state.get()
-            log.debug("fail() called but promise already in terminal state: ${currentState} - ignoring (error was: ${error.class.simpleName})")
+        // Single-assignment semantics: first writer wins. If already in a terminal state, ignore
+        // silently. GCU 1.2.2 (DF7): the variable decides; there is no separate state to move first.
+        if (variable.isBound()) {
+            log.debug("fail() called but promise already in terminal state: ${deriveStateFromVariable()} - ignoring (error was: ${error?.class?.simpleName})")
+            return this
+        }
+        try {
+            variable.bindError(error)
+        } catch (IllegalStateException e) {
+            // Variable was bound by another thread between the check and the bind - that outcome stands
+            log.debug("fail(): variable already bound, keeping the first outcome")
         }
 
         return this
@@ -265,8 +219,7 @@ class DataflowPromise<T> implements Promise<T> {
             if (c instanceof Exception) throw (Exception)c
             throw new RuntimeException(c)
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt()
-            throw new RuntimeException(e)
+            throw interruptedWhileReading(e)
         }
     }
 
@@ -282,9 +235,23 @@ class DataflowPromise<T> implements Promise<T> {
             if (c instanceof Exception) throw (Exception)c
             throw new RuntimeException(c)
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt()
-            throw new RuntimeException(e)
+            throw interruptedWhileReading(e)
         }
+    }
+
+    /**
+     * GCU 1.2.2 (DF13): an InterruptedException out of the variable is one of two things. If it is the
+     * error the task itself ended with, the reading thread was never interrupted and its interrupt flag
+     * must not be set (it used to be, which made the reader's next blocking call fail). Otherwise the
+     * reader really was interrupted while waiting and the flag is restored. Either way the caller gets
+     * the same RuntimeException wrapper as before.
+     */
+    private RuntimeException interruptedWhileReading(InterruptedException e) {
+        boolean taskOwnError = variable.isBound() && e.is(variable.getError())
+        if (!taskOwnError) {
+            Thread.currentThread().interrupt()
+        }
+        return new RuntimeException(e)
     }
 
     // -------------------------------------------------------------------------
@@ -308,15 +275,16 @@ class DataflowPromise<T> implements Promise<T> {
             return false  // Return false because THIS promise wasn't cancelled (it was already done)
         }
 
-        // Only PENDING promises can transition to CANCELLED
-        if (!state.compareAndSet(PromiseState.PENDING, PromiseState.CANCELLED)) {
-            // Race condition: state changed between check and CAS
-            // Re-derive state and propagate if needed
+        // GCU 1.2.2 (DF7): binding the variable IS the transition. Only a pending variable can be
+        // cancelled; if another thread completed it first, the bind is refused and that outcome stands.
+        try {
+            variable.bindCancelled(new CancellationException("Promise was explicitly cancelled"))
+        } catch (IllegalStateException lostRace) {
             s = deriveStateFromVariable()
             if (s == PromiseState.COMPLETED || s == PromiseState.FAILED) {
                 dependents.each { Promise<?> d -> d.cancel(mayInterruptIfRunning) }
             }
-            return isCancelled()
+            return s == PromiseState.CANCELLED
         }
 
         // Successfully transitioned to CANCELLED
@@ -324,12 +292,6 @@ class DataflowPromise<T> implements Promise<T> {
         // Cancel the underlying task if it exists
         if (taskHandle != null) {
             taskHandle.cancel(mayInterruptIfRunning)
-        }
-
-        // Bind the DFV to cancelled state
-        try {
-            variable.bindCancelled(new CancellationException("Promise was explicitly cancelled"))
-        } catch (IllegalStateException e) {
         }
 
         // 1.2.0 (DF3): a promise from executeAsync has no taskHandle; its work runs as a pool Future held

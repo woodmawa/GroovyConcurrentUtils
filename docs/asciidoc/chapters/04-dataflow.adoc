@@ -41,8 +41,10 @@ when completion happened.
 Listeners are registered with `whenBound { value -> ... }`. A listener is always invoked
 asynchronously on the expression's pool, never on the thread that registers it or the thread
 that binds the value, so registering a listener cannot re-enter the caller. A listener
-registered after completion is scheduled straight away. The expression also fires a JavaBeans
-`PropertyChangeEvent` on completion, for tooling.
+registered after completion is scheduled straight away. The one exception is a pool that has
+been shut down: from 1.2.2 the listener then runs on the calling thread, because the
+alternative is that it never runs (<<dataflow-guarantees>>). The expression also fires a
+JavaBeans `PropertyChangeEvent` on completion, for tooling.
 
 == `DataflowVariable`: The Working Type
 
@@ -109,11 +111,14 @@ result, or the exception, to the variable.
 def price = new DataflowVariable<BigDecimal>().task { lookupPrice(sku) }
 ----
 
-The variable keeps a reference to the running work. `cancelTask(true)` interrupts it;
-`cancelTask(false)` cancels the variable and leaves the work to finish. `attachTask(future)`
-is how code that submits the work itself hands the `Future` to the variable so that
-cancellation can reach it. If the work finishes after the variable has already been completed
-some other way, the late result is dropped and logged at debug.
+The variable keeps a reference to the running work, for all three forms from 1.2.2.
+`cancelTask(true)` interrupts it; `cancelTask(false)` leaves running work to finish. Neither
+completes the variable: a promise's `cancel` does both, binding the cancellation and then
+calling `cancelTask`. `attachTask(future)` is how code that submits the work itself hands the
+`Future` to the variable so that cancellation can reach it. If the work ends after the
+variable has already been completed some other way, its late result or late failure is
+dropped and logged at debug. If the pool is closed or refuses the work, the variable is bound
+to that error.
 
 === Transformations
 
@@ -138,7 +143,9 @@ assert gross.get() == 120.0
 
 Any method the variable does not define is forwarded to the bound value, so
 `name.toUpperCase()` works on a `DataflowVariable<String>`. The call blocks until the variable
-is bound.
+is bound. By default it waits for ever. Set `readTimeout` (a `Duration`, from 1.2.2) on the
+variable and a forwarded call on a variable nobody binds throws `TimeoutException` when the
+limit passes; the variable is left pending and can still be bound.
 
 `getMetrics()` returns the variable's type, state, completion time, error details and pool
 name for diagnostics. `toGstream()` exposes the value as a one-element stream (<<ch-gstream>>).
@@ -173,6 +180,24 @@ Other forms:
 * `getBoundValues()`, `getBoundProperties()` and `getUnboundProperties()` take non-blocking
   snapshots; `contains`, `remove`, `clear`, `size` and iteration are available.
 
+=== Bounding reads
+
+A read creates the variable it names. A mistyped name is therefore a variable that nothing
+will ever bind, and by default the read waits for ever. From 1.2.2 a namespace can be given a
+limit:
+
+[source,groovy]
+----
+def df = new Dataflows()
+df.readTimeout = Duration.ofSeconds(30)
+
+df.totl          // TimeoutException after 30 s: "Dataflows: 'totl' was not bound within PT30S"
+----
+
+The limit applies to `df.x` and `df[key]`. It is off unless set. The variable is not failed by
+the timeout and can be bound later. Because `readTimeout` is now a property of the class, a
+variable of that name is reached as `df['readTimeout']`.
+
 == `DataflowFactory`: Tasks on a Chosen Pool
 
 `DataflowFactory` creates variables and launches tasks on one pool, so a component can be
@@ -191,6 +216,18 @@ def preset = factory.createDataflowVariable(42)
 ----
 
 `task` accepts a closure, `Callable`, `Supplier`, `Runnable`, or a `Function` with its input.
+From 1.2.2 every form keeps the `Future` of its work on the variable, so cancelling with
+interrupt reaches the work whichever form started it (1.2.0 did this for the closure form
+only).
+
+`DataflowFactory.task` submits to the pool's executor directly and not through
+`ConcurrentPool.execute`, so a pool's `maxInFlight` admission limit and its in-flight metrics
+do not count these tasks. That is deliberate for now. Admission through `execute` blocks the
+submitting thread until a permit is free, and a task that starts a second task and waits for
+it would then hold the last permit while waiting for one: a deadlock under any limit smaller
+than the nesting depth. TaskGraph nodes start work this way. `DataflowVariable.task` does go
+through `execute`; use it, or `pool.execute` itself, where the limit must apply.
+
 `taskStream(tasks...)` runs several closures concurrently and returns their results as a
 `Gstream` in the order the tasks were given; a failure in any task is propagated.
 `taskStreamUnordered` returns results in the order they complete and leaves failed tasks
@@ -200,8 +237,8 @@ failure must be seen.
 [[dataflow-guarantees]]
 == Delivery Guarantees
 
-These hold from version 1.2.0 and are covered by `DataflowIntegritySpec` and
-`CoreHardeningSpec`.
+These hold from version 1.2.0, with the additions marked 1.2.2, and are covered by
+`DataflowIntegritySpec`, `CoreHardeningSpec` and `Hardening122Spec`.
 
 A listener is never lost::
 Whether a listener is queued or scheduled immediately is decided under the same lock that
@@ -217,17 +254,38 @@ An error is visible with its state::
 `setError` and `setCancelled` record the error before they change the state, so code that
 sees `hasError()` can always read the error.
 
+A promise has one state (1.2.2)::
+`DataflowPromise` reads its state from its variable. It used to keep a second state that
+`accept`, `fail` and `cancel` moved before binding the variable, so `isDone()` could be true
+while `get()` still blocked.
+
 Cancellation reaches the work::
-A variable started with `task`, or a promise from `executeAsync`, holds the `Future` of its
-work. Cancelling with interrupt interrupts it.
+A variable started with any form of `task`, or a promise from `executeAsync`, holds the
+`Future` of its work. Cancelling with interrupt interrupts it. (1.2.2 extended this from the
+closure form of `DataflowFactory.task` to every form and to `DataflowVariable.task`.)
+
+A reader is not blamed for the task's interrupt (1.2.2)::
+If the work itself ended with `InterruptedException`, a thread reading the promise gets that
+error wrapped in `RuntimeException` and its own interrupt flag is left alone. The flag is set
+only when the reading thread was the one interrupted.
+
+A listener still runs when the pool has gone (1.2.2)::
+A listener that falls due, or is registered, after the pool was shut down runs on the calling
+thread: the thread that completed the variable, or the one registering the listener. It used
+to be dropped with a warning, which left a callback that never fired.
+
+Derived promises are released (1.2.2)::
+A promise remembers the promises derived from it (`then`, `flatMap`, `filter`, `accept`) so
+that cancellation can reach them. Each is forgotten when it completes. The list used only to
+grow, so a long-lived promise held every promise ever derived from it.
 
 One listener cannot break another::
 Each listener is submitted to the pool as its own task, so a listener that throws does not
-stop the others. A listener that cannot be scheduled, because the pool has been closed, is
-logged and recorded in a list capped at 100 entries, read with
-`DataflowExpression.getListenerErrors()`. Listeners go through `pool.execute`, so a pool's
-admission limit applies to them too.
+stop the others. A listener that throws is logged and recorded in a list capped at 100
+entries, read with `DataflowExpression.getListenerErrors()`. Listeners go through
+`pool.execute`, so a pool's admission limit applies to them too.
 
 What is not guaranteed: the order in which listeners on one variable run relative to each
-other, and anything about work that ignores interruption. Further dataflow items identified
-in the 2026-11-18 review remain open; `CHANGENOTE.md` lists them.
+other, and anything about work that ignores interruption. Of the items identified in the
+2026-11-18 review, one is left as it is by decision: `DataflowFactory.task` does not go
+through the pool's admission control (see <<ch-dataflow>>, `DataflowFactory`).

@@ -49,12 +49,12 @@ class ServiceTask extends TaskBase<Object> {
 
             Object prevVal = prevValue
 
-            log.debug "ServiceTask ${id}: calling action closure with prevVal=$prevVal"
+            log.debug "ServiceTask ${id}: calling action closure with prevVal=${redacted(prevVal)}"
 
             // Smart closure calling based on parameter count
             def result = callActionClosure(action, ctx, prevVal)
 
-            log.debug "ServiceTask ${id}: action returned: $result"
+            log.debug "ServiceTask ${id}: action returned: ${result instanceof Promise ? result : redacted(result)}"
 
             // If the action returned a Promise, unwrap it to get the actual value
             if (result instanceof Promise) {

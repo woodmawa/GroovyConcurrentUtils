@@ -141,7 +141,7 @@ class SwitchRouterTask extends RouterTask {
             )
         }
 
-        log.debug("SwitchRouterTask($id): extracting switch value from prevValue=$prevValue")
+        log.debug("SwitchRouterTask($id): extracting switch value from prevValue=${redacted(prevValue)}")
 
         // Extract the value to switch on
         Object switchValue

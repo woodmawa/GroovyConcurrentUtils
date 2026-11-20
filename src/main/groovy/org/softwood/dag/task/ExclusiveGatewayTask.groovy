@@ -97,7 +97,7 @@ class ExclusiveGatewayTask extends RouterTask {
     @Override
     protected List<String> route(Object prevValue) {
 
-        log.debug("ExclusiveGatewayTask($id): evaluating ${orderedRules.size()} rules for prevValue=$prevValue")
+        log.debug("ExclusiveGatewayTask($id): evaluating ${orderedRules.size()} rules for prevValue=${redacted(prevValue)}")
 
         // Evaluate rules in order - first match wins
         for (RoutingRule rule : orderedRules) {

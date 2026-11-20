@@ -114,9 +114,16 @@ location the loader is pointed at.
 
 | Secrets, TLS contexts, tokens
 | Available as services; nothing turns them on for a capability that was not configured to
-use them.
+use them. From 1.2.2 a signed token with no expiry is rejected as an invalid token.
 | No change planned.
 | n/a
+
+| Task results in logs, events and persistence
+| Written as they are unless a redactor is set. From 1.2.2 a redactor on the `TaskContext`
+is applied to the library's own log lines, to persisted snapshots and to
+`TaskEvent.redactedResult`. Off by default.
+| No change planned. A consumer that stores events writes `redactedResult`.
+| 1.2.2, opt-in
 |===
 
 The rest of this chapter takes each area in turn: how to use it safely at this version, and
@@ -303,6 +310,23 @@ named by `app.configDir` or `externalDirs`. Anyone who can write to one of those
 or set those system properties, can run code in the process at start-up. Give them the same
 protection as the application's own code. YAML, JSON and properties files carry data only.
 
+== Task Results in Logs, Events and Persistence
+
+*Opt-in from 1.2.2.* A task's result can hold what the flow fetched: a token, a customer
+record, the body of a document. By default the library writes results as they are, to its
+debug log lines, to a persisted snapshot when persistence is on, and to the events it hands
+to listeners.
+
+Setting `resultRedactor` on the graph's `TaskContext` puts one function in front of the first
+two and adds a redacted copy to the third. The closure receives the task id and the value and
+returns what may be shown. `TaskEvent.result` is never altered, so code that reads a result
+from an event keeps working; `TaskEvent.redactedResult` is the form to store. A redactor that
+throws hides the value. <<tg-06>> has the detail and an example.
+
+The limits are worth knowing. The redactor covers what the library writes. It does not cover
+what a task's own code logs, `ctx.globals`, or the value handed from one task to the next,
+which has to be real for the flow to work. Exception messages are not passed through it.
+
 == Using the Library Safely at Version {gcu-version}
 
 Until the releases above land:
@@ -314,6 +338,8 @@ Until the releases above land:
 . Pass a `HazelcastSecurityConfig` when clustering, and run the cluster on a network you control.
 . Name your message packages when using `JavaSerializer`; prefer JSON or MessagePack.
 . Protect configuration locations as you protect code.
+. Where results can hold secrets or personal data, set a `resultRedactor` and store
+  `redactedResult` from events, not `result`.
 
 For the controls inside the TaskGraph engine itself, validation, guarded task state,
 cancellation and timeouts, see <<tg-16>>, and for the task-level security settings as they

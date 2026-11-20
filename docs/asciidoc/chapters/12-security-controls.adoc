@@ -1,0 +1,320 @@
+[[ch-security-controls]]
+= Security Controls: What Is Enforced and What Is Planned
+
+The library runs things on behalf of a flow definition: scripts, rule expressions, HTTP calls,
+file operations, messages from other processes. This chapter is the single place that says,
+for each of those, what limits it today, what the agreed design is, and which release brings
+the two together. It is updated with every release that changes a control, so it can be
+read as the current state of the hardening work.
+
+Read this chapter before deciding how much to trust a flow you did not write yourself.
+
+== The Trust Model
+
+The controls are designed for one situation: flows are written by people who are trusted,
+but a flow can contain text that came from somewhere else. A URL, a file path, a rule
+condition or a script body may have been copied, generated, or steered by content read from
+an outside source. The controls limit what such text can reach.
+
+They are a *reduction*, not isolation. Everything in a flow runs inside one JVM under one
+operating-system user. A control that refuses a file path or a class name narrows what
+mistaken or steered text can do; it does not contain code written by someone who is trying
+to get out. Flows supplied by an untrusted party need a separate process with its own
+operating-system limits, which is outside what this library provides.
+
+== One Vocabulary: Restricted, Capabilities, Trusted
+
+The agreed design uses the same three levels everywhere, so that a flow states its needs in
+one way.
+
+[cols="1,3",options="header"]
+|===
+| Level | Meaning
+
+| Restricted
+| The default. The task can compute on the data it was given and nothing else.
+
+| Restricted plus capabilities
+| The flow names what it needs: `allow 'files'`, `allow 'http'`, `allow 'sql'`,
+`allow 'process'`. Each capability is bounded by the control for that area, described below.
+
+| Trusted
+| `trusted true` on a task removes the restriction for that task, and is logged. It is a
+deliberate statement in the flow, visible to a reviewer.
+|===
+
+Version {gcu-version} does not implement these levels yet. The sections below say what each
+area does now.
+
+== Status at Version {gcu-version}
+
+[cols="2,3,3,1",options="header"]
+|===
+| Control | Today | Agreed design | Release
+
+| Script tasks (`ScriptTask`)
+| *Not restricted.* The `sandboxed` flag does not stop a script running a process, reading
+the environment, touching files or using reflection.
+| Restricted statement language by default; named capabilities; `trusted true` to opt out.
+| 1.4.0
+
+| Rule conditions (`ControlTask`)
+| *Not restricted.* A `when:` string is evaluated as full Groovy. A condition that throws is
+treated as false.
+| Expressions only, from a fixed list of operations. A condition that throws fails the node.
+| 1.4.0
+
+| Other script languages
+| JavaScript and any installed JSR-223 language run with no restriction.
+| JavaScript with no Java access by default. Jython and JRuby trusted only.
+| 1.4.0
+
+| Shell commands
+| Not available as a task.
+| A `ShellTask`, off by default, with directory, environment, timeout and executable limits.
+| 1.4.0
+
+| HTTP calls (`HttpTask`)
+| *Not restricted.* The guard configuration exists and is not applied. Any URL is called and
+redirects are followed.
+| Public hosts allowed; private networks blocked; localhost only when the flow names it.
+| 1.3.0
+
+| File operations (`FileTask`)
+| Enforced when a security configuration is supplied. *With none supplied, everything is
+allowed.*
+| With none supplied: confined to the working directory, with size and count limits.
+| 1.3.0
+
+| Remote actor transports
+| Listen on every network interface. Authentication and TLS are off unless configured. Any
+actor can be addressed by name.
+| Local-only by default; a wider address needs authentication; only actors marked as remote
+are reachable.
+| 1.3.0
+
+| Cluster (Hazelcast)
+| Enforced from 1.2.1 when a `HazelcastSecurityConfig` is passed: no multicast, fixed
+members, bind address, fixed port. Encryption and member authentication need Hazelcast
+Enterprise.
+| As today, plus mandatory message signing, a deserialisation allow-list, and a warning on
+an unsecured start.
+| 1.3.0
+
+| Java deserialisation (`JavaSerializer`)
+| Enforced from 1.2.1: allow-list of JDK value types plus packages the application names.
+| No change planned.
+| done
+
+| Configuration files
+| A `.groovy` config file is executed when loaded, from the classpath and from any external
+location the loader is pointed at.
+| No change planned: by design. Protect config locations like code.
+| n/a
+
+| Secrets, TLS contexts, tokens
+| Available as services; nothing turns them on for a capability that was not configured to
+use them.
+| No change planned.
+| n/a
+|===
+
+The rest of this chapter takes each area in turn: how to use it safely at this version, and
+what changes.
+
+== Scripts and Rule Conditions
+
+*Today.* Treat every `ScriptTask` body and every `ControlTask` `when:` string as code with
+the full rights of the process. Do not build either from text that came from outside the
+flow: not from a task result, a file, an HTTP response or a model's output. Pass such values
+in as data through the bindings and keep the script text fixed. The `sandboxed` setting
+should not be relied on.
+
+*Agreed design (1.4.0).* One restricted compiler, used two ways.
+
+Rule conditions are expressions only: comparisons, boolean logic, arithmetic, literals, and
+property and index access on the bound values, plus a fixed list of methods (`size`,
+`isEmpty`, `contains`, `containsKey`, `startsWith`, `endsWith`, `matches`, `toString`,
+`toLowerCase`, `toUpperCase`, `trim`, and `Math` functions). No object creation, imports,
+closures, loops or assignments.
+
+Scripts get a restricted statement language: variables, conditionals, loops, closures, and
+collection and string methods, with these packages available:
+
+[cols="1,3",options="header"]
+|===
+| Area | Available to a restricted script
+
+| Core Java
+| `java.lang` value types, `Math`, `StringBuilder`; `java.util` with `function`, `stream`
+and `regex`; `java.time`; `java.math`; `java.text`; `java.nio.charset`
+
+| Concurrency data types
+| `java.util.concurrent` collections, `TimeUnit`, `atomic`. No threads or executors.
+
+| Encoding and identity
+| `UUID`, `Base64`, `URI`, `URLEncoder`, `URLDecoder`, `MessageDigest`
+
+| Groovy
+| `groovy.json`, `groovy.xml`, `groovy.yaml`, and the data-class annotations in
+`groovy.transform`
+
+| This library
+| `Promise`, `Promises`, `Gstream`
+|===
+
+Capabilities add to that list: `allow 'files'` under the file control, `allow 'http'` under
+the HTTP control, `allow 'sql'` for a datasource named in the context, `allow 'process'`
+under the shell control.
+
+Refused whatever is granted: reflection and classloaders; `GroovyShell`, `Eval` and the
+template engines, because they compile new code; `System` apart from the clock; threads and
+executors; and the JDK's internal packages.
+
+At run time each execution gets its own script instance, the script timeout is enforced,
+and the script sees a read-only view of the context in place of the whole of it, so
+credentials and the pool are out of reach. A rule that does not compile under the profile
+fails when the graph is validated, before anything runs.
+
+== Shell Commands
+
+*Today.* The library has no task that runs an operating-system command. A script can start
+a process only because scripts are unrestricted.
+
+*Agreed design (1.4.0).* A `ShellTask` for PowerShell, bash, cmd and a real Python
+interpreter. It runs a separate process, which cannot touch the graph or the context in
+memory, and it is off unless the graph grants `allow 'process'`. Its limits:
+
+* the working directory must be inside the directories the graph allows;
+* the script is passed by file or standard input, never on the command line;
+* the environment is emptied and only named variables are passed in;
+* a timeout always applies and ends the whole process tree;
+* output is capped;
+* only executables on the graph's list may be started;
+* obviously destructive commands are refused, as a check against mistakes;
+* no elevation and no interactive prompts; a non-zero exit fails the task;
+* each run is recorded with the interpreter, the directory and a hash of the script.
+
+The process runs as the same operating-system user as the JVM. The directory list and that
+user's own rights are the real limit.
+
+== HTTP Calls
+
+*Today.* `HttpTask` calls whatever URL it is given and follows redirects. That includes
+`localhost`, other machines on a private network and link-local addresses. Do not build a
+URL from outside text; where a flow must call a host chosen at run time, check the host
+against a list in the flow before the call.
+
+*Agreed design (1.3.0).*
+
+[cols="2,3",options="header"]
+|===
+| Destination | Default
+
+| Public internet, HTTP or HTTPS
+| Allowed.
+
+| Private network addresses
+| Blocked.
+
+| `localhost` and loopback
+| Blocked unless the flow names the host and port, on the task or once for the graph.
+
+| Cloud metadata addresses
+| Always blocked.
+|===
+
+The URL is checked before the request. Redirects are followed one step at a time, each
+checked against the same rules, up to five. The check is made on the address actually
+connected to, so a host name that resolves somewhere else after being checked does not get
+through. `trusted true` on the task turns the guard off for that task.
+
+== File Operations
+
+*Today.* `FileTask` enforces its `FileTaskSecurityConfig` when one is supplied. Supply one on
+every `FileTask`:
+
+[source,groovy]
+----
+securityConfig FileTaskSecurityConfig.strict([new File('/var/app/data')])
+----
+
+With none supplied the task falls back to the permissive configuration: no path restriction,
+no symbolic-link checks, no size limits. It logs a warning and carries on.
+
+*Agreed design (1.3.0).* A `FileTask` with no configuration runs under the strict
+configuration, confined to the graph's working directory, or the JVM's working directory if
+the graph has none. The strict limits apply: symbolic links are not followed, 100 MB per
+file, 1 GB and 10,000 files per operation, and a recursion depth of 50. Reaching outside the
+working directory takes one line naming the directories. The permissive configuration
+remains but has to be asked for by name.
+
+== Remote Actor Transports
+
+*Today.* A transport started as a server accepts connections on every network interface,
+without authentication or TLS unless both are configured, and delivers to any actor in the
+system by name. Start one only with an `AuthConfig` and a TLS configuration, or only on a
+machine whose network you control.
+
+*Agreed design (1.3.0).* A server transport listens on the local machine only unless given
+an address. Listening on a wider address with authentication off is refused at start-up,
+unless the application sets `insecure true`. Without TLS on a wider address the transport
+starts and warns. Only actors marked as remotely reachable can be addressed from outside;
+the rest are invisible to callers.
+
+== Cluster
+
+*Today (from 1.2.1).* Pass a `HazelcastSecurityConfig` to `HazelcastManager.initialize`. It
+is validated and applied: no multicast discovery, a fixed member list, a bind address and a
+fixed port. With multicast disabled and no members named, start-up is refused; nothing falls
+back to multicast.
+
+Encryption between members and member authentication are features of Hazelcast Enterprise.
+The library uses the open-source edition, which will not start with either enabled. On the
+open-source edition, therefore, anything on the same network that knows the cluster name and
+can reach the port could join, and traffic between members is not encrypted. Run a cluster
+only on a network you control. Calling `initialize` without a security configuration applies
+none of the above.
+
+*Agreed design (1.3.0).* The open-source edition stays, and the following are added:
+
+* every cluster event the library publishes is signed, and every one received is verified;
+  an unsigned or altered event is dropped and logged;
+* what Hazelcast will deserialise is limited to the library's own cluster classes;
+* starting without a security configuration logs a clear warning.
+
+To get encryption and control over who can join without Enterprise, run the members over
+an encrypted private network, such as a VPN or a mesh network, and bind the cluster to that
+network's address. The cluster then inherits the network's encryption and membership.
+
+== Java Deserialisation
+
+*Enforced from 1.2.1.* `JavaSerializer` reads through an allow-list. By default it accepts
+JDK value types and Groovy's interpolated string, and refuses everything else. An
+application that sends its own message classes names their packages when it creates the
+serializer. Graph depth, reference count and array length are capped.
+
+== Configuration Files
+
+A Groovy configuration file is a script, and loading it runs it. That applies to
+`config.groovy` on the classpath and to every external location the loader reads: files
+named by the `app.config` system property or the `externalFiles` option, and directories
+named by `app.configDir` or `externalDirs`. Anyone who can write to one of those locations,
+or set those system properties, can run code in the process at start-up. Give them the same
+protection as the application's own code. YAML, JSON and properties files carry data only.
+
+== Using the Library Safely at Version {gcu-version}
+
+Until the releases above land:
+
+. Keep script bodies and rule conditions fixed in the flow. Pass outside values in as data.
+. Give every `FileTask` a strict security configuration.
+. Do not build `HttpTask` URLs from outside text without checking the host first.
+. Start remote actor transports only with authentication and TLS, or on a network you control.
+. Pass a `HazelcastSecurityConfig` when clustering, and run the cluster on a network you control.
+. Name your message packages when using `JavaSerializer`; prefer JSON or MessagePack.
+. Protect configuration locations as you protect code.
+
+For the controls inside the TaskGraph engine itself, validation, guarded task state,
+cancellation and timeouts, see <<tg-16>>, and for the task-level security settings as they
+are today, <<tg-09>>.

@@ -3,6 +3,12 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## Security controls chapter and hardening plan (2026-11-20) — documentation only, version stays 1.2.1
+
+- **New chapter, "Security Controls: What Is Enforced and What Is Planned"** (`docs/asciidoc/chapters/12-security-controls.adoc`), in both books. For scripts and rule conditions, shell commands, HTTP calls, file operations, remote actor transports, the cluster, Java deserialisation and configuration files it states what limits each one today, the agreed design, and the release that delivers it, with a status table and a list of how to use the library safely at this version.
+- **Every release that changes a control updates that chapter**: its row in the status table and the section that describes it.
+- **Agreed plan** (project doc `gcu/brief-core-hardening-2026-11-18`, rev 5): 1.2.2 defects; 1.3.0 safe defaults (`HttpTask` guard, `FileTask` default, remoting defaults, cluster signing); 1.4.0 restricted evaluation for `ScriptTask` and `ControlTask` plus a `ShellTask`; 2.0.0 module split with a `gcu-taskgraph` jar and `GroovyConcurrentUtils` kept as an aggregate.
+
 ## 1.2.1 (2026-11-20) — second hardening pass: actors, agents, serialisation, cluster settings, config, timers
 
 Source: second security, completeness and robustness review, project doc `gcu/review-2-2026-11-20`. It read the parts the first review did not (actors, agents, pools, the rest of promises, config, security services, cluster, remoting) and took in the findings made while writing the book.

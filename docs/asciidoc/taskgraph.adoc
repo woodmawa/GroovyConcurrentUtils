@@ -42,6 +42,7 @@ include::chapters/tg-14-taskgraph-spec.adoc[leveloffset=+1]
 
 = Part III -- Operations
 
+include::chapters/12-security-controls.adoc[leveloffset=+1]
 include::chapters/tg-09-security.adoc[leveloffset=+1]
 include::chapters/tg-10-observability.adoc[leveloffset=+1]
 

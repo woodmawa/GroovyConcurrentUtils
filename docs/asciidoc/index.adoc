@@ -66,6 +66,7 @@ include::chapters/08-agents.adoc[leveloffset=+1]
 include::chapters/09-configuration.adoc[leveloffset=+1]
 include::chapters/10-security.adoc[leveloffset=+1]
 include::chapters/11-clustering.adoc[leveloffset=+1]
+include::chapters/12-security-controls.adoc[leveloffset=+1]
 
 = Part V -- TaskGraph
 

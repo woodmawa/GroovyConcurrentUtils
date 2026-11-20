@@ -34,6 +34,7 @@ class FileTaskTest extends Specification {
         
         and: "a task graph with file task"
         graph = TaskGraph.build {
+            allowedDirectories tempDir   // GCU 1.3.0: an unconfigured FileTask is confined; the flow names what it reaches
             fileTask("find-logs") {
                 sources {
                     directory(tempDir.toString()) {
@@ -67,6 +68,7 @@ INFO: Success""")
         
         and: "a task graph with file task using eachFile"
         graph = TaskGraph.build {
+            allowedDirectories tempDir   // GCU 1.3.0: an unconfigured FileTask is confined; the flow names what it reaches
             fileTask("count-errors") {
                 sources {
                     directory(tempDir.toString()) {

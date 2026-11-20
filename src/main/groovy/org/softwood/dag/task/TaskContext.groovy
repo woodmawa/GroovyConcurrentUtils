@@ -79,6 +79,25 @@ class TaskContext implements Closeable {
         }
     }
     
+    /**
+     * GCU 1.3.0 (D3): local services every HttpTask on this context may call, as {@code host:port}
+     * entries (lower case). Empty by default: a local address is then refused unless the task itself
+     * names it. Filled by {@code allowLocal 'localhost:8082'} in the graph DSL.
+     */
+    final Set<String> httpAllowLocal = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * GCU 1.3.0 (D9): the graph's working directory. A FileTask with no security configuration is
+     * confined to it; null (the default) means the JVM's working directory.
+     */
+    volatile File workingDirectory = null
+
+    /**
+     * GCU 1.3.0 (D9): further directories every unconfigured FileTask on this context may reach.
+     * Filled by {@code allowedDirectories ...} in the graph DSL.
+     */
+    final List<File> fileAllowedDirectories = new java.util.concurrent.CopyOnWriteArrayList<File>()
+
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
 

@@ -213,6 +213,5 @@ These are not addressed at version {gcu-version}. <<ch-security-controls>> has t
 
 * `ScriptTask`'s default "sandbox" (`SecureScriptBase`) restricts only unresolved calls made on the script object itself. It does not prevent a script from running processes, reading files or reaching the network. Treat every script as trusted code. See the Security chapter.
 * `ControlTask` evaluates rule conditions as unrestricted Groovy.
-* `HttpTaskSecurityConfig` is not applied by `HttpTask`.
 * Task results appear unredacted in debug logs, task events and persisted state unless a `resultRedactor` is set on the context (1.2.2, <<tg-06>>).
 * Pause and resume are not implemented.

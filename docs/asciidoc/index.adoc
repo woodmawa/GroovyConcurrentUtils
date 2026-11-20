@@ -4,7 +4,7 @@ Will Woodman <will@woodmawa.com>
 // --- Single source of truth for the version this BOOK describes. ---------
 // This is the only place the library version appears in this book: chapters
 // describe the library as it stands, not the build that produced it.
-:gcu-version: 1.2.2
+:gcu-version: 1.3.0
 :revnumber: {gcu-version}
 :toc: left
 :toclevels: 3

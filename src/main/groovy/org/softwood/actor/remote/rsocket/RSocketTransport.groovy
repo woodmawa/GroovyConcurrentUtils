@@ -102,6 +102,18 @@ class RSocketTransport implements RemotingTransport {
     RSocketTransport(ActorSystem localSystem) {
         this(localSystem, 7000, true, null, null)
     }
+
+    /**
+     * GCU 1.3.0 (D10): the address the server listens on. Loopback by default; it used to be 0.0.0.0.
+     * Set before start().
+     */
+    String bindAddress = org.softwood.actor.remote.RemotingGuard.DEFAULT_BIND_ADDRESS
+
+    /**
+     * GCU 1.3.0 (D10): set true to let the server listen on a non-loopback address with
+     * authentication off. Without it start() refuses.
+     */
+    boolean insecure = false
     
     /**
      * Creates RSocket transport with custom port.
@@ -164,6 +176,8 @@ class RSocketTransport implements RemotingTransport {
     @Override
     void start() {
         if (serverEnabled) {
+            org.softwood.actor.remote.RemotingGuard.checkBind(
+                    scheme(), bindAddress, localPort, authConfig.enabled, tlsConfig.enabled, insecure)
             startServer()
         }
         log.info("RSocket transport started (server=${serverEnabled}, port=${localPort})")
@@ -187,7 +201,7 @@ class RSocketTransport implements RemotingTransport {
                 
                 transport = TcpServerTransport.create(
                     TcpServer.create()
-                        .host("0.0.0.0")
+                        .host(bindAddress)
                         .port(localPort)
                         .secure { spec ->
                             spec.sslContext(sslContext)
@@ -195,7 +209,7 @@ class RSocketTransport implements RemotingTransport {
                 )
             } else {
                 // Plain TCP server
-                transport = TcpServerTransport.create("0.0.0.0", localPort)
+                transport = TcpServerTransport.create(bindAddress, localPort)
             }
             
             // Create server that handles incoming messages
@@ -321,7 +335,8 @@ class RSocketTransport implements RemotingTransport {
                 log.debug("handleTell: actorName=${actorName}, localSystem=${localSystem?.name}")
                 log.debug("Available actors: ${localSystem?.getActorNames()}")
                 
-                if (localSystem?.hasActor(actorName)) {
+                // GCU 1.3.0 (D10): only an actor marked remote; any other name is treated as not found
+                if (org.softwood.actor.remote.RemotingGuard.addressable(localSystem, actorName)) {
                     // Pass auth context to actor (future: for per-message authorization)
                     localSystem.getActor(actorName).tell(msg)
                     log.debug("Delivered tell to actor: ${actorName}")
@@ -387,7 +402,7 @@ class RSocketTransport implements RemotingTransport {
                 log.debug("handleAsk: actorName=${actorName}, localSystem=${localSystem?.name}")
                 log.debug("Available actors: ${localSystem?.getActorNames()}")
                 
-                if (localSystem?.hasActor(actorName)) {
+                if (org.softwood.actor.remote.RemotingGuard.addressable(localSystem, actorName)) {
                     // Pass auth context to actor (future: for per-message authorization)
                     def reply = localSystem.getActor(actorName)
                         .askSync(msg, Duration.ofMillis(timeoutMs))

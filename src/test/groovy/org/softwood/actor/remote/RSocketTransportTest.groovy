@@ -38,6 +38,7 @@ class RSocketTransportTest {
         // Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -46,6 +47,7 @@ class RSocketTransportTest {
         // Create counter actor
         serverSystem.actor {
             name 'counter'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             state count: 0
             onMessage { msg, ctx ->
                 if (msg == 'increment') {
@@ -147,6 +149,7 @@ class RSocketTransportTest {
         // Create slow actor
         serverSystem.actor {
             name 'slow'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 Thread.sleep(2000)
                 ctx.reply('done')

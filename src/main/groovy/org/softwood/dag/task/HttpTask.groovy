@@ -77,8 +77,53 @@ class HttpTask extends TaskBase<HttpResponse> {
         // Create HTTP client with default configuration
         this.httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
-            .followRedirects(HttpClient.Redirect.NORMAL)
+            // GCU 1.3.0 (D3): redirects are followed by this class, one hop at a time, so that every
+            // hop is checked against the guard. The client used to follow them itself, unchecked.
+            .followRedirects(HttpClient.Redirect.NEVER)
             .build()
+    }
+
+    // =========================================================================
+    // DSL Methods - Guard (GCU 1.3.0, D3)
+    // =========================================================================
+
+    private final Set<String> allowLocalEntries = new LinkedHashSet<String>()
+    private boolean trustedTask = false
+    private HttpTaskSecurityConfig securityPolicy = null
+
+    /**
+     * Name local services this task may call. A local address (localhost, 127.0.0.1, ::1) is refused
+     * unless its host and port are named here or once for the graph.
+     *
+     * <pre>
+     * allowLocal 'localhost:8082'
+     * </pre>
+     */
+    void allowLocal(Object... hostPorts) {
+        hostPorts.each { entry -> allowLocalEntries.add(HttpTaskSecurityConfig.localEntry(entry)) }
+    }
+
+    /**
+     * Switch the guard off for this task: any URL is called and redirects are followed unchecked
+     * (still five at most). Logged each time the task runs.
+     */
+    void trusted(boolean value) {
+        this.trustedTask = value
+    }
+
+    /**
+     * Replace the standard policy for this task: host allow-list, schemes, HTTPS only, redirect limit.
+     * Without one the task runs under {@link HttpTaskSecurityConfig#standard()}.
+     */
+    void securityConfig(HttpTaskSecurityConfig config) {
+        this.securityPolicy = config
+    }
+
+    private static final Set<Integer> REDIRECT_STATUS = [301, 302, 303, 307, 308] as Set<Integer>
+    private static final Set<String> CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'] as Set<String>
+
+    private static boolean sameOrigin(URI x, URI y) {
+        return x.scheme?.equalsIgnoreCase(y.scheme) && x.host?.equalsIgnoreCase(y.host) && x.port == y.port
     }
     
     // =========================================================================
@@ -347,6 +392,8 @@ class HttpTask extends TaskBase<HttpResponse> {
         // Don't retry configuration errors
         if (err instanceof IllegalStateException) return false
         if (err instanceof IllegalArgumentException) return false
+        // GCU 1.3.0 (D3): a URL the guard refused is refused on every attempt
+        if (err instanceof SecurityException) return false
         
         // Don't retry client errors (4xx) - these are permanent failures
         if (err instanceof HttpClientErrorException) return false
@@ -412,18 +459,124 @@ class HttpTask extends TaskBase<HttpResponse> {
      */
     private HttpResponse executeHttpRequest() {
         try {
+            // GCU 1.3.0 (D3): guard, then send, then follow redirects by hand, checking each hop.
+            HttpTaskSecurityConfig policy = securityPolicy ?: HttpTaskSecurityConfig.standard()
+            Set<String> allowLocal = new LinkedHashSet<String>(allowLocalEntries)
+            if (ctx?.httpAllowLocal) allowLocal.addAll(ctx.httpAllowLocal)
+            int maxRedirects = policy.maxRedirects
+            if (trustedTask) {
+                log.warn("HttpTask($id): trusted true - the HTTP guard is off for this task")
+            }
+
+            URI target = new URI(request.buildUrl())
+            HttpMethod verb = request.method
+            boolean withBody = true
+            boolean crossOrigin = false
+            int hops = 0
+            def javaResponse
+            while (true) {
+                if (!trustedTask) {
+                    policy.checkRequest(target, allowLocal)
+                }
+                log.debug("HttpTask($id): sending ${verb} to ${target.host}")
+                javaResponse = httpClient.send(buildJavaRequest(target, verb, withBody, crossOrigin), BodyHandlers.ofByteArray())
+
+                String location = javaResponse.headers().firstValue('Location').orElse(null)
+                if (!REDIRECT_STATUS.contains(javaResponse.statusCode()) || !location || maxRedirects == 0) {
+                    break
+                }
+                URI next = target.resolve(location)
+                String nextScheme = next.scheme?.toLowerCase()
+                if (!(nextScheme in ['http', 'https'])) break
+                if (target.scheme?.equalsIgnoreCase('https') && nextScheme == 'http') break   // never downgrade
+                hops++
+                if (hops > maxRedirects) {
+                    throw new IllegalStateException("HttpTask($id): more than ${maxRedirects} redirects")
+                }
+                int status = javaResponse.statusCode()
+                if (status == 303 || ((status == 301 || status == 302) && verb == HttpMethod.POST)) {
+                    verb = HttpMethod.GET
+                    withBody = false
+                }
+                if (!sameOrigin(target, next)) crossOrigin = true
+                log.debug("HttpTask($id): following redirect ${hops} (${status})")
+                target = next
+            }
+
+            // Convert to our HttpResponse
+            def response = new HttpResponse(
+                javaResponse.statusCode(),
+                "", // Java HttpClient doesn't provide status message
+                javaResponse.headers().map(),
+                javaResponse.body()
+            )
+
+            log.debug("HttpTask($id): received response status ${response.statusCode}")
+
+            // Store cookies from response
+            if (cookieJar && request.useCookieJar) {
+                def setCookieHeaders = javaResponse.headers().allValues("Set-Cookie")
+                if (setCookieHeaders) {
+                    cookieJar.addFromSetCookieHeaders(setCookieHeaders, target.host)
+                    log.debug("HttpTask($id): stored ${setCookieHeaders.size()} cookies")
+                }
+            }
+
+            // Validate status
+            if (request.statusValidator) {
+                if (!request.statusValidator.call(response.statusCode)) {
+                    throw new HttpStatusException(
+                        "HTTP request failed with status ${response.statusCode}",
+                        response
+                    )
+                }
+            } else {
+                if (response.isClientError()) {
+                    throw new HttpClientErrorException("HTTP ${response.statusCode}: ${response.body}", response)
+                }
+                if (response.isServerError()) {
+                    throw new HttpServerErrorException("HTTP ${response.statusCode}: ${response.body}", response)
+                }
+            }
+
+            return response
+
+        } catch (IOException e) {
+            log.error("HttpTask($id): network error: ${e.message}", e)
+            throw new RuntimeException("HTTP request failed: ${e.message}", e)
+        } catch (InterruptedException e) {
+            log.error("HttpTask($id): interrupted: ${e.message}", e)
+            Thread.currentThread().interrupt()
+            throw new RuntimeException("HTTP request interrupted", e)
+        }
+    }
+
+    /**
+     * Builds the request for one hop.
+     *
+     * @param target      where this hop goes
+     * @param verb        the method for this hop (a redirect can turn a POST into a GET)
+     * @param withBody    false once a redirect has dropped the body
+     * @param crossOrigin true once a redirect has left the origin the flow named: the task's
+     *                    credentials (auth settings, Authorization and Cookie headers) are then left out
+     */
+    private java.net.http.HttpRequest buildJavaRequest(URI target, HttpMethod verb, boolean withBody, boolean crossOrigin) {
             // Build the request
             def builder = java.net.http.HttpRequest.newBuilder()
-                .uri(new URI(request.buildUrl()))
+                .uri(target)
                 .timeout(request.timeout)
             
             // Add headers
             request.headers.each { name, value ->
+                if (crossOrigin && CREDENTIAL_HEADERS.contains(name.toString().toLowerCase())) return
+                if (!withBody && name.toString().equalsIgnoreCase('Content-Type')) return
                 builder.header(name, value)
             }
             
             // Add auth headers
-            if (request.bearerToken) {
+            if (crossOrigin) {
+                // credentials stay with the origin the flow named
+            } else if (request.bearerToken) {
                 builder.header("Authorization", "Bearer ${request.bearerToken}")
             } else if (request.basicAuthUser) {
                 def credentials = "${request.basicAuthUser}:${request.basicAuthPassword}"
@@ -435,7 +588,7 @@ class HttpTask extends TaskBase<HttpResponse> {
             
             // Add cookies from cookie jar
             if (cookieJar && request.useCookieJar) {
-                def uri = new URI(request.buildUrl())
+                def uri = target
                 def cookieHeader = cookieJar.getCookieHeader(
                     uri.host,
                     uri.path ?: "/",
@@ -448,7 +601,9 @@ class HttpTask extends TaskBase<HttpResponse> {
             }
             
             // Handle multipart Content-Type with boundary BEFORE building the body
-            if (request.isMultipart()) {
+            if (!withBody) {
+                // a redirect turned this into a GET: no body, no content type
+            } else if (request.isMultipart()) {
                 def boundary = "----WebKitFormBoundary${UUID.randomUUID().toString().replace('-', '')}"
                 request.multipartBoundary = boundary
                 builder.header("Content-Type", "multipart/form-data; boundary=${boundary}")
@@ -460,22 +615,23 @@ class HttpTask extends TaskBase<HttpResponse> {
             }
             
             // Set request body based on method
+            def bodyPublisher = { withBody ? buildBodyPublisher() : BodyPublishers.noBody() }
             def javaRequest
-            switch (request.method) {
+            switch (verb) {
                 case HttpMethod.GET:
                     javaRequest = builder.GET().build()
                     break
                 case HttpMethod.POST:
-                    javaRequest = builder.POST(buildBodyPublisher()).build()
+                    javaRequest = builder.POST(bodyPublisher()).build()
                     break
                 case HttpMethod.PUT:
-                    javaRequest = builder.PUT(buildBodyPublisher()).build()
+                    javaRequest = builder.PUT(bodyPublisher()).build()
                     break
                 case HttpMethod.DELETE:
                     javaRequest = builder.DELETE().build()
                     break
                 case HttpMethod.PATCH:
-                    javaRequest = builder.method("PATCH", buildBodyPublisher()).build()
+                    javaRequest = builder.method("PATCH", bodyPublisher()).build()
                     break
                 case HttpMethod.HEAD:
                     javaRequest = builder.method("HEAD", BodyPublishers.noBody()).build()
@@ -487,62 +643,11 @@ class HttpTask extends TaskBase<HttpResponse> {
                     throw new IllegalStateException("Unsupported HTTP method: ${request.method}")
             }
             
-            // Execute the request
-            log.debug("HttpTask($id): sending ${request.method} to ${request.url}")
-            def javaResponse = httpClient.send(javaRequest, BodyHandlers.ofByteArray())
-            
-            // Build response
-            def response = new HttpResponse(
-                javaResponse.statusCode(),
-                "", // Java HttpClient doesn't provide status message
-                javaResponse.headers().map(),
-                javaResponse.body()
-            )
-            
-            log.debug("HttpTask($id): received response status ${response.statusCode}")
-            
-            // Store cookies from response
-            if (cookieJar && request.useCookieJar) {
-                def setCookieHeaders = javaResponse.headers().allValues("Set-Cookie")
-                if (setCookieHeaders) {
-                    def uri = new URI(request.buildUrl())
-                    cookieJar.addFromSetCookieHeaders(setCookieHeaders, uri.host)
-                    log.debug("HttpTask($id): stored ${setCookieHeaders.size()} cookies")
-                }
-            }
-            
-            // Validate status if validator provided
-            if (request.statusValidator) {
-                if (!request.statusValidator.call(response.statusCode)) {
-                    throw new HttpStatusException(
-                        "HTTP request failed with status ${response.statusCode}",
-                        response
-                    )
-                }
-            } else {
-                // Default validation: fail on 4xx and 5xx
-                if (response.isClientError()) {
-                    throw new HttpClientErrorException("HTTP ${response.statusCode}: ${response.body}", response)
-                }
-                if (response.isServerError()) {
-                    throw new HttpServerErrorException("HTTP ${response.statusCode}: ${response.body}", response)
-                }
-            }
-            
-            return response
-            
-        } catch (IOException e) {
-            log.error("HttpTask($id): network error: ${e.message}", e)
-            throw new RuntimeException("HTTP request failed: ${e.message}", e)
-        } catch (InterruptedException e) {
-            log.error("HttpTask($id): interrupted: ${e.message}", e)
-            Thread.currentThread().interrupt()
-            throw new RuntimeException("HTTP request interrupted", e)
-        }
+            return javaRequest
     }
-    
+
     /**
-     * Build the request body publisher.
+     * Build the request body publisher from form data, multipart parts or the body value.
      */
     private java.net.http.HttpRequest.BodyPublisher buildBodyPublisher() {
         if (request.hasFormData()) {

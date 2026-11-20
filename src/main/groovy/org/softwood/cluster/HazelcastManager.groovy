@@ -52,6 +52,84 @@ class HazelcastManager {
     private HazelcastInstance hazelcastInstance
     private boolean enabled = false
     private boolean initialized = false
+
+    /** GCU 1.3.0 (D11): set when the security configuration asks for message signing; null otherwise. */
+    private volatile ClusterMessageValidator messageValidator = null
+
+    /**
+     * GCU 1.3.0 (D11): turn task-event signing on from a security configuration, or off with null.
+     * Called by initialize(config, security); public so that signing can be exercised without a
+     * running cluster.
+     */
+    void useMessageSigning(HazelcastSecurityConfig security) {
+        if (security != null && security.messageSigningEnabled && security.messageSigningKey) {
+            messageValidator = new ClusterMessageValidator(security.messageSigningKey, security.messageSigningAlgorithm)
+        } else {
+            messageValidator = null
+        }
+    }
+
+    /** @return true if task events are signed when published and checked when received */
+    boolean isMessageSigningActive() {
+        return messageValidator != null
+    }
+
+    /**
+     * GCU 1.3.0 (D11): sign an event that is about to be published, if signing is configured.
+     * TaskGraph publishes every task event through this. Before 1.3.0 the signing code existed on
+     * ClusterTaskEvent and nothing called it.
+     */
+    ClusterTaskEvent signIfConfigured(ClusterTaskEvent event) {
+        ClusterMessageValidator validator = messageValidator
+        if (event == null || validator == null) {
+            return event
+        }
+        return event.sign(validator)
+    }
+
+    /**
+     * GCU 1.3.0 (D11): decide whether a received task event may be acted on. With signing configured,
+     * an event with no signature, or one whose signature does not match its content, is refused and
+     * logged. With no signing configured every event passes, as before.
+     */
+    boolean acceptTaskEvent(ClusterTaskEvent event) {
+        if (event == null) {
+            return false
+        }
+        ClusterMessageValidator validator = messageValidator
+        if (validator == null) {
+            return true
+        }
+        if (!event.signature) {
+            log.warn("Dropped unsigned cluster task event: task={} run={} node={}", event.taskId, event.graphRunId, event.sourceNode)
+            return false
+        }
+        if (!event.verify(validator)) {
+            log.warn("Dropped cluster task event with a bad signature: task={} run={} node={}", event.taskId, event.graphRunId, event.sourceNode)
+            return false
+        }
+        return true
+    }
+
+    /**
+     * GCU 1.3.0 (D11): listen for task events from the cluster. The listener is given only events that
+     * pass acceptTaskEvent. Use this, not the topic directly, so that unsigned and tampered events
+     * never reach application code.
+     *
+     * @return the registration id, or null if clustering is not enabled
+     */
+    UUID addTaskEventListener(java.util.function.Consumer<ClusterTaskEvent> listener) {
+        ITopic<ClusterTaskEvent> topic = getTaskEventTopic()
+        if (topic == null || listener == null) {
+            return null
+        }
+        return topic.addMessageListener({ com.hazelcast.topic.Message<ClusterTaskEvent> message ->
+            ClusterTaskEvent event = message.messageObject
+            if (acceptTaskEvent(event)) {
+                listener.accept(event)
+            }
+        } as com.hazelcast.topic.MessageListener<ClusterTaskEvent>)
+    }
     
     // Map names
     private static final String GRAPH_STATE_MAP = "taskgraph:graph-states"
@@ -103,6 +181,14 @@ class HazelcastManager {
             return
         }
         
+        if (security == null) {
+            // GCU 1.3.0 (D11)
+            log.warn("Hazelcast clustering is starting with NO security settings: any process that can reach " +
+                    "this member's port can join the cluster, read its state and publish task events. " +
+                    "Pass a HazelcastSecurityConfig to initialize(config, security) and run the cluster on a network you control.")
+        }
+        useMessageSigning(security)
+
         try {
             log.info "Initializing Hazelcast clustering..."
             
@@ -215,6 +301,16 @@ class HazelcastManager {
             networkConfig.setSSLConfig(ssl)
         }
 
+        // GCU 1.3.0 (D11): limit Java deserialisation inside the cluster to an allow-list: GCU's own
+        // cluster classes, what the application names, and Hazelcast's defaults (java, com.hazelcast.).
+        // This is part of the open-source edition. It does not cover the member join handshake.
+        com.hazelcast.config.JavaSerializationFilterConfig filter = new com.hazelcast.config.JavaSerializationFilterConfig()
+        filter.getWhitelist().addPrefixes('org.softwood.dag.cluster.', 'org.softwood.actor.cluster.')
+        for (String prefix : (security.serializationAllowedPrefixes ?: new ArrayList<String>())) {
+            if (prefix) filter.getWhitelist().addPrefixes(prefix)
+        }
+        config.getSerializationConfig().setJavaSerializationFilterConfig(filter)
+
         if (security.authenticationEnabled) {
             RealmConfig realm = new RealmConfig()
                     .setUsernamePasswordIdentityConfig(security.clusterUsername, security.clusterPassword)
@@ -314,6 +410,7 @@ class HazelcastManager {
         hazelcastInstance = null
         enabled = false
         initialized = false
+        messageValidator = null
     }
     
     /**

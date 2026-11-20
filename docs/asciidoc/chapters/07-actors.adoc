@@ -333,6 +333,24 @@ def pricing = system.remote('rsocket://pricing-host:7000/pricing/quoter')
 def quote = pricing.askSync(request, Duration.ofSeconds(3))
 ----
 
+From 1.3.0 a transport started as a server follows three rules (<<ch-security-controls>>):
+
+* It listens on `127.0.0.1` unless `bindAddress` is set before `start()`.
+* On any other address it refuses to start with authentication off, unless `insecure` is set
+  to true on the transport. Without TLS it starts and warns.
+* It delivers only to actors marked remote. Any other name is answered as not found.
+
+[source,groovy]
+----
+system.actor {
+    name 'quoter'
+    remote true                          // reachable through a transport
+    onMessage { msg, ctx -> ctx.reply(price(msg)) }
+}
+
+system.markRemote('audit')               // or mark an existing actor; markRemote(name, false) unmarks
+----
+
 The RSocket and HTTP transports take an optional TLS configuration and an auth token set with
 `setAuthToken(token)`; see <<ch-security>>. `TransportRegistry` holds the transports by
 scheme and can set them up from configuration (`actor.remote.transport`, with a block of

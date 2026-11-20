@@ -219,14 +219,10 @@ class FileTaskSecurityConfig {
      */
     static FileTaskSecurityConfig permissive() {
         // SECURITY: Prevent permissive configuration in production
-        def env = System.getenv('ENVIRONMENT') ?: System.getProperty('environment') ?: ''
-        if (env.toLowerCase() in ['production', 'prod', 'live', 'staging']) {
-            throw new IllegalStateException(
-                "Permissive FileTask configuration cannot be used in production environment. " +
-                "ENVIRONMENT=${env}. " +
-                "Use strict() factory method instead."
-            )
-        }
+        // GCU 1.3.0 (D9): the ENVIRONMENT check that used to sit here is gone. It refused this
+        // configuration when a variable said 'production', and an unconfigured FileTask got this
+        // configuration anyway. The control now is that permissive has to be named: an unconfigured
+        // task is strict, and this method, or trusted true on the task, is a visible choice.
         
         log.warn("=" * 80)
         log.warn("⚠️  USING PERMISSIVE FILE TASK CONFIGURATION")
@@ -249,6 +245,27 @@ class FileTaskSecurityConfig {
             .build()
     }
     
+    /**
+     * GCU 1.3.0 (D9): turns the directories a flow names into Files. Accepts File, Path, a path as text,
+     * and collections of those.
+     */
+    static List<File> toDirectories(Object... dirs) {
+        List<File> out = []
+        dirs.each { Object d ->
+            if (d == null) return
+            if (d instanceof Collection) {
+                out.addAll(toDirectories(d as Object[]))
+            } else if (d instanceof File) {
+                out << (File) d
+            } else if (d instanceof java.nio.file.Path) {
+                out << ((java.nio.file.Path) d).toFile()
+            } else {
+                out << new File(d.toString())
+            }
+        }
+        return out
+    }
+
     /**
      * Creates a strict configuration suitable for production.
      * Requires explicit allowedDirectories.

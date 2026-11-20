@@ -226,6 +226,42 @@ class TaskGraphDsl {
     }
 
     /**
+     * GCU 1.3.0 (D3): name local services the HttpTasks of this graph may call.
+     * An HttpTask refuses a local address (localhost, 127.0.0.1, ::1) unless its host and port are
+     * named here or on the task.
+     *
+     * Usage:
+     *   allowLocal 'localhost:8082'
+     *   allowLocal 'localhost:8082', 'localhost:8084'
+     */
+    void allowLocal(Object... hostPorts) {
+        hostPorts.each { entry ->
+            graph.ctx.httpAllowLocal.add(org.softwood.dag.task.HttpTaskSecurityConfig.localEntry(entry))
+        }
+    }
+
+    /**
+     * GCU 1.3.0 (D9): the graph's working directory. A FileTask with no security configuration of its
+     * own is confined to it. Without one, the JVM's working directory is the scope.
+     *
+     * Usage:
+     *   workingDirectory '/var/app/run-42'
+     */
+    void workingDirectory(Object dir) {
+        graph.ctx.workingDirectory = org.softwood.dag.task.FileTaskSecurityConfig.toDirectories(dir)[0]
+    }
+
+    /**
+     * GCU 1.3.0 (D9): further directories the unconfigured FileTasks of this graph may reach.
+     *
+     * Usage:
+     *   allowedDirectories '/var/app/data', '/var/app/incoming'
+     */
+    void allowedDirectories(Object... dirs) {
+        graph.ctx.fileAllowedDirectories.addAll(org.softwood.dag.task.FileTaskSecurityConfig.toDirectories(dirs))
+    }
+
+    /**
      * Create a script task for executing scripts in multiple languages.
      * 
      * Usage:

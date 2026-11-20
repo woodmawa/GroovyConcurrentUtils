@@ -129,6 +129,28 @@ class ActorSystem implements Closeable {
     private ITopic<ActorLifecycleEvent> clusterEventTopic
     private String localNodeName
 
+    /**
+     * GCU 1.3.0 (D10): the actors that may be reached through a remoting transport. Empty by default:
+     * an actor is reachable from outside only once it has been marked, in its builder ({@code remote true})
+     * or with {@link #markRemote}.
+     */
+    private final Set<String> remoteActors = java.util.concurrent.ConcurrentHashMap.<String>newKeySet()
+
+    /** GCU 1.3.0 (D10): allow, or stop allowing, messages from a remoting transport to reach this actor. */
+    void markRemote(String actorName, boolean remote = true) {
+        if (actorName == null) return
+        if (remote) {
+            remoteActors.add(actorName)
+        } else {
+            remoteActors.remove(actorName)
+        }
+    }
+
+    /** GCU 1.3.0 (D10): true if the actor exists and has been marked reachable from outside. */
+    boolean isRemote(String actorName) {
+        return actorName != null && remoteActors.contains(actorName) && registry.contains(actorName)
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Construction
     // ─────────────────────────────────────────────────────────────
@@ -322,6 +344,7 @@ class ActorSystem implements Closeable {
         if (actor) {
             actor.stop()
             registry.unregister(actorName)
+            remoteActors.remove(actorName)
             
             // Unregister from cluster if clustering is enabled
             unregisterActorFromCluster(actorName)

@@ -45,6 +45,7 @@ class RSocketAuthTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -87,6 +88,7 @@ class RSocketAuthTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -128,6 +130,7 @@ class RSocketAuthTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -168,6 +171,7 @@ class RSocketAuthTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -215,6 +219,7 @@ class RSocketAuthTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -272,6 +277,7 @@ class RSocketAuthTest {
         
         serverSystem.actor {
             name 'counter'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 counter.incrementAndGet()
             }

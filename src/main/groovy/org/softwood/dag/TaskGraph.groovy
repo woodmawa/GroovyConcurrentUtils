@@ -939,7 +939,8 @@ class TaskGraph {
             ClusterTaskEvent event = errorMsg ? 
                 new ClusterTaskEvent(taskId, runId, state, localNodeName, errorMsg) :
                 new ClusterTaskEvent(taskId, runId, state, localNodeName)
-            clusterEventTopic.publish(event)
+            // GCU 1.3.0 (D11): signed when the cluster's security configuration asks for signing
+            clusterEventTopic.publish(HazelcastManager.instance.signIfConfigured(event))
             
             log.debug "Published task state to cluster: $event"
             

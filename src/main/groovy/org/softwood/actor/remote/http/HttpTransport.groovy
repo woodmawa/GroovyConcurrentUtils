@@ -78,6 +78,18 @@ class HttpTransport implements RemotingTransport {
     
     /** Client auth token */
     private volatile String clientAuthToken
+
+    /**
+     * GCU 1.3.0 (D10): the address the server listens on. Loopback by default; it used to be every
+     * interface. Set before start().
+     */
+    String bindAddress = org.softwood.actor.remote.RemotingGuard.DEFAULT_BIND_ADDRESS
+
+    /**
+     * GCU 1.3.0 (D10): set true to let the server listen on a non-loopback address with
+     * authentication off. Without it start() refuses.
+     */
+    boolean insecure = false
     
     /**
      * TLS configuration holder.
@@ -161,6 +173,8 @@ class HttpTransport implements RemotingTransport {
     @Override
     void start() {
         if (serverEnabled) {
+            org.softwood.actor.remote.RemotingGuard.checkBind(
+                    scheme(), bindAddress, localPort, authConfig.enabled, tlsConfig.enabled, insecure)
             startServer()
         }
         log.info("HTTP transport started (server=${serverEnabled}, port=${localPort})")
@@ -175,7 +189,7 @@ class HttpTransport implements RemotingTransport {
             
             if (tlsConfig.enabled) {
                 // HTTPS server
-                def httpsServer = HttpsServer.create(new InetSocketAddress(localPort), 0)
+                def httpsServer = HttpsServer.create(new InetSocketAddress(InetAddress.getByName(bindAddress), localPort), 0)
                 
                 // Configure SSL
                 def sslContext = createSSLContext()
@@ -184,10 +198,18 @@ class HttpTransport implements RemotingTransport {
                 server = httpsServer
             } else {
                 // Plain HTTP server
-                server = HttpServer.create(new InetSocketAddress(localPort), 0)
+                server = HttpServer.create(new InetSocketAddress(InetAddress.getByName(bindAddress), localPort), 0)
             }
             
-            server.setExecutor(Executors.newCachedThreadPool())
+            // GCU 1.3.0 (D10): a bounded pool. It was newCachedThreadPool(), a thread per request in
+            // flight with no limit. At the limit the request is handled on the server's own dispatch
+            // thread, which slows acceptance instead of dropping the request.
+            def workers = new java.util.concurrent.ThreadPoolExecutor(
+                    32, 32, 60L, java.util.concurrent.TimeUnit.SECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<Runnable>(256),
+                    new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy())
+            workers.allowCoreThreadTimeOut(true)
+            server.setExecutor(workers)
             
             // POST /actor/{systemName}/{actorName}/tell
             server.createContext("/actor/", new HttpHandler() {
@@ -353,7 +375,8 @@ class HttpTransport implements RemotingTransport {
                 }
             }
             
-            if (localSystem?.hasActor(actorName)) {
+            // GCU 1.3.0 (D10): only an actor marked remote; any other name is answered as not found
+            if (org.softwood.actor.remote.RemotingGuard.addressable(localSystem, actorName)) {
                 localSystem.getActor(actorName).tell(message.payload)
                 sendResponse(exchange, 202, [status: 'accepted'])
                 log.debug("Delivered tell to actor: ${actorName}")
@@ -395,7 +418,7 @@ class HttpTransport implements RemotingTransport {
                 }
             }
             
-            if (localSystem?.hasActor(actorName)) {
+            if (org.softwood.actor.remote.RemotingGuard.addressable(localSystem, actorName)) {
                 def timeoutMs = (message.timeout ?: 5000) as long
                 def reply = localSystem.getActor(actorName)
                     .askSync(message.payload, Duration.ofMillis(timeoutMs))

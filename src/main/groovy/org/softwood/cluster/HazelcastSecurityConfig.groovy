@@ -62,6 +62,14 @@ class HazelcastSecurityConfig {
     // Network Configuration
     boolean disableMulticast = true
     List<String> allowedMembers = []
+
+    /**
+     * GCU 1.3.0 (D11): class-name prefixes the cluster may deserialise with Java serialisation, in
+     * addition to GCU's own cluster classes and Hazelcast's defaults (java, com.hazelcast.).
+     * An application whose task results or actor messages travel through the cluster as its own
+     * classes names their packages here, each ending in a dot: 'com.acme.orders.'.
+     */
+    List<String> serializationAllowedPrefixes = []
     String bindAddress
     int port = 5701
     boolean portAutoIncrement = false
@@ -209,6 +217,7 @@ class HazelcastSecurityConfig {
         Builder messageSigningAlgorithm(String val) { instance.messageSigningAlgorithm = val; this }
         Builder disableMulticast(boolean val) { instance.disableMulticast = val; this }
         Builder allowedMembers(List<String> val) { instance.allowedMembers = val; this }
+        Builder serializationAllowedPrefixes(List<String> val) { instance.serializationAllowedPrefixes = val ?: []; this }
         Builder bindAddress(String val) { instance.bindAddress = val; this }
         Builder port(int val) { instance.port = val; this }
         Builder portAutoIncrement(boolean val) { instance.portAutoIncrement = val; this }

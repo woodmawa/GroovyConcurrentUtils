@@ -49,6 +49,8 @@ class HttpTaskTest {
                 .withBody('{"id": 123, "name": "Alice"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/users/123"
                 method HttpMethod.GET
@@ -71,6 +73,8 @@ class HttpTaskTest {
                 .withBody('{"id": 456, "name": "Bob"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("create") {
                 url "http://localhost:8089/users"
                 method HttpMethod.POST
@@ -96,6 +100,8 @@ class HttpTaskTest {
                 .withBody('{"id": 123, "name": "Alice Updated"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("update") {
                 url "http://localhost:8089/users/123"
                 method HttpMethod.PUT
@@ -118,6 +124,8 @@ class HttpTaskTest {
                 .withStatus(204)))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("delete-user") {
                 url "http://localhost:8089/users/123"
                 method HttpMethod.DELETE
@@ -144,6 +152,8 @@ class HttpTaskTest {
                 .withBody('{"data": "test"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/data"
                 headers {
@@ -171,6 +181,8 @@ class HttpTaskTest {
                 .withBody('{"results": []}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("search") {
                 url "http://localhost:8089/search"
                 queryParams {
@@ -197,6 +209,8 @@ class HttpTaskTest {
                 .withBody('{"data": "protected"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/protected"
                 auth {
@@ -221,6 +235,8 @@ class HttpTaskTest {
                 .withBody('{"data": "protected"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/protected"
                 auth {
@@ -245,6 +261,8 @@ class HttpTaskTest {
                 .withBody("Not Found")))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/notfound"
             }
@@ -266,6 +284,8 @@ class HttpTaskTest {
                 .withBody("Internal Server Error")))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/error"
                 // Disable retries for this test
@@ -302,6 +322,8 @@ class HttpTaskTest {
                 .withBody('{"users": [{"name": "Alice"}, {"name": "Bob"}]}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch") {
                 url "http://localhost:8089/data"
             }
@@ -327,6 +349,8 @@ class HttpTaskTest {
                 .withBody('{"id": 123, "name": "Alice"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("fetch-user") {
                 url "http://localhost:8089/users/123"
             }
@@ -397,6 +421,8 @@ class HttpTaskTest {
                 .withBody('{"name": "Alice", "email": "alice@example.com"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("login") {
                 url "http://localhost:8089/auth/login"
                 method HttpMethod.POST
@@ -436,6 +462,8 @@ class HttpTaskTest {
                 .withBody('{"cookie": "valid"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("set") {
                 url "http://localhost:8089/set-cookie"
                 cookieJar true
@@ -468,6 +496,8 @@ class HttpTaskTest {
                 .withBody('{"cookie": "none"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("expire") {
                 url "http://localhost:8089/expire-cookie"
                 cookieJar true
@@ -501,6 +531,8 @@ class HttpTaskTest {
         def imageBytes = "fake-image-data".getBytes('UTF-8')
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("upload") {
                 url "http://localhost:8089/upload/avatar"
                 method HttpMethod.POST
@@ -531,6 +563,8 @@ class HttpTaskTest {
         def file2 = "document2-content".getBytes('UTF-8')
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("upload-docs") {
                 url "http://localhost:8089/upload/documents"
                 method HttpMethod.POST
@@ -555,6 +589,8 @@ class HttpTaskTest {
                 .withBody('{"status": "received"}')))
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("submit") {
                 url "http://localhost:8089/form/submit"
                 method HttpMethod.POST
@@ -582,6 +618,8 @@ class HttpTaskTest {
         def fileData = "secure-file-content".getBytes('UTF-8')
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("secure-upload") {
                 url "http://localhost:8089/secure/upload"
                 method HttpMethod.POST
@@ -622,6 +660,8 @@ class HttpTaskTest {
         def fileBytes = "my-file-data".getBytes('UTF-8')
         
         def graph = TaskGraph.build {
+        
+            allowLocal 'localhost:8089'   // GCU 1.3.0: a local service is named, or refused
             httpTask("login") {
                 url "http://localhost:8089/auth/login"
                 method HttpMethod.POST

@@ -40,6 +40,16 @@ class ActorBuilder {
         this.name = n
     }
 
+    private boolean remoteActor = false
+
+    /**
+     * GCU 1.3.0 (D10): let messages arriving through a remoting transport reach this actor.
+     * Without it the actor can only be messaged from inside its own system.
+     */
+    void remote(boolean value) {
+        this.remoteActor = value
+    }
+
     void state(Map s) {
         if (s) {
             this.initialState.putAll(s)
@@ -191,6 +201,9 @@ class ActorBuilder {
 
         validate()
         def actor = system.createActor(name, handler, initialState)
+        if (remoteActor) {
+            system.markRemote(name)
+        }
         
         // Apply supervision strategy if set
         if (supervisionStrategy) {

@@ -41,6 +41,7 @@ class RSocketTlsTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -90,6 +91,7 @@ class RSocketTlsTest {
         
         serverSystem.actor {
             name 'counter'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 counter.incrementAndGet()
             }
@@ -136,6 +138,7 @@ class RSocketTlsTest {
         // Setup: TLS-enabled server
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx -> ctx.reply("ECHO: ${msg}") }
         }
         
@@ -172,6 +175,7 @@ class RSocketTlsTest {
         // Setup: Server requiring client certificate (mTLS)
         serverSystem.actor {
             name 'secure'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx -> ctx.reply("SECURE: ${msg}") }
         }
         

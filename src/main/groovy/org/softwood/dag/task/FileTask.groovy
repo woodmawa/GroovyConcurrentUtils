@@ -203,17 +203,56 @@ class FileTask extends TaskBase<Object> {
         this.validator = null  // Reset validator
     }
     
+    // GCU 1.3.0 (D9)
+    private final List<File> namedDirectories = []
+    private boolean trustedTask = false
+
+    /**
+     * Name directories this task may reach, in addition to the default scope. Used when the task has
+     * no securityConfig of its own.
+     *
+     * <pre>
+     * allowedDirectories '/var/app/data', '/var/app/incoming'
+     * </pre>
+     */
+    void allowedDirectories(Object... dirs) {
+        namedDirectories.addAll(FileTaskSecurityConfig.toDirectories(dirs))
+        this.validator = null
+    }
+
+    /**
+     * Remove the path and size limits for this task. Logged when the task runs. Has no effect on a
+     * task that was given a securityConfig: that configuration is then what applies.
+     */
+    void trusted(boolean value) {
+        this.trustedTask = value
+        this.validator = null
+    }
+
     /**
      * Get or create security validator.
+     *
+     * GCU 1.3.0 (D9): a task with no securityConfig is strict, confined to the graph's working
+     * directory (the JVM's if the graph names none) plus the directories named on the graph and on the
+     * task. It used to get the permissive configuration: no path limit, no size limit.
      */
     private FileTaskSecurityValidator getValidator() {
         if (validator == null) {
-            // Create default permissive config if none specified
-            if (securityConfig == null) {
-                log.debug("No security config specified, using permissive defaults")
-                securityConfig = FileTaskSecurityConfig.permissive()
+            FileTaskSecurityConfig effective = securityConfig
+            if (effective == null) {
+                if (trustedTask) {
+                    log.warn("FileTask[${name}]: trusted true - no path or size limits for this task")
+                    effective = FileTaskSecurityConfig.permissive()
+                } else {
+                    List<File> scope = []
+                    scope << (ctx?.workingDirectory ?: new File(System.getProperty('user.dir')))
+                    if (ctx?.fileAllowedDirectories) scope.addAll(ctx.fileAllowedDirectories)
+                    scope.addAll(namedDirectories)
+                    log.debug("FileTask[${name}]: no security config, strict within ${scope.size()} director${scope.size() == 1 ? 'y' : 'ies'}")
+                    effective = FileTaskSecurityConfig.strict(scope)
+                }
             }
-            validator = new FileTaskSecurityValidator(securityConfig)
+            validator = new FileTaskSecurityValidator(effective)
         }
         return validator
     }

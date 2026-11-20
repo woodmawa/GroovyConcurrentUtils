@@ -40,6 +40,7 @@ class HttpTlsTest {
         // Setup: Create echo actor
         serverSystem.actor {
             name 'echo'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 ctx.reply("ECHO: ${msg}")
             }
@@ -89,6 +90,7 @@ class HttpTlsTest {
         
         serverSystem.actor {
             name 'counter'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx ->
                 counter.incrementAndGet()
             }
@@ -135,6 +137,7 @@ class HttpTlsTest {
         // Test that HTTPS scheme is properly recognized
         serverSystem.actor {
             name 'test'
+            remote true   // GCU 1.3.0: reachable through a transport only when marked
             onMessage { msg, ctx -> ctx.reply("ok") }
         }
         

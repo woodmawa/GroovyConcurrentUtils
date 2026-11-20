@@ -3,6 +3,74 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 1.3.0 (2026-11-20): safe defaults for HTTP, files, remote actors and the cluster
+
+Source: release 2 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 6), decisions D3, D9, D10, D11.
+This release changes defaults. Code that relied on the old ones has to say what it needs: see "What you must change".
+Tests: 2169 passing, 0 failing (2132 before, plus 37 in four new specs). All but one of the 37 were run red on 1.2.2; the one that passed is a guard that an unsecured cluster configuration is unchanged.
+
+### What you must change
+
+Only if you use the capability named. The MCP servers (AW, CS, FS) use none of the four in their main source.
+
+1. **`HttpTask` calling a local service.** A URL on `localhost`, `127.0.0.1` or `::1` is refused unless the flow names the host and port: `allowLocal 'localhost:8082'` on the task, or once in the graph for every `HttpTask` in it.
+2. **`HttpTask` calling a host on a private network** (10.x, 172.16-31.x, 192.168.x, link-local, IPv6 unique-local, carrier NAT). Refused. Mark the task `trusted true`, which turns the guard off for that task and is logged. `allowLocal` does not open private networks.
+3. **`HttpTask` following redirects.** Five at most; a sixth fails the task (the last redirect response used to be returned). A redirect that leaves the origin is followed without the task's credentials. A redirect to an address the guard refuses fails the task.
+4. **`FileTask` with no `securityConfig`.** It can now reach only the graph's working directory (the JVM's if the graph names none). Name what else it needs: `allowedDirectories ...` on the task or the graph, `workingDirectory ...` on the graph. A named directory must exist. For the old behaviour, `trusted true` on the task or `securityConfig FileTaskSecurityConfig.permissive()`.
+5. **A remote actor transport started as a server.** It listens on `127.0.0.1`. To be reached from another machine set `transport.bindAddress` before `start()`, and either pass an `AuthConfig` with `enabled` true or set `transport.insecure = true`; without one of those it refuses to start.
+6. **Actors reached through a transport.** Only actors marked remote are delivered to: `remote true` in the actor builder, or `system.markRemote('name')`. Any other actor is answered as not found.
+7. **A cluster started with a `HazelcastSecurityConfig` whose task results or messages are application classes.** Java deserialisation in the cluster is now limited to an allow-list. Name your packages in `serializationAllowedPrefixes`, each ending in a dot.
+8. **`HttpTaskSecurityConfig` with a wildcard host.** `*.example.com` now matches subdomains only. It used to match any host ending in `example.com`, and the bare domain. Add `example.com` itself if you need it.
+
+### Changed
+
+HTTP (D3)
+
+- **`HttpTask` checks where a request is going.** Before every request and every redirect hop: the scheme, then every address the host resolves to. Public hosts pass; loopback needs `allowLocal`; private ranges and multicast are refused; cloud metadata addresses are always refused, named or not. Before 1.3.0 the guard configuration existed and `HttpTask` never called it.
+- **Redirects are followed by `HttpTask` itself**, one hop at a time, so that each is checked. 303, and 301 or 302 on a POST, become a GET with no body. HTTPS to HTTP is not followed.
+- **Credentials stay with the origin.** After a redirect to another scheme, host or port, the task's `auth` settings and its `Authorization`, `Proxy-Authorization` and `Cookie` headers are not sent.
+- New on the task: `allowLocal`, `trusted`, `securityConfig(HttpTaskSecurityConfig)`. New on the graph DSL: `allowLocal`. New: `HttpTaskSecurityConfig.standard()`, `checkRequest(uri, allowLocal)`.
+- A URL the guard refuses is a `SecurityException` and is not retried.
+- `HttpTaskSecurityConfig.permissive()` no longer checks the `ENVIRONMENT` variable.
+
+Files (D9)
+
+- **An unconfigured `FileTask` is strict.** It used to get the permissive configuration: no path limit, no symlink check, no size limit. It now runs under the strict limits (no symlinks followed, 100 MB a file, 1 GB and 10,000 files an operation, depth 50) inside its scope.
+- New on the task: `allowedDirectories`, `trusted`. New on the graph DSL: `workingDirectory`, `allowedDirectories`.
+- `FileTaskSecurityConfig.permissive()` no longer checks the `ENVIRONMENT` variable. It refused when that said production, while an unconfigured task was given the permissive configuration regardless.
+
+Remote actors (D10)
+
+- **Loopback by default.** The HTTP and RSocket server transports bound every interface.
+- **A wider address needs authentication**, or `insecure = true`. Without TLS on a wider address the transport warns.
+- **Only actors marked remote are reachable.** Any actor could be messaged by name. An unmarked actor and a missing one now get the same answer.
+- The HTTP transport's worker pool is bounded (32 threads, a queue of 256, then the dispatch thread). It was unbounded.
+
+Cluster (D11)
+
+- **Task events are signed.** With `messageSigningEnabled` and a key in the security configuration, TaskGraph signs each task event it publishes. `ClusterTaskEvent.sign` and `verify` existed before and nothing called them.
+- **A checked way to receive them.** `HazelcastManager.addTaskEventListener` delivers only events whose signature verifies; unsigned and altered events are dropped and logged. The library has no listener of its own on the topic.
+- **A deserialisation allow-list** with a security configuration: GCU's cluster classes, Hazelcast's defaults, and `serializationAllowedPrefixes`. This is in the open-source edition of Hazelcast.
+- **`initialize` with one argument warns** that the cluster has no security settings. Its behaviour is otherwise unchanged.
+
+### Limits to know
+
+- **The HTTP guard checks resolved addresses, not the socket.** The JDK HTTP client does not expose the address it connected to. The guard checks every address the JVM has just resolved, and the connection then uses the JVM's address cache (30 seconds by default). Running with `networkaddress.cache.ttl=0` removes that protection.
+- **Signing covers the task event topic only.** The shared maps and actor lifecycle events are not signed. A member that has joined can write to them.
+- **The deserialisation filter does not cover the member join handshake.** TLS and member authentication remain Hazelcast Enterprise features. Run a cluster on a network you control; the security controls chapter describes running members over an encrypted private network.
+- All of this reduces what a steered flow can reach. It is not isolation: flows still run inside the JVM.
+
+### Not verified
+
+- No cluster was started: signing and the filter were tested on the manager's methods and the built `Config`. That TaskGraph's published events arrive signed on another member is not tested.
+- The one-argument `initialize` warning has no spec (it needs a running Hazelcast instance on a shared singleton).
+- Of the 36 red tests, 10 were red for the old behaviour itself; 26 were red because the new DSL or API did not exist, which does not prove the old behaviour. For the HTTP guard two mutation checks were run and both were caught (checking only the first hop; sending credentials across origins). No other mutation checks were run.
+- AW and FS have not been run against 1.3.0.
+
+### Documentation
+
+- Security controls chapter: HTTP, files, remote transports and cluster are now "done (1.3.0)", each section rewritten from plan to behaviour. Actors, clustering, TaskGraph security and execution integrity chapters updated.
+
 ## 1.2.2 (2026-11-20): defects in TaskContext, dataflow, actors and tokens; opt-in result redaction
 
 Source: release 1 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 5). Nothing here needs a consumer to change code.

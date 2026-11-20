@@ -1270,6 +1270,9 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                             .attemptNumber(attempt)
                             .executionTimeMs(executionTimeMs)
                             .error(err)
+                            // 1.4.0: say that this failure is final, and why it was not retried
+                            .addMetadata(TaskEvent.WILL_RETRY, false)
+                            .addMetadata(TaskEvent.NOT_RETRIED_BECAUSE, TaskEvent.NOT_RETRIABLE)
                             .graphId(ctx?.globals?.get('graphId'))
                             .runId(ctx?.globals?.get('runId'))
                             .build()
@@ -1277,6 +1280,8 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                             eventDispatcher.emit(failureEvent)
                         }
 
+                        // 1.4.0: the same signal on the exception, for a caller that listens to no events
+                        TaskFailureSignal.attach(err, id, TaskEvent.NOT_RETRIABLE, attempt)
                         throw err  // Throw original exception directly - no wrapping
                     }
 
@@ -1292,6 +1297,8 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                             .attemptNumber(attempt)
                             .executionTimeMs(executionTimeMs)
                             .error(err)
+                            .addMetadata(TaskEvent.WILL_RETRY, false)
+                            .addMetadata(TaskEvent.NOT_RETRIED_BECAUSE, TaskEvent.NO_RETRIES_CONFIGURED)
                             .graphId(ctx?.globals?.get('graphId'))
                             .runId(ctx?.globals?.get('runId'))
                             .build()
@@ -1299,6 +1306,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                             eventDispatcher.emit(failureEvent)
                         }
 
+                        TaskFailureSignal.attach(err, id, TaskEvent.NO_RETRIES_CONFIGURED, attempt)
                         throw err
                     }
 
@@ -1316,11 +1324,14 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                             .runId(ctx?.globals?.get('runId'))
                             .addMetadata('totalTimeMs', totalTimeMs)
                             .addMetadata('retriesExhausted', true)
+                            .addMetadata(TaskEvent.WILL_RETRY, false)
+                            .addMetadata(TaskEvent.NOT_RETRIED_BECAUSE, TaskEvent.RETRIES_EXHAUSTED)
                             .build()
                         if (eventDispatcher) {
                             eventDispatcher.emit(failureEvent)
                         }
 
+                        TaskFailureSignal.attach(exceeded, id, TaskEvent.RETRIES_EXHAUSTED, attempt)
                         throw exceeded
                     }
 
@@ -1334,6 +1345,7 @@ abstract class TaskBase<T> implements IGraphNode<T> {
                         .graphId(ctx?.globals?.get('graphId'))
                         .runId(ctx?.globals?.get('runId'))
                         .addMetadata('isRetrying', true)
+                        .addMetadata(TaskEvent.WILL_RETRY, true)
                         .addMetadata('retryDelayMs', delay)
                         .addMetadata('previousAttemptFailed', err.class.simpleName)
                         .build()

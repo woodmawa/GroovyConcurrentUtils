@@ -631,6 +631,16 @@ class TaskGraph {
             problems << ("dependency cycle involving " + stuck.join(', ')).toString()
         }
 
+        // 1.4.0: a task that can check its own configuration is asked to. A ControlTask compiles its
+        // rule conditions here, so a rule that will not compile stops the graph before anything runs.
+        tasks.each { String tid, ITask t ->
+            if (t instanceof SelfValidating) {
+                ((SelfValidating) t).validationProblems().each { String problem ->
+                    problems << "task '${tid}': ${problem}".toString()
+                }
+            }
+        }
+
         if (problems) {
             throw new IllegalStateException(
                 ("TaskGraph '${id ?: 'unnamed'}' cannot run: " + problems.join('; ')).toString())

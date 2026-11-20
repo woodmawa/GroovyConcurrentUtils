@@ -1,0 +1,9 @@
+# PDF theme for the GroovyConcurrentUtils books (index.adoc and taskgraph.adoc).
+# The asciidoctor-pdf default theme, with the body text at 10pt for printing (the default is 10.5pt).
+# Sizes that the default theme derives from the body size are stated here too, so they follow it.
+extends: default
+base:
+  font-size: 10
+  font-size-large: 12.5
+  font-size-small: 8.5
+  font-size-min: 7.5

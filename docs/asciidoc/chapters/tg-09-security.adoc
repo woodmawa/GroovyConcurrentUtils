@@ -13,13 +13,13 @@ This chapter covers TaskGraph's comprehensive security features including script
 ====
 Parts of this chapter describe the intended design, not what the code enforces. Checked against the source:
 
-* *Script sandboxing is not isolation.* The default base class (`SecureScriptBase`) intercepts only unresolved method and property access on the script object itself. A sandboxed script can still call `"cmd".execute()`, `System.getenv()`, `new File(...)`, `new ProcessBuilder(...)` and `Class.forName(...)`. Scripts in other languages run through JSR-223 with no restriction, `scriptTimeout` is not enforced, and the script is handed the whole `TaskContext`, including `credentials`. Treat every script as trusted code.
-* *`sandboxConfig { ... }` does not exist.* The only controls are `sandboxed true|false` and `customScriptBaseClass`.
-* *`ControlTask` rule conditions* are evaluated as unrestricted Groovy.
+* *Scripts are restricted from 1.4.0.* A `ScriptTask` script is compiled under the script profile: it names only the profile's classes, cannot use `getClass`, `metaClass`, `evaluate` and their relatives, and at run time cannot call into files, URLs, processes, threads or reflection, however it came by them. `scriptTimeout` is enforced, each run gets a new script instance, and `ctx` is a read-only view with no credentials. JavaScript runs with no Java access; any other language needs `trusted true`. It is a reduction inside one JVM, not isolation. The "Script Sandboxing" section below predates this: `sandboxed false` is now only the old spelling of `trusted true`. See <<ch-security-controls>>.
+* *`sandboxConfig { ... }` does not exist.* The controls are `trusted true` on the task, `allow 'files'` and `allow 'http'` on the graph, `scriptTimeout` and `customScriptBaseClass`.
+* *`ControlTask` rule conditions are restricted from 1.4.0.* A condition is one expression from a fixed list of operations, checked when the graph is validated; a condition that throws fails the node; `trusted true` on the task opts out. See <<ch-security-controls>>.
 * *Network security is applied from 1.3.0.* `HttpTask` checks every request and every redirect hop: public hosts are allowed, private networks and cloud metadata are blocked, and a local address is blocked unless the flow names it with `allowLocal 'host:port'`. `trusted true` on a task turns the check off. See <<ch-security-controls>>.
 * *File system security is applied by default from 1.3.0.* `FileTask` validates paths through `FileTaskSecurityValidator`. A task with no `securityConfig` is strict, confined to the graph's working directory plus the directories named with `allowedDirectories`. `FileTaskSecurityConfig.permissive()` has to be named, or the task marked `trusted true`. See <<ch-security-controls>>.
 
-These gaps are tracked in the core hardening brief (WP3 and WP4) and are not closed in 1.2.0. For what a run does guarantee, see the Execution Integrity chapter.
+Network and file access were closed in 1.3.0, and rule conditions and scripts in 1.4.0 (core hardening brief, WP3 and WP4). For what a run does guarantee, see the Execution Integrity chapter.
 ====
 
 TaskGraph implements a "secure by default" architecture with multiple layers of protection:

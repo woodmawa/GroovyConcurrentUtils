@@ -3,6 +3,76 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 1.4.0 (2026-11-20): restricted evaluation for rule conditions and scripts
+
+Source: release 3 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 7), decision D2.
+This release changes defaults. Code that relied on the old ones has to say what it needs: see "What you must change".
+Not in this release: `allow 'sql'`, `allow 'process'` and `ShellTask`. They belong together and follow in a later release; `allow` refuses both names until then.
+Tests: 2648 passing, 0 failing (2169 at 1.3.0, plus 479 in four new specs: 85 in `Hardening140RuleSpec`, 198 in `Hardening140RuleSemanticsSpec`, 9 in `Hardening140FailureSignalSpec`, 187 in `Hardening140ScriptSpec`). The 16 script tests that existed before this release (6 in `ScriptTaskTest`, 10 in `ScriptTaskCustomBaseTest`) pass unchanged: none needed `trusted true`.
+Red first. `Hardening140RuleSpec`: 42 of 85 red on 1.3.0 (38 because the old behaviour was wrong, 4 because `trusted` and the compiler did not exist; the other 43 are conditions inside the profile). `Hardening140ScriptSpec`: 92 of its first 161 red against the 1.3.0 `ScriptTask` (all 51 scripts outside the profile were accepted when the graph was validated, all 13 reaches through a bound object succeeded, `scriptTimeout` was not enforced, a variable leaked from one run to the next); 26 more tests were added after the new `ScriptTask` and have no red run.
+Mutation checks, seven caught: for rules, the method allow-list, the by-type refusal and the by-name refusal; for scripts, the run-time receiver check (17 red), the denied method names (13 red) and the class allow-list (12 red); for the failure signal, attaching it (4 red). One survived and one was blunt: making the script interrupt an `InterruptedException` in place of an `Error` broke no test, because an interrupted script stops either way in every shape tested, so that choice is belt and braces and not proven necessary; replacing the interrupt check altogether broke 108 tests, far more than the timeout tests alone.
+
+### What you must change
+
+Only if you use `ControlTask` or `ScriptTask`. The MCP servers use neither in their main source: agentic-workflow's `control.policy` and `groovy.eval` nodes have their own evaluators and are not changed by this release.
+
+1. **A `ControlTask` condition outside the rule profile.** A `when:` string is now one expression over `input`, `globals` and `memory`: comparisons, boolean logic, arithmetic, `in`, the match operators, the conditional and Elvis operators, literals, property and index access, a cast to a number type, `String` or `Boolean`, the methods `size`, `isEmpty`, `contains`, `containsKey`, `startsWith`, `endsWith`, `matches`, `toString`, `toLowerCase`, `toUpperCase`, `trim`, and `Math`. Anything else (`new`, a closure, an assignment, any other method, any other name) stops the graph when it is validated, naming the task and the rule. Rewrite the condition, or mark the task `trusted true`.
+2. **A condition that could throw.** It now fails the task. It used to be read as false, so the next rule or the default applied. Where a value may be absent, say so in the condition: `input.items?.size() > 0`.
+3. **A condition that read a property named `class`, `metaClass`, `classLoader`, `declaringClass`, `protectionDomain`, `properties` or `metaPropertyValues`.** Refused by name. For a map entry with one of those names use the index form: `input['properties']`.
+4. **A `ControlTask` with a retry policy.** A failed `ControlTask` is no longer retried.
+5. **A `ScriptTask` script that names a class outside the script profile**: `File`, `URL`, `Thread`, `ProcessBuilder`, `Class`, another script engine, `System` beyond the clock. The graph refuses to start and names the task. Grant the graph `allow 'files'` or `allow 'http'` and use the `files` and `http` helpers, move the work to a `FileTask` or `HttpTask`, or mark the task `trusted true`.
+6. **A script that uses `with`, `tap`, `use`, `getClass`, `metaClass`, `invokeMethod`, `evaluate`, `binding`, `execute` or `toURL`**, a method pointer (`.&`), `.@`, `super`, `synchronized`, a computed method or property name, a class definition, a static import, an import alias, or any annotation but `@Field`. Refused when the graph is validated. Rewrite it, or mark the task `trusted true`.
+7. **A script that reads an object's property by index**: `order['total']`. Write `order.total`. Maps and lists index as before.
+8. **A script that uses `ctx` as the `TaskContext`.** In a restricted script `ctx` is a read-only view: `ctx.globals` is a copy that cannot be changed, and there are no credentials, pool or graph. Return the value for a later task to store, pass what the script needs through `bindings`, or mark the task `trusted true`.
+9. **A script that calls `parse(...)` on a JSON, XML or YAML slurper.** Refused in a restricted script, because `parse` reads a file or an address. Use `parseText(...)`.
+10. **A script that relied on what an earlier run left behind**: an undeclared variable set in one run and read in the next. Each run now has its own script instance and binding.
+11. **A script with a `scriptTimeout`.** It is now enforced. A script that runs longer fails its task with a `TimeoutException`.
+12. **A script in JavaScript.** It no longer has `Java.type`, `Packages` or reflection, and it gets a new engine each run, so nothing carries over in the engine.
+13. **A script in any other language.** It needs `trusted true`, or the graph refuses to start.
+14. **A `ScriptTask` with no script.** The graph refuses to start. It used to fail when the task ran.
+
+`sandboxed false` needs no change: it still works and now means `trusted true`. It no longer refuses when the `ENVIRONMENT` variable says production.
+
+### Changed
+
+Rule conditions (D2, step 1)
+
+- **A `ControlTask` condition is compiled under a rule profile.** Before 1.4.0 it was handed to a Groovy shell and could do anything the process could. New `org.softwood.dag.script.RestrictedCompiler.compileRule(text)` parses the condition, checks it against an allow-list and returns a `RuleExpression`.
+- **A rule is never compiled to a class.** `RuleExpression` walks the checked expression and does each property read, index and method call itself, checking the object reached: by name (`class`, `metaClass` and relatives) and by type (classes, class loaders, reflection, files, paths, URLs, processes, threads, closures, anything closeable, the graph's context). A refusal is a `SecurityException`. This also ends the class loaded per rule per run.
+- **A bad rule stops the graph before it runs.** New `org.softwood.dag.task.SelfValidating`; `TaskGraph.validate()` asks every task that implements it and reports every problem in one error. `ControlTask` implements it.
+- **A condition that throws fails the node.**
+- **`globals` is a read-only copy** for a restricted rule.
+- **A rule is parsed once** and reused by every task and run that has the same text.
+- New on the task: `trusted true`, which evaluates conditions as unrestricted Groovy against the live globals and logs a warning each run. A trusted condition is compiled once per task, must still compile for the graph to start, and still fails the node if it throws.
+- `ControlTask` no longer writes its input or its rule maps to the log.
+- **A rule inside the profile means what the same Groovy expression means.** `Hardening140RuleSemanticsSpec` evaluates 198 expressions twice, by the rule profile and by a plain Groovy shell against the same values, and requires the same value of the same type, or a failure in both. It covers map entries (whatever their name), getters, boolean getters, public fields, `propertyMissing`, `Expando`, enums, dates, lists, sets and arrays (`list.empty`, `list.first`, a property read from each element, negative and out-of-range indexes, `array.length`), text, mixed number types, `null` on either side of every operator, Groovy truth, `in` on lists, arrays, maps and text, the match operators, literals and `Math`. Writing it found seventeen differences in the first build of the profile, all corrected: for example `list.empty` was read from each element, `'key' in map` followed the Groovy 4 meaning and not Groovy 6's, and `text + null` failed.
+- Known and deliberate differences from Groovy, all of them a refusal where Groovy would go on: methods outside the list; `globals` is a map copy, so `globals.keys` and `globals.all` are entries and not the binding's own getters; a list cannot be indexed by a range or a list; `-`, `*` and `/` on anything but numbers (`text * count` is allowed); `=~` gives a matcher that can only be read as true or false.
+
+Scripts (D2, steps 2 to 4)
+
+- **A `ScriptTask` script is compiled under a script profile.** Before 1.4.0 the "sandbox" was a script base class that could stop only a bare `execute()`: a script could run a process, read the environment, open a file and use reflection. New `RestrictedCompiler.compileScript(source, baseClass, loader)`, done by `ScriptCompiler` with the tables in `ScriptProfile`.
+- **Checked before anything runs.** The only annotation is `@Field`, checked before the compiler acts on any annotation, so `@Grab` and `@ASTTest` never run. No class definitions, static imports or import aliases. Every class the script names must be in the profile. The deny lists of method and property names apply to everything, the script itself included. A class is used only through its public static members. `ScriptTask` implements `SelfValidating`, so all of this fails `TaskGraph.validate()`.
+- **Checked while it runs.** The compiler wraps the receiver of every call, property read or write, index and `<<`, and whatever is iterated, spread, cast or taken apart by a multiple assignment, in a `ScriptGuard` check of the object actually reached. A file, path, URL, process, thread, class loader, reflection object, anything closeable, or a class held as a value is refused with a `SecurityException`.
+- **Groovy's meaning is kept.** The check returns the receiver and Groovy makes the call. `Hardening140ScriptSpec` runs 75 scripts both restricted and as plain Groovy and requires the same result.
+- **`ctx` is a read-only view** (`ScriptContextView`): `globals`, `get(name)`, `taskId`.
+- **A new script instance and binding for every run**; the class is compiled once per task. Before 1.4.0 one instance was shared, so concurrent runs overwrote each other's variables.
+- **`scriptTimeout` is enforced.** With one set, the script runs on its own thread; at the limit the task fails with a `TimeoutException` and the thread is interrupted. A restricted script has an interrupt check on every loop pass, method and closure, throwing `ScriptInterruptedError`.
+- **A refusal is not retried** and is a permanent failure.
+- **Level 2.** New graph word `allow 'files'`, `allow 'http'` (`TaskContext.scriptCapabilities`). `files` (`ScriptFiles`) reads and writes text under the unconfigured-`FileTask` rules; `http` (`ScriptHttp`) makes requests the `HttpTask` guard accepts and does not follow redirects.
+- **Level 3.** New on the task: `trusted true`: plain Groovy and the `TaskContext`, logged each run. `sandboxed` is kept as the old word; the `ENVIRONMENT` check is gone.
+- **Other languages.** JavaScript on Nashorn with `--no-java` and a class filter that exposes nothing (`RestrictedJavaScript`). Any other language only with `trusted true`. Script engines are no longer cached and shared between tasks.
+- `customScriptBaseClass` still works: its public methods are callable by name and the script is still compiled under the profile.
+- New classes in `org.softwood.dag.script`: `ScriptCompiler`, `ScriptProfile`, `ScriptGuard`, `ScriptCompilationException`, `ScriptInterruptedError`, `ScriptContextView`, `ScriptFiles`, `ScriptHttp`, `RestrictedJavaScript`.
+
+Failure signalling
+
+- **A failed task says whether it will run again, and if not, why.** A `TASK_FAILED` event has always been final for the task's own retry policy, but nothing in it said so, or told a failure that retrying cannot fix from one that ran out of attempts. The event's `metadata` now carries `willRetry: false` and `notRetriedBecause`: `not-retriable` (a refusal, a bad configuration, a timeout: another attempt gives the same failure), `no-retries-configured`, or `retries-exhausted`. A `TASK_RETRYING` event carries `willRetry: true`. The existing `retriesExhausted` key is unchanged.
+- New: `TaskEvent.isPermanentFailure()`, true for a failed event marked `not-retriable`; constants `TaskEvent.WILL_RETRY`, `NOT_RETRIED_BECAUSE`, `NOT_RETRIABLE`, `NO_RETRIES_CONFIGURED`, `RETRIES_EXHAUSTED`. Whatever drives a graph should not re-run a task, or a scope that contains it, unchanged after a permanent failure. Every `ControlTask` failure is one.
+- **The same signal is on the exception.** New `TaskFailureSignal`: `TaskFailureSignal.of(exception)` gives the task id, `notRetriedBecause`, the number of attempts and `permanent`, or null when no task marked the exception; `TaskFailureSignal.isPermanent(exception)` is the short form. It is for a caller that awaits the graph's promise and listens to no events. The exception a task throws keeps its type and nothing is wrapped: the signal travels as a suppressed exception, so it also shows as a `Suppressed:` line in a printed stack trace.
+- Not covered: a JVM-level error (out of memory, linkage) carries neither the new keys nor the signal; an exception built with suppression switched off cannot carry the signal, though its event still does.
+
+Not isolation. A rule can call the getters and `toString()` of the objects it is given. A script can call any public method of an object in its bindings and can pass any object it holds to a method it may call. Beyond the profile's classes the by-type list is a deny-list. There is no memory limit. Work a script starts elsewhere (`Promises`, a parallel stream) is not stopped by its timeout, a JavaScript loop is abandoned and not stopped, and a slow regular expression is not interrupted. See the security controls chapter.
+
 ## 1.3.0 (2026-11-20): safe defaults for HTTP, files, remote actors and the cluster
 
 Source: release 2 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 6), decisions D3, D9, D10, D11.

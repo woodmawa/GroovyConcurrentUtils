@@ -43,8 +43,10 @@ one way.
 deliberate statement in the flow, visible to a reviewer.
 |===
 
-Version {gcu-version} does not implement these levels yet. The sections below say what each
-area does now.
+Version {gcu-version} implements all three levels for `ControlTask` rule conditions and
+`ScriptTask` scripts, with the capabilities `files` and `http`. `allow 'sql'`,
+`allow 'process'` and the `ShellTask` they depend on are not built yet. The sections below
+say what each area does now.
 
 == Status at Version {gcu-version}
 
@@ -53,26 +55,29 @@ area does now.
 | Control | Today | Agreed design | Release
 
 | Script tasks (`ScriptTask`)
-| *Not restricted.* The `sandboxed` flag does not stop a script running a process, reading
-the environment, touching files or using reflection.
-| Restricted statement language by default; named capabilities; `trusted true` to opt out.
+| Enforced from 1.4.0. Restricted by default: a script names only the classes of the script
+profile, and at run time cannot call into files, URLs, processes, threads or reflection.
+`allow 'files'` and `allow 'http'` per graph; `trusted true` opts out.
+| As built, less `allow 'sql'` and `allow 'process'`. Not isolation: see below.
 | 1.4.0
 
 | Rule conditions (`ControlTask`)
-| *Not restricted.* A `when:` string is evaluated as full Groovy. A condition that throws is
-treated as false.
-| Expressions only, from a fixed list of operations. A condition that throws fails the node.
+| Enforced from 1.4.0. A `when:` string is one expression from a fixed list of operations;
+anything else stops the graph when it is validated. A condition that throws fails the node.
+`trusted true` opts out.
+| As built. Not isolation: see below.
 | 1.4.0
 
 | Other script languages
-| JavaScript and any installed JSR-223 language run with no restriction.
-| JavaScript with no Java access by default. Jython and JRuby trusted only.
+| Enforced from 1.4.0. JavaScript runs with no Java access. Any other language runs only
+with `trusted true`.
+| As built.
 | 1.4.0
 
 | Shell commands
-| Not available as a task.
+| Not available as a task. A restricted script cannot start a process.
 | A `ShellTask`, off by default, with directory, environment, timeout and executable limits.
-| 1.4.0
+| planned
 
 | HTTP calls (`HttpTask`)
 | Enforced from 1.3.0. Public hosts allowed; private networks blocked; a local address only
@@ -130,30 +135,78 @@ what changes.
 
 == Scripts and Rule Conditions
 
-*Today.* Treat every `ScriptTask` body and every `ControlTask` `when:` string as code with
-the full rights of the process. Do not build either from text that came from outside the
-flow: not from a task result, a file, an HTTP response or a model's output. Pass such values
-in as data through the bindings and keep the script text fixed. The `sandboxed` setting
-should not be relied on.
+*Rule conditions, from 1.4.0.* A `ControlTask` `when:` string is one expression over `input`
+(the upstream result), `globals` (a read-only copy of the graph's globals) and `memory`.
+It may use:
 
-*Agreed design (1.4.0).* One restricted compiler, used two ways.
+* literals, list and map literals, and strings with `${}` values;
+* `+== != === !== < <= > >= <=>+`, `&& || !`, `+ - * / % **`, `in` and `!in`, the match
+  operators `==~` and `=~`, the conditional operator and the Elvis operator;
+* property and index access, with `?.`;
+* the methods `size`, `isEmpty`, `contains`, `containsKey`, `startsWith`, `endsWith`,
+  `matches`, `toString`, `toLowerCase`, `toUpperCase` and `trim`, and the functions and
+  constants of `Math`;
+* a cast or `as` to a number type, `String` or `Boolean`.
 
-Rule conditions are expressions only: comparisons, boolean logic, arithmetic, literals, and
-property and index access on the bound values, plus a fixed list of methods (`size`,
-`isEmpty`, `contains`, `containsKey`, `startsWith`, `endsWith`, `matches`, `toString`,
-`toLowerCase`, `toUpperCase`, `trim`, and `Math` functions). No object creation, imports,
-closures, loops or assignments.
+Inside that list an expression means what it means in Groovy. A property of a map is the
+entry of that name; a property of an object is its getter, public field or
+`propertyMissing`; a property of a list is the list's own (`empty`, `first`, `last`) or else
+that property of each element; indexes may be negative; `?.` stops at a null; truth, number
+arithmetic across types, comparison with `null`, and `in` on a list, array, map or text all
+follow Groovy 6. A test holds the rule profile and Groovy side by side on
+some two hundred expressions and requires the same value, or a failure in both.
 
-Scripts get a restricted statement language: variables, conditionals, loops, closures, and
-collection and string methods, with these packages available:
+Where the profile differs it refuses: `-`, `*` and `/` take numbers only (`text * count` is
+allowed); a list is not indexed by a range; `globals` is a plain map, so the binding's own
+getters such as `globals.keys` are not there.
+
+Nothing else: no object creation, imports, closures, loops, assignments, definitions or any
+other method.
+
+How it is enforced:
+
+* The condition is parsed and checked against that list when the graph is validated
+  (`TaskGraph.validate()`, which `start()` calls). A condition that does not parse, names
+  something it is not given, or uses anything outside the list stops the graph before any
+  task runs. Every bad rule is named in the one error.
+* A condition is never compiled to a class or run as a script. GCU walks the checked
+  expression itself, so each property read, index and method call is checked again against
+  the object actually reached. `class`, `metaClass`, `classLoader`, `properties` and their
+  relatives are refused by name. Classes, class loaders, reflection objects, files, paths,
+  URLs, processes, threads, closures, anything closeable and the graph's own context are
+  refused by type. A refusal is a `SecurityException` and fails the node.
+* A property of a map is the entry of that name, never a method of the map.
+* A condition that throws fails the node. Before 1.4.0 it was read as false, and the next
+  rule or the default applied.
+* A rule is parsed once and the result reused by every task and run. A failed `ControlTask`
+  is not retried: the same input gives the same failure. Its `TASK_FAILED` event says so:
+  `metadata.notRetriedBecause` is `not-retriable` and `isPermanentFailure()` is true, so
+  whatever drives the graph can tell not to run it again unchanged.
+* `trusted true` on the task evaluates its conditions as unrestricted Groovy against the
+  live globals, as every `ControlTask` did before 1.4.0. It logs a warning each run.
+
+What it does not do. It is a reduction inside one JVM, not isolation:
+
+* A rule can call the getters and `toString()` of the objects it is handed. Do not put an
+  object whose getters have side effects where a rule can reach it.
+* A pattern given to `matches`, `==~` or `=~` can be slow on hostile text, and a rule has
+  no timeout of its own.
+* The by-type list is a deny-list. An object of a type not on it is readable.
+
+*Scripts, from 1.4.0.* A `ScriptTask` script is restricted unless its task says
+`trusted true`. A restricted Groovy script is a statement language: variables, conditionals,
+loops, closures, its own methods, `@Field`, and the collection, text, number and date
+methods of Groovy and Java, with these classes available by name:
 
 [cols="1,3",options="header"]
 |===
 | Area | Available to a restricted script
 
 | Core Java
-| `java.lang` value types, `Math`, `StringBuilder`; `java.util` with `function`, `stream`
-and `regex`; `java.time`; `java.math`; `java.text`; `java.nio.charset`
+| `java.lang` value types, `Math`, `StringBuilder`, the common exceptions (to throw and to
+catch; not `Throwable` or `Error`), and of `System` only the clock; `java.util` with
+`function`, `stream` and `regex` (less `Formatter`, `Scanner`, `Timer`, `ServiceLoader` and
+`ResourceBundle`); `java.time`; `java.math`; `java.text`; `java.nio.charset`
 
 | Concurrency data types
 | `java.util.concurrent` collections, `TimeUnit`, `atomic`. No threads or executors.
@@ -162,32 +215,91 @@ and `regex`; `java.time`; `java.math`; `java.text`; `java.nio.charset`
 | `UUID`, `Base64`, `URI`, `URLEncoder`, `URLDecoder`, `MessageDigest`
 
 | Groovy
-| `groovy.json`, `groovy.xml`, `groovy.yaml`, and the data-class annotations in
-`groovy.transform`
+| `groovy.json`, `groovy.xml`, `groovy.yaml` (their `parseText`, not `parse`); closures,
+ranges, tuples, `Expando`; the `@Field` annotation and no other
 
 | This library
 | `Promise`, `Promises`, `Gstream`
 |===
 
-Capabilities add to that list: `allow 'files'` under the file control, `allow 'http'` under
-the HTTP control, `allow 'sql'` for a datasource named in the context, `allow 'process'`
-under the shell control.
+How it is enforced:
 
-Refused whatever is granted: reflection and classloaders; `GroovyShell`, `Eval` and the
-template engines, because they compile new code; `System` apart from the clock; threads and
-executors; and the JDK's internal packages.
+* *When the graph is validated.* The script is compiled, and the graph refused with the task
+  named, if the script:
+** names a class outside the table. `File`, `URL`, `Thread`, `ProcessBuilder`, `Class`,
+   `GroovyShell` and `Eval` cannot be written at all: not in a `new`, a cast, a declaration,
+   a `catch` or an import;
+** defines a class, or uses a static import, an import alias, or any annotation but
+   `@Field`. Annotations are checked before the compiler acts on any of them, so `@Grab`
+   and `@ASTTest` never run;
+** uses, on anything, one of the names in the profile's deny lists: `getClass`,
+   `metaClass`, `invokeMethod`, `evaluate`, `binding`, `with`, `tap`, `use`, `execute`,
+   `toURL` and their relatives;
+** computes a method or property name, or uses a method pointer, `.@`, `super` or
+   `synchronized`;
+** uses a class for anything but its public static members: `String.format` yes,
+   `String.classLoader` no.
+* *While the script runs.* The compiler wraps the receiver of every method call, property
+  read or write, index and `<<`, and whatever is iterated, spread or cast, in a check of the
+  object actually reached. Text, numbers, collections, maps, closures and instances of the
+  classes in the table pass. A class held as a value, a class loader, a reflection object, a
+  file, path, URL, process, thread or anything closeable is refused with a
+  `SecurityException`, however the script came by it. A `File` in the bindings can be passed
+  on, but not read, written, listed or iterated.
+* *Groovy's meaning is kept.* The check returns the receiver and Groovy still makes the
+  call, so a script inside the profile does what the same Groovy does. A test runs some
+  seventy-five scripts both ways and compares the results.
+* *The context.* `ctx` and `context` are a read-only view: `ctx.globals` (a copy that cannot
+  be changed), `ctx.get(name)` and `ctx.taskId`. No credentials, pool or graph.
+* *Each run* gets a new script instance and a new binding. The script is compiled once per
+  task.
+* *`scriptTimeout` is enforced.* The script runs on its own thread; when the time is up the
+  task fails with a `TimeoutException` and that thread is interrupted. A restricted script
+  checks for interruption on every loop pass, method and closure, and so stops.
+* *A refusal is not retried*, and the failure is marked permanent
+  (`TaskFailureSignal.isPermanent`).
+* *`customScriptBaseClass` still works.* The base class's public methods are callable from
+  the script by name. The script is still compiled under the profile.
 
-At run time each execution gets its own script instance, the script timeout is enforced,
-and the script sees a read-only view of the context in place of the whole of it, so
-credentials and the pool are out of reach. A rule that does not compile under the profile
-fails when the graph is validated, before anything runs.
+Capabilities (level 2) are granted per graph:
+
+* `allow 'files'` binds `files`: `read`, `readLines`, `write`, `append`, `exists`, `size`
+  and `list`, on text, under the rules of an unconfigured `FileTask`: inside the graph's
+  working directory and its `allowedDirectories`, no symbolic links, the size limits.
+* `allow 'http'` binds `http`: `get`, `post`, `put` and `delete`, each returning `status`,
+  `body` and `headers`. Every address goes through the `HttpTask` guard, a local service
+  needs `allowLocal`, and a redirect is returned, not followed.
+* `allow 'sql'` and `allow 'process'` are refused in this version.
+
+`trusted true` (level 3) compiles the script as plain Groovy and hands it the `TaskContext`
+itself, as every script had before 1.4.0, and logs a warning each run. `sandboxed false` is
+the old spelling of the same thing. It no longer reads the `ENVIRONMENT` variable.
+
+Other languages. JavaScript runs on Nashorn started with no Java access and a class filter
+that exposes nothing, in a new engine for every run. Any other JSR-223 language runs only
+with `trusted true`; without it the graph fails validation. A JavaScript loop cannot be
+interrupted: on timeout the task fails and the run is abandoned.
+
+What it does not do. It is a reduction inside one JVM, not isolation:
+
+* A script can call any public method of an object the flow puts in its bindings, and can
+  pass any object it holds to a method it is allowed to call. Bind data, or objects you
+  would let the script drive.
+* Beyond the table the by-type list is a deny-list. An object of a type on neither list can
+  be used.
+* There is no memory limit. A script can build a very large collection.
+* Work a script starts elsewhere (`Promises`, a parallel stream) is not stopped by its
+  timeout, and a slow regular expression is not interrupted.
+* `with`, `tap` and `use` are refused, and an object's properties cannot be read by index:
+  write `order.total`, not `order['total']`. Maps and lists index as usual.
+* `println` writes to standard output. In a process that speaks a protocol there, use `log`.
 
 == Shell Commands
 
-*Today.* The library has no task that runs an operating-system command. A script can start
-a process only because scripts are unrestricted.
+*Today.* The library has no task that runs an operating-system command. A restricted script
+cannot start a process; a `trusted true` script can, as any Groovy can.
 
-*Agreed design (1.4.0).* A `ShellTask` for PowerShell, bash, cmd and a real Python
+*Agreed design (not yet built).* A `ShellTask` for PowerShell, bash, cmd and a real Python
 interpreter. It runs a separate process, which cannot touch the graph or the context in
 memory, and it is off unless the graph grants `allow 'process'`. Its limits:
 
@@ -384,9 +496,8 @@ which has to be real for the flow to work. Exception messages are not passed thr
 
 == Using the Library Safely at Version {gcu-version}
 
-Until the releases above land:
-
-. Keep script bodies and rule conditions fixed in the flow. Pass outside values in as data.
+. Keep script bodies and rule conditions fixed in the flow, and pass outside values in as
+  data, even now that both are restricted. Keep `trusted true` for scripts you wrote.
 . Name the directories a `FileTask` needs; do not reach for `trusted true` to get past the
   default scope.
 . Name local services with `allowLocal`; keep `trusted true` on an `HttpTask` for hosts on a

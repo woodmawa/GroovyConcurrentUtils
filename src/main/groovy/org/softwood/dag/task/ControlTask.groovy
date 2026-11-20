@@ -1,7 +1,12 @@
 package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
+import org.codehaus.groovy.runtime.InvokerHelper
+import org.softwood.dag.script.RestrictedCompiler
+import org.softwood.dag.script.RuleCompilationException
 import org.softwood.promise.Promise
+
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * A DAG task that applies a declarative policy to structured upstream results
@@ -12,49 +17,56 @@ import org.softwood.promise.Promise
  * deterministic, auditable rules to that assessment. This keeps routing
  * reproducible and inspectable.</p>
  *
- * <h3>Policy rule format (set by FlowBuilder from FlowDescriptor params):</h3>
+ * <h3>Policy rule format:</h3>
  * <pre>
- *   params.policy.rules = [
+ *   rules = [
  *     [when: "input.confidence < 0.75", action: "ESCALATE", reason: "Low confidence"],
  *     [when: "input.riskLevel == 'high'", action: "ROUTE",    target: "rollback-branch"],
  *     [when: "input.healthy == true",    action: "CONTINUE"],
  *   ]
- *   params.policy.default = [action: "ESCALATE", reason: "No rule matched"]
+ *   defaultRule = [action: "ESCALATE", reason: "No rule matched"]
  * </pre>
  *
  * <p>Rules are evaluated in declaration order. The first rule whose {@code when}
- * condition evaluates to {@code true} (Groovy expression against a binding that
- * has {@code input} = upstream node result, {@code globals} = ctx.globals,
- * {@code memory} = working memory) produces the action. If no rule matches,
- * {@code policy.default} is used.</p>
+ * condition is true produces the action. If no rule matches, {@code defaultRule} is used.</p>
+ *
+ * <h3>What a condition may say (1.4.0, decision D2):</h3>
+ * <p>A condition is one expression over {@code input} (the upstream result), {@code globals}
+ * (a read-only copy of the graph's globals) and {@code memory} (working memory). It is compiled
+ * under the rule profile of {@link RestrictedCompiler}: comparisons, boolean logic, arithmetic,
+ * literals, property and index access, a fixed list of methods and {@code Math}. Nothing else:
+ * no {@code new}, no closures, no assignment, no other method.</p>
+ * <ul>
+ *   <li>A condition that does not compile fails {@code TaskGraph.validate()}, so the graph does not start.</li>
+ *   <li>A condition that throws while it is evaluated fails this task. Before 1.4.0 it was read as false
+ *       and the next rule, or the default, applied.</li>
+ *   <li>{@code trusted true} on the task evaluates conditions as unrestricted Groovy, with the live
+ *       globals, as before 1.4.0. It is logged each time the task runs.</li>
+ * </ul>
+ * <p>The profile is a reduction, not isolation: see {@link RestrictedCompiler}.</p>
  *
  * <h3>Input resolution:</h3>
  * <p>When {@link #inputNodeId} is set, {@code input} is resolved from
  * {@code workingMemory.resultsByNode[inputNodeId].value}. Otherwise {@code input}
  * is the raw {@code prevResult} passed by the DAG.</p>
  *
- * <h3>Result:</h3>
- * <p>The {@link ControlAction} is stored as the task result. The server-side
- * {@code FlowExecutionService} reads it from the {@code TaskEvent.result} to
- * decide graph routing.</p>
- *
  * <h3>Effect class:</h3>
- * PURE – pure function; safe to retry.
+ * PURE: no side effects. A failure is never retried, because the same input gives the same failure.
  */
 @Slf4j
-class ControlTask extends TaskBase<ControlAction> {
+class ControlTask extends TaskBase<ControlAction> implements SelfValidating {
 
     // -------------------------------------------------------------------------
-    // Config (set by server factory after construction)
+    // Config (set after construction)
     // -------------------------------------------------------------------------
 
     /**
      * Ordered list of policy rules. Each rule is a Map with keys:
      * <ul>
-     *   <li>{@code when}   – Groovy boolean expression string (required)</li>
-     *   <li>{@code action} – One of: CONTINUE, ROUTE, RETRY_SCOPE, ESCALATE, ABORT (required)</li>
-     *   <li>{@code target} – Branch name or scopeId (required for ROUTE / RETRY_SCOPE)</li>
-     *   <li>{@code reason} – Human-readable description (optional; used for ESCALATE / ABORT)</li>
+     *   <li>{@code when}: the condition, one expression (required)</li>
+     *   <li>{@code action}: one of CONTINUE, ROUTE, RETRY_SCOPE, ESCALATE, ABORT (required)</li>
+     *   <li>{@code target}: branch name or scopeId (required for ROUTE / RETRY_SCOPE)</li>
+     *   <li>{@code reason}: human-readable description (optional; used for ESCALATE / ABORT)</li>
      * </ul>
      */
     List<Map<String, Object>> rules = []
@@ -73,9 +85,16 @@ class ControlTask extends TaskBase<ControlAction> {
     String inputNodeId = null
 
     /**
-     * The effect class for this task type – always PURE.
+     * The effect class for this task type: always PURE.
      */
     final EffectClass effectClass = EffectClass.PURE
+
+    /** 1.4.0: true when the flow has said this task's conditions are unrestricted Groovy. */
+    private boolean trustedTask = false
+
+    /** Trusted conditions, compiled once each to a script class. */
+    private final Map<String, Class> trustedScripts = new ConcurrentHashMap<String, Class>()
+    private GroovyClassLoader trustedLoader
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -85,47 +104,80 @@ class ControlTask extends TaskBase<ControlAction> {
         super(id, name, ctx)
     }
 
+    /**
+     * 1.4.0: {@code trusted true} evaluates this task's conditions as unrestricted Groovy against the
+     * live globals, as every ControlTask did before 1.4.0. The same word, with the same meaning, as on
+     * HttpTask and FileTask. It is logged each time the task runs.
+     */
+    void trusted(boolean value) {
+        this.trustedTask = value
+    }
+
+    boolean isTrusted() {
+        return trustedTask
+    }
+
+    // -------------------------------------------------------------------------
+    // Validation (1.4.0): compile every condition before the graph runs
+    // -------------------------------------------------------------------------
+
+    @Override
+    List<String> validationProblems() {
+        List<String> problems = []
+        for (Map<String, Object> rule : rules) {
+            String condition = rule?.get('when')?.toString()
+            if (!condition) continue
+            try {
+                compile(condition)
+            } catch (RuleCompilationException e) {
+                problems << "rule [${shorten(condition)}] ${e.message}".toString()
+            } catch (Exception e) {
+                problems << "rule [${shorten(condition)}] does not compile".toString()
+            }
+        }
+        return problems
+    }
+
+    /** A failure here is the same on every attempt. */
+    @Override
+    protected boolean isRetriable(Throwable err) {
+        return false
+    }
+
     // -------------------------------------------------------------------------
     // Core execution
     // -------------------------------------------------------------------------
 
     @Override
     protected Promise<ControlAction> runTask(TaskContext ctx, Object prevResult) {
-        // Synchronous policy evaluation — wrap in resolved promise
-        // 1. Resolve the input value
+        // Synchronous policy evaluation, wrapped in a resolved promise
         Object input = resolveInput(ctx, prevResult)
-        log.debug "ControlTask '${id}': evaluating ${rules.size()} rule(s) against input=${input}"
+        log.debug "ControlTask '${id}': evaluating ${rules.size()} rule(s)"
 
-        // 2. Build evaluation binding
         Map<String, Object> memory = resolveWorkingMemory(ctx)
-        Binding binding = new Binding([
-            input  : input,
-            globals: ctx?.globals ?: [:],
-            memory : memory
-        ])
+        Map<String, Object> variables
+        if (trustedTask) {
+            log.warn("ControlTask($id): trusted true - rule conditions run as unrestricted Groovy")
+            variables = [input: input, globals: (ctx?.globals != null ? ctx.globals : [:]), memory: memory]
+        } else {
+            variables = [input: input, globals: readOnlyGlobals(ctx), memory: memory]
+        }
 
-        // 3. Evaluate rules in order
         ControlAction result = null
         for (Map<String, Object> rule : rules) {
-            String condition = rule.when?.toString()
+            String condition = rule?.get('when')?.toString()
             if (!condition) {
-                log.warn "ControlTask '${id}': rule has no 'when' condition, skipping: ${rule}"
+                log.warn "ControlTask '${id}': rule has no 'when' condition, skipping"
                 continue
             }
-            try {
-                Object condResult = new GroovyShell(binding).evaluate(condition)
-                if (condResult) {
-                    result = buildAction(rule)
-                    log.info "ControlTask '${id}': rule matched [${condition}] -> ${result}"
-                    break
-                }
-            } catch (Exception e) {
-                log.warn "ControlTask '${id}': rule condition '${condition}' threw: ${e.message} — treating as false"
+            if (evaluate(condition, variables)) {
+                result = buildAction(rule)
+                log.info "ControlTask '${id}': rule matched [${shorten(condition)}] -> ${result}"
+                break
             }
         }
 
         if (result == null) {
-            // No rule matched — apply default
             result = buildAction(defaultRule)
             log.info "ControlTask '${id}': no rule matched, applying default -> ${result}"
         }
@@ -134,9 +186,57 @@ class ControlTask extends TaskBase<ControlAction> {
         return ctx.promiseFactory.createPromise(finalResult)
     }
 
+    /**
+     * True or false for one condition. Anything thrown fails the task: a refusal as a
+     * SecurityException, any other failure as an IllegalStateException naming the rule.
+     */
+    private boolean evaluate(String condition, Map<String, Object> variables) {
+        try {
+            if (trustedTask) {
+                Script script = InvokerHelper.createScript(trustedScript(condition), new Binding(new LinkedHashMap(variables)))
+                return script.run() as boolean
+            }
+            return RestrictedCompiler.compileRule(condition).test(variables)
+        } catch (SecurityException e) {
+            throw new SecurityException("ControlTask '${id}': rule [${shorten(condition)}] refused: ${e.message}".toString(), e)
+        } catch (RuleCompilationException e) {
+            throw new IllegalStateException("ControlTask '${id}': rule [${shorten(condition)}] ${e.message}".toString(), e)
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "ControlTask '${id}': rule [${shorten(condition)}] failed: ${e.getClass().simpleName}: ${e.message}".toString(), e)
+        }
+    }
+
+    private Object compile(String condition) {
+        return trustedTask ? trustedScript(condition) : RestrictedCompiler.compileRule(condition)
+    }
+
+    private Class trustedScript(String condition) {
+        Class known = trustedScripts.get(condition)
+        if (known != null) return known
+        synchronized (trustedScripts) {
+            known = trustedScripts.get(condition)
+            if (known == null) {
+                if (trustedLoader == null) trustedLoader = new GroovyClassLoader(ControlTask.classLoader)
+                known = trustedLoader.parseClass(condition)
+                trustedScripts.put(condition, known)
+            }
+            return known
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    private static Map<String, Object> readOnlyGlobals(TaskContext taskCtx) {
+        if (taskCtx?.globals == null) return Collections.emptyMap()
+        return Collections.unmodifiableMap(new LinkedHashMap<String, Object>(taskCtx.globals.getAll()))
+    }
+
+    private static String shorten(String condition) {
+        return condition.length() <= 120 ? condition : condition.substring(0, 117) + '...'
+    }
 
     private Object resolveInput(TaskContext taskCtx, Object prevResult) {
         if (!inputNodeId) return prevResult

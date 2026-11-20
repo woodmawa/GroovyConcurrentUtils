@@ -8,6 +8,20 @@ same configuration. This chapter is the map.
 
 == Capability Map
 
+.The software layers of the library
+image::library-layers.svg[The software layers of GroovyConcurrentUtils,width=100%,pdfwidth=100%,opts=inline]
+
+Read the picture from the bottom. *Pools* run everything. *Dataflow* and *promises* carry
+results from the work that produces them to the work that needs them. *Actors* and *agents*
+are built on those; *Gstream* and the *reactive channels* (dashed) stand on their own and can
+use a pool. *TaskGraph* is the largest capability and uses the whole stack beneath it: its
+engine, its task types, its resilience features, its run records, and the security controls
+that bound what a flow can do. The *shared services* on the right are open to every layer,
+and none of them is required; clustering is optional. <<_how_the_capabilities_layer>> says
+what each layer takes from the one below.
+
+The same capabilities as a table, with where each is described:
+
 [cols="2,3,5,3",options="header"]
 |===
 | Capability | Package | What it gives you | Chapter

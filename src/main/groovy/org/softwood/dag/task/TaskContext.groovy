@@ -98,6 +98,17 @@ class TaskContext implements Closeable {
      */
     final List<File> fileAllowedDirectories = new java.util.concurrent.CopyOnWriteArrayList<File>()
 
+    /**
+     * GCU 1.4.0 (D2, level 2): the capabilities this graph grants its restricted scripts, set with
+     * {@code allow '...'} in the graph DSL. 'files' binds {@code files} (bounded by the FileTask
+     * directory rules above); 'http' binds {@code http} (bounded by the HttpTask guard and
+     * {@link #httpAllowLocal}). Empty by default: a restricted script reaches nothing outside itself.
+     */
+    final Set<String> scriptCapabilities = java.util.concurrent.ConcurrentHashMap.<String>newKeySet()
+
+    /** The capability names {@code allow} accepts in this version. */
+    static final Set<String> SCRIPT_CAPABILITIES = Collections.unmodifiableSet(new LinkedHashSet<String>(['files', 'http']))
+
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null
 

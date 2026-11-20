@@ -44,6 +44,35 @@ class TaskEvent {
     // Extensible metadata
     final Map<String, Object> metadata
 
+    // ---- 1.4.0: what a failure says about retrying (keys and values in metadata) ----
+
+    /**
+     * Metadata key. {@code false} on a FAILED event: the task's own retry policy will not run it
+     * again, so the failure is final for this run. {@code true} on a retrying event (RUNNING with
+     * {@code isRetrying}): another attempt follows.
+     */
+    static final String WILL_RETRY = 'willRetry'
+
+    /** Metadata key, on a FAILED event: why the task was not run again. One of the three values below. */
+    static final String NOT_RETRIED_BECAUSE = 'notRetriedBecause'
+
+    /** The failure is one that another attempt cannot fix (a refusal, a bad configuration, a timeout). Do not re-run the task unchanged. */
+    static final String NOT_RETRIABLE = 'not-retriable'
+
+    /** The failure might be transient, and the task has no retry policy. */
+    static final String NO_RETRIES_CONFIGURED = 'no-retries-configured'
+
+    /** The failure might be transient, and every attempt the retry policy allows has been used. */
+    static final String RETRIES_EXHAUSTED = 'retries-exhausted'
+
+    /**
+     * 1.4.0: true when this is a FAILED event for a failure that another attempt cannot fix.
+     * Whatever drives the graph should not re-run the task, or a scope containing it, unchanged.
+     */
+    boolean isPermanentFailure() {
+        return taskState == TaskState.FAILED && metadata?.get(NOT_RETRIED_BECAUSE) == NOT_RETRIABLE
+    }
+
     /**
      * Constructor for ordinary task state changes (backward compatible).
      */

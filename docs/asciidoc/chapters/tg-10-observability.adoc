@@ -90,6 +90,41 @@ RESOURCE_WARNING       // Resource usage warning
 CUSTOM_EVENT           // User-defined events
 ----
 
+=== What a Failed Task Says About Retrying
+
+A `TASK_FAILED` event is the task's last word: its own retry policy will not run it again. An attempt that will be retried is a `TASK_RETRYING` event. From 1.4.0 the event says so, and says why, in its `metadata`:
+
+[cols="1,3",options="header"]
+|===
+| Key | Value
+
+| `willRetry`
+| `false` on `TASK_FAILED`, `true` on `TASK_RETRYING`.
+
+| `notRetriedBecause`
+| On `TASK_FAILED` only. `not-retriable`: another attempt cannot fix it (a refusal, a bad configuration, a timeout). `no-retries-configured`: it might be transient and the task has no retry policy. `retries-exhausted`: it might be transient and every attempt has been used.
+|===
+
+`TaskEvent.isPermanentFailure()` is true for `not-retriable`. Whatever drives a graph should not run that task again unchanged, nor a scope that contains it. Every failure of a `ControlTask`, and every refusal of a restricted script, is permanent.
+
+A caller that awaits the graph's promise and listens to no events has the same facts on the exception:
+
+[source,groovy]
+----
+try {
+    graph.start().get()
+} catch (Exception e) {
+    TaskFailureSignal signal = TaskFailureSignal.of(e)   // null when no task marked it
+    if (signal?.permanent) {
+        log.error "task ${signal.taskId} failed for good after ${signal.attempts} attempt(s)"
+    } else {
+        // signal.notRetriedBecause is 'no-retries-configured' or 'retries-exhausted'
+    }
+}
+----
+
+The exception a task throws keeps its type. The signal travels with it as a suppressed exception, so it also appears as a `Suppressed:` line in a printed stack trace. A JVM-level error (out of memory, a linkage error) carries neither the metadata nor the signal.
+
 === Event Listeners
 
 [source,groovy]

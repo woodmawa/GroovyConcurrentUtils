@@ -262,6 +262,35 @@ class TaskGraphDsl {
     }
 
     /**
+     * GCU 1.4.0 (D2, level 2): grant this graph's restricted scripts a named capability.
+     *
+     * <ul>
+     *   <li>{@code allow 'files'}: scripts get {@code files}, to read and write text inside the
+     *       graph's working directory and its {@code allowedDirectories}.</li>
+     *   <li>{@code allow 'http'}: scripts get {@code http}, to make requests the HttpTask guard
+     *       accepts; a local service still needs {@code allowLocal}.</li>
+     * </ul>
+     * With no {@code allow}, a restricted script reaches nothing outside itself.
+     *
+     * Usage:
+     *   allow 'files', 'http'
+     */
+    void allow(String... capabilities) {
+        capabilities.each { String capability ->
+            String name = capability?.toLowerCase()
+            if (name == 'sql' || name == 'process') {
+                throw new IllegalArgumentException(
+                    "allow '${capability}' is not available in this version: it is planned with ShellTask")
+            }
+            if (!org.softwood.dag.task.TaskContext.SCRIPT_CAPABILITIES.contains(name)) {
+                throw new IllegalArgumentException(
+                    "allow '${capability}': unknown capability. Known: ${org.softwood.dag.task.TaskContext.SCRIPT_CAPABILITIES.join(', ')}")
+            }
+            graph.ctx.scriptCapabilities.add(name)
+        }
+    }
+
+    /**
      * Create a script task for executing scripts in multiple languages.
      * 
      * Usage:

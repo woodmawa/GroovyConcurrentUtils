@@ -72,52 +72,91 @@ task("configured-service") {
 
 === ScriptTask
 
-Execute Groovy scripts with sandboxing.
+Runs a script as a task. Groovy by default; JavaScript; any other JSR-223 language only when trusted.
+
+From 1.4.0 a script is restricted unless its task says `trusted true`. A restricted script computes on what it is given: it can name only the classes of the script profile, and it cannot reach files, the network, processes, threads or reflection. <<ch-security-controls>> has the profile, how it is enforced and what it does not do.
 
 [source,groovy]
 ----
-scriptTask("groovy-script") {
-    language "groovy"  // Default
-    sandboxed true     // Default
+scriptTask("totals") {
+    // language "groovy" is the default
 
     script '''
-        def data = bindings.data
-        def result = data.collect { it * 2 }
-        return result
+        def total = items.sum { it.price * it.quantity }
+        return [total: total, count: items.size()]
     '''
 
-    bindings([
-        data: [1, 2, 3, 4, 5]
-    ])
-
-    // Dynamic bindings
-    bindings { ctx ->
-        [
-            userId: ctx.global("userId"),
-            data: ctx.prev
-        ]
+    // What the script sees by name. The closure is given the TaskContext and the previous result.
+    bindings { ctx, prev ->
+        [items: prev.items]
     }
-}
 
-// Custom script base class
+    scriptTimeout Duration.ofSeconds(5)    // enforced: the task fails and the script is stopped
+}
+----
+
+A script always has `prev` and `input` (the previous task's result) and `ctx` and `context`. In a restricted script `ctx` is a read-only view: `ctx.globals`, `ctx.get(name)` and `ctx.taskId`.
+
+The default base class gives a script `log(message)`, `parseJson(text)`, `toJson(object)`, `now()` and `sleep(millis)`. A base class of your own adds its public methods:
+
+[source,groovy]
+----
 scriptTask("custom-base") {
     customScriptBaseClass CompanyScriptBase
 
     script '''
-        // Company-specific methods available
         def data = queryDataWarehouse("SELECT * FROM sales")
-        return processData(data)
+        return data.size()
     '''
 }
+----
 
-// JavaScript (via GraalVM)
+A graph can grant its restricted scripts guarded helpers:
+
+[source,groovy]
+----
+TaskGraph.build {
+    allow 'files', 'http'
+    workingDirectory '/var/app/data'
+    allowLocal 'localhost:8082'
+
+    scriptTask("report") {
+        script '''
+            def rows = files.readLines('input.csv')
+            def reply = http.post('http://localhost:8082/ingest', toJson([rows: rows.size()]))
+            files.write('report.txt', "sent ${rows.size()} rows, status ${reply.status}")
+            return reply.status
+        '''
+    }
+}
+----
+
+JavaScript runs on Nashorn with no access to Java. The value of the last expression is the result:
+
+[source,groovy]
+----
 scriptTask("javascript") {
     language "javascript"
 
     script '''
-        const data = bindings.data;
-        const result = data.map(x => x * 2);
-        return result;
+        var doubled = [];
+        for (var i = 0; i < values.length; i++) { doubled.push(values[i] * 2); }
+        doubled.length;
+    '''
+
+    bindings { ctx, prev -> [values: [1, 2, 3] as int[]] }
+}
+----
+
+`trusted true` runs the script as unrestricted Groovy with the `TaskContext` itself as `ctx`. Use it for scripts you wrote, not for text that arrived from outside the flow:
+
+[source,groovy]
+----
+scriptTask("housekeeping") {
+    trusted true
+    script '''
+        ctx.globals.set('startedAt', System.currentTimeMillis())
+        new File('/var/app/data/stamp').text = 'ok'
     '''
 }
 ----
@@ -1174,6 +1213,8 @@ OllamaProvider implements real NDJSON streaming (`/api/generate stream:true`). A
 `ControlTask` represents a policy gate in a flow graph. It evaluates a list of Groovy rule expressions against the upstream node result and returns a `ControlAction` that can drive conditional graph routing.
 
 The `control.policy` task type is registered in `FlowTypeRegistry` and delegates evaluation to `PolicyEvaluator`.
+
+NOTE: `FlowTypeRegistry` and `PolicyEvaluator` belong to the agentic-workflow server, which evaluates its rules itself. GCU's own `ControlTask` restricts a rule condition to one expression from a fixed list of operations from 1.4.0: see <<ch-security-controls>>.
 
 ==== ControlAction
 

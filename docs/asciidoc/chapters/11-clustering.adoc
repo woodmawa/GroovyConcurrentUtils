@@ -1,0 +1,176 @@
+[[ch-clustering]]
+= Clustering: Shared State Across Nodes
+
+Package `org.softwood.cluster`. Clustering is optional and off by default. When it is on, a
+set of JVMs share a small amount of state through Hazelcast: which actors exist and where,
+and the progress of TaskGraph runs. The library does not move work between nodes on its own;
+it gives each node a common view.
+
+== `HazelcastManager`
+
+`HazelcastManager` is a singleton that owns the one Hazelcast instance in a JVM and hands out
+the distributed structures the library uses.
+
+[source,groovy]
+----
+HazelcastManager.instance.initialize([
+        enabled: true,
+        port   : 5701,
+        cluster: [name: 'orders-cluster', members: ['10.0.0.10:5701', '10.0.0.11:5701']]
+])
+
+assert HazelcastManager.instance.enabled
+// ...
+HazelcastManager.instance.shutdown()
+----
+
+`initialize` is idempotent: a second call does nothing. With no configuration, or with
+`enabled` absent or false, clustering stays off and every accessor reports that.
+
+[cols="1,1,3",options="header"]
+|===
+| Setting | Default | Meaning
+
+| `enabled` | false | Whether to start Hazelcast at all.
+| `port` | 5701 | Port this member listens on. If it is taken, the next free port is used.
+| `cluster.name` | `taskgraph-cluster` | Members only join a cluster with the same name.
+| `cluster.members` | none | Addresses to join over TCP/IP.
+|===
+
+If `cluster.members` is given, members are found over TCP/IP using that list. If it is not,
+multicast discovery is used, which finds any member with the same cluster name on the local
+network segment. That is convenient on a developer machine and unsuitable anywhere the
+network is shared; give an explicit member list in every other environment.
+
+[cols="2,3",options="header"]
+|===
+| Accessor | Holds
+
+| `getActorRegistryMap()`
+| Actor name to `ActorRegistryEntry`: owning node, status and heartbeat.
+
+| `getActorEventTopic()`
+| `ActorLifecycleEvent` notifications.
+
+| `getGraphStateMap()`
+| TaskGraph run id to `GraphExecutionState`.
+
+| `getTaskStateMap()`
+| Task id to `TaskRuntimeState`.
+
+| `getTaskEventTopic()`
+| `ClusterTaskEvent` notifications.
+
+| `getInstance()`
+| The Hazelcast instance, for anything else.
+|===
+
+== Who Uses It
+
+Actors::
+With the configuration key `distributed` true, the actor registry is stored in the cluster
+map, so every node can see which actors exist and which node owns each (<<ch-actors>>).
+`HazelcastConfigBuilder` in the actor package builds a Hazelcast configuration from
+application config with a choice of multicast, TCP/IP, Kubernetes or AWS discovery.
+
+TaskGraph::
+A graph publishes its run state and task state to the cluster maps and its task events to
+the topic. Only state is replicated. A task definition contains closures, which cannot be
+serialised, so the definition stays on the node that built the graph and other nodes see
+its progress. For the same reason `ClusterTaskEvent` carries state and an error message, not
+the `Throwable` itself.
+
+== Message Signing
+
+`ClusterMessageValidator` signs and verifies strings with an HMAC, so a receiver can tell
+that a cluster message came from a holder of the shared key and was not altered.
+
+[source,groovy]
+----
+def validator = new ClusterMessageValidator(SecretsResolver.resolveRequired('CLUSTER_SIGNING_KEY'))
+
+String signature = validator.sign('task-123:run-456:COMPLETED')
+assert validator.verify('task-123:run-456:COMPLETED', signature)
+----
+
+The default algorithm is `HmacSHA256`, and verification is constant-time.
+`ClusterTaskEvent` has `sign(validator)` and `verify(validator)` built on it.
+
+== Security Settings: `HazelcastSecurityConfig`
+
+`HazelcastSecurityConfig` describes how a cluster should be secured.
+
+[cols="2,3",options="header"]
+|===
+| Group | Settings
+
+| TLS
+| `tlsEnabled`, keystore and truststore locations (explicit path, property, environment
+variable or classpath resource, resolved through `CertificateResolver`), passwords, store
+types, `tlsProtocol` (TLSv1.3), `validateCertificates`.
+
+| Member authentication
+| `authenticationEnabled`, `clusterUsername`, `clusterPassword`, `authenticationTimeoutMillis`.
+
+| Message signing
+| `messageSigningEnabled`, `messageSigningKey`, `messageSigningAlgorithm`.
+
+| Network
+| `disableMulticast` (true), `allowedMembers`, `bindAddress`, `port`, `portAutoIncrement` (false).
+
+| Logging
+| `logSecurityEvents` (true), `logAllMessages` (false).
+|===
+
+It is built with `HazelcastSecurityConfig.builder()`, read from environment variables with
+`fromEnvironment()` (`HAZELCAST_TLS_ENABLED`, `HAZELCAST_AUTH_ENABLED`,
+`HAZELCAST_MESSAGE_SIGNING_ENABLED`, `HAZELCAST_ALLOWED_MEMBERS` and the matching
+credentials), or read from a config object with `fromConfig`. `validate()` refuses an
+inconsistent configuration: TLS without a readable keystore and password, a cluster username
+under 8 characters, a password under 12, or a signing key under 32.
+`HazelcastSecurityConfig.insecure()` returns the everything-off configuration for local
+development.
+
+=== Applying the settings
+
+Pass the settings as the second argument to `initialize`:
+
+[source,groovy]
+----
+def security = HazelcastSecurityConfig.builder()
+        .disableMulticast(true)
+        .allowedMembers(['10.0.0.10:5701', '10.0.0.11:5701'])
+        .bindAddress('10.0.0.10')
+        .port(5701)
+        .portAutoIncrement(false)
+        .build()
+
+HazelcastManager.instance.initialize([enabled: true, cluster: [name: 'orders-cluster']], security)
+----
+
+With a security config the manager validates it and applies it: the bind address, the port
+and whether it may auto-increment, the member allow-list (added to any `cluster.members`),
+multicast only if the config allows it, and TLS and member authentication if they are
+enabled. `HazelcastManager.buildConfig(clusterConfig, security)` returns the Hazelcast
+`Config` without starting anything, for inspection or for a test.
+
+Two behaviours differ from an unsecured start, on purpose:
+
+* There is no fallback to multicast. With multicast disabled and no members named,
+  `initialize` throws.
+* A start-up failure is thrown as `IllegalStateException`. Without a security config a
+  failure is logged and the JVM carries on unclustered; with one, carrying on would hide that
+  the secured cluster never formed.
+
+[IMPORTANT]
+====
+TLS between members and member authentication are Hazelcast Enterprise features. The
+library depends on the open-source edition, which refuses to start when either is enabled,
+so `tlsEnabled` or `authenticationEnabled` on the open-source edition makes `initialize`
+throw. On the open-source edition the controls that take effect are the network ones: no
+multicast, a fixed member list, a bind address, a fixed port. Run such a cluster on a
+network you trust, and sign cluster messages with `ClusterMessageValidator`.
+
+Calling `initialize` with one argument applies no security settings and behaves as before:
+port auto-increment on, and multicast when no member list is given.
+====

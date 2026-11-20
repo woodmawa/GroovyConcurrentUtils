@@ -1,3 +1,4 @@
+[[tg-03a]]
 = Simple Task Execution: Tasks and TasksCollection
 
 [abstract]
@@ -1210,7 +1211,7 @@ Both provide simpler alternatives to full TaskGraph orchestration when you don't
 
 == Next Steps
 
-* **Chapter 4 (Layers)** - Understanding TaskGraph layered architecture
-* **Chapter 7 (Examples)** - More complex workflow examples using TaskGraph
-* **Chapter 11 (TaskBase)** - Deep dive into task types and capabilities
-* **Chapter 12 (Gateways)** - Conditional routing and decision logic
+* <<tg-04>> - Understanding TaskGraph layered architecture
+* <<tg-07>> - More complex workflow examples using TaskGraph
+* <<tg-11>> - Deep dive into task types and capabilities
+* <<tg-12>> - Conditional routing and decision logic

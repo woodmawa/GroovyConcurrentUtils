@@ -1,3 +1,4 @@
+[[tg-04]]
 = Architectural Layers: From Tasks to TaskGraph
 
 [abstract]
@@ -1343,7 +1344,7 @@ Each layer builds on the previous one, providing progressively more powerful wor
 
 == Next Steps
 
-* **Chapter 5** - Learn about extensibility through SPI
-* **Chapter 6** - Deep dive into TaskContext
-* **Chapter 11** - Complete TaskBase reference
-* **Chapter 13** - All concrete task types
+* <<tg-05>> - Learn about extensibility through SPI
+* <<tg-06>> - Deep dive into TaskContext
+* <<tg-11>> - Complete TaskBase reference
+* <<tg-13>> - All concrete task types

@@ -1,3 +1,4 @@
+[[tg-09]]
 = Security Architecture
 
 [abstract]
@@ -887,6 +888,6 @@ Security is a first-class concern in TaskGraph, enabled by default and configura
 
 == Next Steps
 
-* **Chapter 6** - TaskContext security features
-* **Chapter 8** - Test security configurations
+* <<tg-06>> - TaskContext security features
+* <<tg-08>> - Test security configurations
 * **Appendix** - Complete security reference

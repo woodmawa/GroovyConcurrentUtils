@@ -1,5 +1,6 @@
 
 import org.asciidoctor.gradle.jvm.AsciidoctorTask
+import org.asciidoctor.gradle.jvm.pdf.AsciidoctorPdfTask
 import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
 import org.gradle.plugins.signing.Sign
 
@@ -9,6 +10,7 @@ plugins {
     id 'java-test-fixtures'
     id 'idea'
     id "org.asciidoctor.jvm.convert" version "4.0.5"
+    id "org.asciidoctor.jvm.pdf" version "4.0.5"
     id 'maven-publish'
     id 'signing'
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
@@ -16,11 +18,9 @@ plugins {
 }
 
 group = 'org.softwood'
-version = '1.2.0'   // 1.2.0: core hardening - dataflow delivery, graph validation, guarded task state, cancellation (see CHANGENOTE.md). 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
+version = '1.2.1'   // 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
 
-repositories {
-    mavenCentral()
-}
+// Repositories are declared once, in settings.gradle (dependencyResolutionManagement, PREFER_SETTINGS).
 
 dependencies {
     implementation "org.apache.groovy:groovy:$groovyVersion"
@@ -130,31 +130,65 @@ test {
     }
 }
 
-/**
- * Asciidoctor docs
- * Assumes docs live under src/docs/asciidoc (as in your project structure)
- */
-tasks.named("asciidoctor", AsciidoctorTask).configure { t ->
-    t.sourceDir = layout.projectDirectory.dir("src/main/groovy/org/softwood/dag/docs/asciidoc").asFile
-
-    t.sources {
-        include("**/*.adoc")
+// --- asciidoctor / PDF generation ----------------------------------------
+// Same layout as mcp-agentic-workflow and mcp-groovy-context-server:
+// Two books from one set of chapters (docs/asciidoc/chapters/*.adoc):
+//   index.adoc      the whole library          -> groovy-concurrent-utils-reference.pdf
+//   taskgraph.adoc  the TaskGraph chapters only -> groovy-concurrent-utils-taskgraph.pdf
+// HTML:    gradlew asciidoctor     -> build/docs/asciidoc/index.html, taskgraph.html
+// PDF:     gradlew asciidoctorPdf  -> build/docs/asciidocPdf/
+// -------------------------------------------------------------------------
+asciidoctorj {
+    // Plugin 4.0.5 (the latest release) still defaults to AsciidoctorJ 2.5.7 = Asciidoctor 2.0.18 on JRuby 9.3.8.0 (2022).
+    // 3.0.1 is the current AsciidoctorJ and brings JRuby 9.4.14.
+    version = '3.0.1'
+    modules {
+        pdf { version '2.3.19' }
     }
+}
 
-    t.outputDir = layout.buildDirectory.dir("docs/asciidoc").get().asFile
+// JRuby reaches into sun.misc.Unsafe, JNI (jffi) and JDK IO internals. On JDK 24+ each prints a warning
+// block per run; these flags grant the access explicitly, for the asciidoctor worker JVMs only.
+def asciidoctorJvmArgs = [
+        '--enable-native-access=ALL-UNNAMED',
+        '--sun-misc-unsafe-memory-access=allow',
+        '--add-opens', 'java.base/sun.nio.ch=ALL-UNNAMED',
+        '--add-opens', 'java.base/java.io=ALL-UNNAMED'
+]
+
+tasks.named('asciidoctor', AsciidoctorTask).configure { t ->
+    t.sourceDir = layout.projectDirectory.dir('docs/asciidoc').asFile
+    // Chapters are included by the two books, never converted on their own.
+    t.sources { include('index.adoc', 'taskgraph.adoc') }
+    t.outputDir = layout.buildDirectory.dir('docs/asciidoc').get().asFile
     t.baseDirFollowsSourceDir()
+    t.jvm { jvmArgs(asciidoctorJvmArgs) }
+}
 
-    t.resources {
-        from(t.sourceDir) {
-            include("images/**")
-            include("css/**")
+tasks.named('asciidoctorPdf', AsciidoctorPdfTask).configure { t ->
+    t.sourceDir = layout.projectDirectory.dir('docs/asciidoc').asFile
+    t.sources { include('index.adoc', 'taskgraph.adoc') }
+    t.outputDir = layout.buildDirectory.dir('docs/asciidocPdf').get().asFile
+    t.baseDirFollowsSourceDir()
+    t.attributes 'revdate': new Date().format('yyyy-MM-dd')
+    t.jvm { jvmArgs(asciidoctorJvmArgs) }
+
+    // index.pdf says nothing about which project it documents once it leaves the build directory.
+    t.doLast {
+        def outDir = layout.buildDirectory.dir('docs/asciidocPdf').get().asFile
+        ['index.pdf'    : 'groovy-concurrent-utils-reference.pdf',
+         'taskgraph.pdf': 'groovy-concurrent-utils-taskgraph.pdf'].each { from, to ->
+            def src = new File(outDir, from)
+            def dst = new File(outDir, to)
+            if (src.exists()) {
+                dst.delete()
+                src.renameTo(dst)
+                logger.lifecycle("DOCS: PDF written -> ${dst.absolutePath}")
+            } else {
+                logger.warn("DOCS: expected ${src} was not produced -- PDF NOT renamed")
+            }
         }
     }
-
-    t.attributes(
-            "stylesheet": "style.css",
-            "stylesdir": "css"
-    )
 }
 
 
@@ -169,10 +203,10 @@ publishing {
             suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
 
             pom {
-                name.set(providers.gradleProperty('pomName').orElse('GroovyFX'))
+                name.set(providers.gradleProperty('pomName').orElse('GroovyConcurrentUtils'))
                 description.set(providers.gradleProperty('pomDescription')
-                        .orElse('GroovyFX next-generation builder for JavaFX 25 + Groovy 5'))
-                url.set(providers.gradleProperty('pomUrl').orElse('https://github.com/woodmawa/groovyfx'))
+                        .orElse('Groovy concurrency library: pools, promises, dataflow, actors, agents and the TaskGraph engine'))
+                url.set(providers.gradleProperty('pomUrl').orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
 
                 licenses {
                     license {
@@ -191,11 +225,11 @@ publishing {
 
                 scm {
                     connection.set(providers.gradleProperty('pomScmConnection')
-                            .orElse('scm:git:https://github.com/woodmawa/groovyfx.git'))
+                            .orElse('scm:git:https://github.com/woodmawa/GroovyConcurrentUtils.git'))
                     developerConnection.set(providers.gradleProperty('pomScmDeveloperConnection')
-                            .orElse('scm:git:ssh://git@github.com:woodmawa/groovyfx.git'))
+                            .orElse('scm:git:ssh://git@github.com:woodmawa/GroovyConcurrentUtils.git'))
                     url.set(providers.gradleProperty('pomScmUrl')
-                            .orElse('https://github.com/woodmawa/groovyfx'))
+                            .orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
                 }
             }
         }

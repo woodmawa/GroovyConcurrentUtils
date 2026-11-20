@@ -144,7 +144,12 @@ class DataflowPromiseFactory implements PromiseFactory {
         future.whenComplete { value, error ->
             try {
                 if (error != null) {
-                    variable.bindError(error)
+                    // GCU 1.2.1 (DF14): a dependent stage reports its failure wrapped in CompletionException.
+                    // Callers of the promise should see the real cause.
+                    Throwable raw = (Throwable) error
+                    Throwable cause = (raw instanceof java.util.concurrent.CompletionException && raw.getCause() != null) ?
+                            raw.getCause() : raw
+                    variable.bindError(cause)
                 } else {
                     variable.bind(value)
                 }

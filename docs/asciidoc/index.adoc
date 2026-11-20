@@ -1,0 +1,94 @@
+= GroovyConcurrentUtils: Capabilities and Reference
+Will Woodman <will@woodmawa.com>
+:doctype: book
+// --- Single source of truth for the version this BOOK describes. ---------
+// This is the only place the library version appears in this book: chapters
+// describe the library as it stands, not the build that produced it.
+:gcu-version: 1.2.1
+:revnumber: {gcu-version}
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: rouge
+:imagesdir: images
+
+[abstract]
+--
+GroovyConcurrentUtils (GCU) is a Groovy library of concurrency building blocks for the JVM:
+virtual-thread pools, promises, dataflow variables, a stream wrapper, reactive data, actors
+and agents, and -- built on those -- TaskGraph, a DSL and engine for running graphs of tasks.
+It also carries the platform services those capabilities share: configuration loading,
+security controls and clustering.
+
+This book describes what each capability is for, how it is used and what it guarantees. It
+describes the library as it stands. The history of how it got here is in `CHANGENOTE.md` and
+the archive (see <<app-history>>).
+--
+
+[preface]
+== About This Book
+
+*What it covers.* One chapter per capability area of the library, grouped into parts. The
+core concurrency chapters come first because everything else is built on them: TaskGraph
+runs its tasks on the pools, hands results around as promises, and wires task outputs to
+task inputs through dataflow. Read Part II before Part V if you want to understand why
+TaskGraph behaves as it does; go straight to Part V if you only want to build workflows.
+
+*Who it is for.* Developers using GCU directly, and developers building on top of it. The
+MCP agentic-workflow server is the largest consumer of TaskGraph, and its own book assumes
+this one.
+
+*How it is maintained.* This book is edited in place. A change to how a capability works
+updates the chapter that describes it; the story of the change goes into `CHANGENOTE.md`,
+never into a new chapter here. The version in the header is the library version the text
+was last checked against.
+
+= Part I -- The Library
+
+include::chapters/01-overview.adoc[leveloffset=+1]
+
+= Part II -- Core Concurrency
+
+include::chapters/02-pools.adoc[leveloffset=+1]
+include::chapters/03-promises.adoc[leveloffset=+1]
+include::chapters/04-dataflow.adoc[leveloffset=+1]
+include::chapters/05-gstream.adoc[leveloffset=+1]
+include::chapters/06-reactive.adoc[leveloffset=+1]
+
+= Part III -- Actors and Agents
+
+include::chapters/07-actors.adoc[leveloffset=+1]
+include::chapters/08-agents.adoc[leveloffset=+1]
+
+= Part IV -- Platform Services
+
+include::chapters/09-configuration.adoc[leveloffset=+1]
+include::chapters/10-security.adoc[leveloffset=+1]
+include::chapters/11-clustering.adoc[leveloffset=+1]
+
+= Part V -- TaskGraph
+
+include::chapters/tg-01-architecture.adoc[leveloffset=+1]
+include::chapters/tg-02-dsl-approach.adoc[leveloffset=+1]
+include::chapters/tg-03-foundation-libraries.adoc[leveloffset=+1]
+include::chapters/tg-03a-simple-task-execution.adoc[leveloffset=+1]
+include::chapters/tg-04-layers.adoc[leveloffset=+1]
+include::chapters/tg-05-extensibility.adoc[leveloffset=+1]
+include::chapters/tg-06-task-context.adoc[leveloffset=+1]
+include::chapters/tg-07-examples.adoc[leveloffset=+1]
+include::chapters/tg-08-test-harness.adoc[leveloffset=+1]
+include::chapters/tg-14-taskgraph-spec.adoc[leveloffset=+1]
+include::chapters/tg-09-security.adoc[leveloffset=+1]
+include::chapters/tg-10-observability.adoc[leveloffset=+1]
+include::chapters/tg-11-taskbase.adoc[leveloffset=+1]
+include::chapters/tg-12-gateways.adoc[leveloffset=+1]
+include::chapters/tg-13-task-types.adoc[leveloffset=+1]
+include::chapters/tg-15-office-task-dsl.adoc[leveloffset=+1]
+include::chapters/tg-16-execution-integrity.adoc[leveloffset=+1]
+
+[appendix]
+include::chapters/appendix-a-glossary.adoc[leveloffset=+1]
+
+[appendix]
+include::chapters/appendix-b-history-map.adoc[leveloffset=+1]

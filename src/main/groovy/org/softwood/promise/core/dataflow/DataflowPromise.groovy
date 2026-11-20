@@ -779,11 +779,14 @@ class DataflowPromise<T> implements Promise<T> {
     @Override
     Promise<T> orTimeout(long timeout, TimeUnit unit) {
         // One-shot scheduled timer - no thread parked sleeping.
-        ConcurrentPool.sharedScheduledExecutor.schedule({
+        final ScheduledFuture<?> timer = ConcurrentPool.sharedScheduledExecutor.schedule({
             if (!this.isDone()) {
                 this.fail(new TimeoutException("Promise timed out after ${timeout} ${unit}"))
             }
         } as Runnable, timeout, unit)
+        // GCU 1.2.1 (DF8): release the timer as soon as the promise completes. It used to stay scheduled,
+        // holding this promise, until the timeout elapsed.
+        this.whenComplete({ T v, Throwable e -> timer.cancel(false) } as BiConsumer<T, Throwable>)
         return this
     }
 

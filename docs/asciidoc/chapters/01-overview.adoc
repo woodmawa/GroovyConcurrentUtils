@@ -1,0 +1,164 @@
+[[ch-overview]]
+= The Library at a Glance
+
+GroovyConcurrentUtils gathers the concurrency tools a Groovy application tends to need into
+one library with one set of conventions. Its capabilities are separate, each usable on its
+own, but they are built in layers and share the same pool, the same promise type and the
+same configuration. This chapter is the map.
+
+== Capability Map
+
+[cols="2,3,5,3",options="header"]
+|===
+| Capability | Package | What it gives you | Chapter
+
+| Pools
+| `org.softwood.pool`
+| One contract for running and scheduling work, on virtual threads by default.
+| <<ch-pools>>
+
+| Promises
+| `org.softwood.promise`
+| A value that arrives later, with composition, timeouts and combinators, over three interchangeable implementations.
+| <<ch-promises>>
+
+| Dataflow
+| `org.softwood.dataflow`
+| Single-assignment variables: readers wait for the writer, and nothing is overwritten.
+| <<ch-dataflow>>
+
+| Gstream
+| `org.softwood.gstream`
+| Java streams driven by Groovy closures.
+| <<ch-gstream>>
+
+| Reactive channels
+| `org.softwood.reactive`
+| A bounded work queue and a hot topic, consumed as a Reactor `Flux`.
+| <<ch-reactive>>
+
+| Actors
+| `org.softwood.actor`
+| State behind a mailbox, with supervision, hierarchy, scheduling and remoting.
+| <<ch-actors>>
+
+| Agents
+| `org.softwood.agent`
+| One mutable object, updated by closures applied in turn.
+| <<ch-agents>>
+
+| Configuration
+| `org.softwood.config`
+| Layered settings from files, system properties and the environment, with a trace of where each value came from.
+| <<ch-configuration>>
+
+| Security services
+| `org.softwood.security`
+| Secret lookup, TLS contexts, signed tokens and login rate limiting.
+| <<ch-security>>
+
+| Clustering
+| `org.softwood.cluster`
+| Optional shared state across JVMs through Hazelcast.
+| <<ch-clustering>>
+
+| TaskGraph
+| `org.softwood.dag`
+| A DSL and engine for graphs of tasks, with gateways, retries, persistence and a test harness.
+| Part V
+|===
+
+== How the Capabilities Layer
+
+----
+                      TaskGraph  (org.softwood.dag)
+                  /        |          \
+          Actors        Agents      Gstream
+              \           |           /
+                    Promises
+                        |
+                    Dataflow
+                        |
+                      Pools
+   -----------------------------------------------------
+     Configuration   |   Security services   |   Clustering
+----
+
+* *Pools* are the bottom of the stack. Everything that runs, runs on an `ExecutorPool`.
+* *Dataflow* variables complete on a pool and deliver their callbacks on it.
+* *Promises* are, by default, a typed wrapper over a dataflow variable.
+* *Actors* and *agents* drain their mailboxes on a pool. *Gstream* is independent, and can
+  run a parallel pipeline on one.
+* *TaskGraph* runs tasks on a pool, returns promises, and wires task results together through
+  dataflow.
+* *Configuration*, *security services* and *clustering* sit alongside. Any capability may use
+  them; none requires them except where a chapter says so.
+
+The practical consequence: a behaviour of the lower layers is a behaviour of everything above
+it. The delivery guarantees of dataflow (<<dataflow-guarantees>>) are what make a TaskGraph
+result reliable, and a pool's admission limit applies to promise callbacks that run on it.
+
+== Choosing a Tool for Shared State
+
+Four capabilities protect state from concurrent access. They answer different questions.
+
+[cols="1,2,2",options="header"]
+|===
+| Tool | The state is | Reach for it when
+
+| Dataflow variable
+| Written once, read many times.
+| A value is computed once and several threads need it.
+
+| Promise
+| The single result of one piece of work.
+| You want to compose, time out or combine asynchronous results.
+
+| Agent
+| One object changed over time by many threads.
+| The changes are simple and the object has no behaviour of its own.
+
+| Actor
+| Private to something that receives messages and decides what to do.
+| There is a protocol: different messages, replies, failures to supervise, children to manage.
+|===
+
+For a series of values in place of a single one, use a reactive channel when the consumer is
+a `Flux`, and a `Gstream` for an in-memory pipeline.
+
+== Using the Library
+
+[source,groovy,subs="attributes+"]
+----
+dependencies {
+    implementation 'org.softwood:GroovyConcurrentUtils:{gcu-version}'
+
+    // TaskGraph test harness (TaskGraphSpec), published as a test-fixtures variant
+    testImplementation testFixtures('org.softwood:GroovyConcurrentUtils:{gcu-version}')
+}
+----
+
+The library is built with Groovy 6 on a Java 25 toolchain. Virtual threads are used when the
+JVM has them and platform threads otherwise.
+
+Some capabilities bring a third-party library with them: Project Reactor for the reactive
+channels, Vert.x for the `VERTX` promise implementation, RSocket and Netty for actor
+remoting, Hazelcast for clustering, SnakeYAML for configuration. Apache POI, needed by the
+Office document tasks in TaskGraph, is compile-only in the library and must be added by an
+application that uses those tasks.
+
+== Conventions Shared Across the Library
+
+* *Factories over constructors.* Pools, promises, dataflow tasks, actors and agents each have
+  a factory or system as the supported way in. It is what lets a test substitute a pool or an
+  implementation.
+* *Operators where they read well.* `<<` binds a dataflow variable and publishes to a queue
+  or topic. On an actor and on an agent `<<` is the synchronous form: it waits for the reply
+  or the result. `>>` registers a dataflow callback or queues an asynchronous agent update.
+* *`health()` and `metrics()`.* Pools, actors, agents and agent pools expose maps for
+  monitoring.
+* *Errors are kept, not swallowed.* Actors and agents retain a bounded list of recent
+  failures, and pools and dataflow record problems they could not deliver, each readable
+  through an accessor described in its chapter.
+* *Shutdown is explicit and scoped.* A component stops what it owns and leaves shared
+  resources running.

@@ -1,0 +1,162 @@
+[[ch-configuration]]
+= Configuration: Layered Settings
+
+Package `org.softwood.config`. `ConfigLoader` assembles one map of settings from several
+sources, in a fixed order, and can say afterwards where each value came from. The library
+uses it for its own settings (the default promise implementation, whether the actor registry
+is distributed, cluster and security options) and an application can use the same loader for
+its own.
+
+== What `load` Returns
+
+[source,groovy]
+----
+ConfigResult result = ConfigLoader.load()
+
+if (!result.valid) {
+    result.errors.each { log.error it }
+}
+Map<String, Object> config = result.config
+----
+
+[cols="1,3",options="header"]
+|===
+| `ConfigResult` | Content
+
+| `config`
+| The merged settings, as an unmodifiable map with dotted keys such as `hazelcast.port`.
+
+| `profile`
+| The profile that was resolved.
+
+| `errors`, `warnings`
+| Messages from schema validation and validators. `isValid()` is true when there are no errors.
+
+| `trace`
+| A snapshot of which source set each key, for diagnosing "why does it have that value".
+|===
+
+`ConfigLoader.loadConfig()` is the short form that returns only the map. Typed getters read
+from a loaded map: `getString(config, key, default)`, `getBoolean(config, key, default)` and
+`getInt(config, key, default)`.
+
+== Order of Precedence
+
+Sources are merged in this order. A later source overrides an earlier one, key by key.
+
+. *Library defaults* on the classpath: `/org/softwood/config/defaults.*`.
+. *Application config* on the classpath: `config.*` at the classpath root.
+. *External files*, in this order: files named by the system property `app.config`
+  (comma-separated), files in the `externalFiles` option, then `config.*` and
+  `config-<profile>.*` found in each directory named by the system property `app.configDir`
+  or the `externalDirs` option.
+. *System properties* starting with `app.`, with the prefix removed: `-Dapp.hazelcast.port=5701`
+  sets `hazelcast.port`. `app.config`, `app.configDir` and the profile properties say where
+  to look and are not copied into the settings.
+. *Environment variables* that have a mapping (see below).
+. *The profile*, written into the map under the key `profile`.
+. *Explicit overrides* passed in the `overrides` option.
+
+Schema validation and validators run last, on the merged result.
+
+[source,groovy]
+----
+def result = ConfigLoader.load(
+        profile: 'test',
+        externalFiles: ['/etc/myapp/config.yml'],
+        overrides: ['database.url': 'jdbc:h2:mem:test'])
+----
+
+== File Formats
+
+Classpath config may be YAML (`.yml`, `.yaml`), JSON, `.properties` or Groovy
+(`config.groovy`, in `ConfigSlurper` form), and so may external files. Nested structures are
+flattened to dotted keys.
+
+A Groovy config file is a script and is executed when it is loaded. Treat every location the
+loader reads from, including a directory named by `app.configDir`, as able to run code in
+the process, and give it the same protection as the application's own code.
+
+For the non-Groovy formats, a profile-specific file is read after the base file and overrides
+it: `config.yml` then `config-test.yml`. A Groovy config is one file, `config.groovy`, whose
+`environments { }` block is evaluated for the active profile.
+
+Parsed classpath files are cached by `ConfigCache`, which re-parses a file only when it has
+changed. `ConfigCache.clear()`, `invalidate(path)`, `setEnabled(false)` and `getStats()`
+control and inspect the cache; tests that rewrite config files should clear it.
+
+== Profiles
+
+The profile is the first non-empty value found in:
+
+. the environment variables `APP_PROFILE`, then `PROFILE`;
+. the system properties `app.profile`, then `profile`;
+. the default, `dev`.
+
+Passing `profile:` to `load` overrides all three.
+
+== Environment Variables
+
+Environment variables are not read wholesale. Only variables with an `EnvMapping` are used,
+which keeps unrelated environment content out of the configuration. The default spec maps:
+
+[cols="1,1",options="header"]
+|===
+| Environment variable | Config key
+
+| `USE_DISTRIBUTED` | `distributed`
+| `HAZELCAST_CLUSTER_NAME` | `hazelcast.cluster.name`
+| `HAZELCAST_PORT` | `hazelcast.port`
+| `DB_URL` | `database.url`
+| `DB_USERNAME` | `database.username`
+| `DB_PASSWORD` | `database.password`
+|===
+
+An application adds its own by supplying a `ConfigSpec`. `EnvMapping.coerce` returns the raw
+string; subclass it to convert to another type.
+
+== Customising with `ConfigSpec`
+
+`ConfigSpec` holds everything the loader treats as convention, so an application can change
+any of it without changing the loader.
+
+[source,groovy]
+----
+def spec = ConfigSpec.defaultSpec()
+spec.defaultProfile = 'local'
+spec.userBaseNames = ['application']                       // application.yml, application-<profile>.yml
+spec.envMappings << new EnvMapping('API_KEY', 'api.key')
+spec.schema = new ConfigSchema()
+        .require('database.url', String)
+        .optional('hazelcast.port', Integer)
+
+def result = ConfigLoader.load(spec: spec)
+----
+
+[cols="2,1,3",options="header"]
+|===
+| Field | Default | Meaning
+
+| `defaultProfile` | `dev` | Profile when none is set.
+| `profileKey` | `profile` | Key the resolved profile is stored under.
+| `profileEnvKeys` | `APP_PROFILE`, `PROFILE` | Environment variables that select the profile.
+| `profileSysKeys` | `app.profile`, `profile` | System properties that select the profile.
+| `sysPropPrefix` | `app.` | Prefix that marks a system property as configuration.
+| `libraryDefaultsPath`, `libraryBaseNames` | `/org/softwood/config`, `defaults` | Where the library's own defaults are.
+| `userBaseNames` | `config` | Base names of the application's classpath config.
+| `envMappings` | see above | Environment variables to read.
+| `schema` | none | Required and optional keys with types.
+| `validators` | none | Custom checks.
+|===
+
+== Validation
+
+A `ConfigSchema` declares keys as required or optional and, where a type is given, coerces
+the value to it. A missing required key or a value that cannot be coerced is reported in
+`errors`; the loader does not throw.
+
+A `ConfigValidator` is a custom check that receives the merged map, the error and warning
+lists, the profile and the trace. A validator that throws is itself reported as an error.
+
+The caller decides what to do with an invalid result. Code that should not start with bad
+configuration checks `result.valid` and stops.

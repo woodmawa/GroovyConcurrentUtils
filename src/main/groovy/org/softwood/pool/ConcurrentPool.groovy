@@ -161,6 +161,13 @@ class ConcurrentPool implements ExecutorPool, AutoCloseable {
             recordError("Failed to initialize scheduled executor: ${e.message}")
         }
 
+        // GCU 1.2.1: a cancelled timer leaves the scheduler's queue at once. Without this a timeout timer
+        // that was cancelled because its task finished stayed queued, holding the task's future and result,
+        // until the timeout would have fired.
+        if (sharedScheduledExecutor instanceof java.util.concurrent.ScheduledThreadPoolExecutor) {
+            ((java.util.concurrent.ScheduledThreadPoolExecutor) sharedScheduledExecutor).setRemoveOnCancelPolicy(true)
+        }
+
         // Register JVM shutdown hook for graceful drain of shared executors
         Runtime.getRuntime().addShutdownHook(new Thread('gcu-shutdown-hook') {
             @Override

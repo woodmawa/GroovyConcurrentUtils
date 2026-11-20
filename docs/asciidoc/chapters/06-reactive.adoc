@@ -1,0 +1,119 @@
+[[ch-reactive]]
+= Reactive Channels: Queue and Topic
+
+Package `org.softwood.reactive`. A dataflow variable carries one value. These two classes
+carry a series of them, and bridge ordinary producing code to a Project Reactor `Flux` on the
+consuming side. They differ in who receives each item.
+
+[cols="1,2,2",options="header"]
+|===
+| | `DataflowQueue` | `DataflowTopic`
+
+| Delivery
+| Each item goes to the one consumer.
+| Each event goes to every current subscriber.
+
+| Consumers
+| Exactly one. A second subscription is refused.
+| Any number.
+
+| Buffering
+| Bounded. Items wait for the consumer.
+| None. An event published with no subscriber is dropped.
+
+| Back-pressure
+| The producer blocks when the queue is full, then fails.
+| Best effort. A slow subscriber may miss events.
+
+| Use it for
+| Work that must each be handled once, in order.
+| Notifications where the latest matters more than every one.
+|===
+
+== `DataflowQueue`: Bounded Work Queue
+
+A queue is created with a capacity. Producers add items with `enqueue(item)` or `<<`; the
+single consumer subscribes to `stream()` and receives the items in the order they were added.
+
+[source,groovy]
+----
+def queue = new DataflowQueue<String>(10)
+
+queue.stream().subscribe { job -> process(job) }     // the one consumer
+
+queue << 'job-1'
+queue << 'job-2'
+queue.complete()                                      // no more items
+----
+
+`consume(onNext, onError, onComplete)` subscribes with closures in one call.
+
+Capacity is enforced with a semaphore. When the queue is full a producer waits for a free
+slot, up to the `publishTimeout` of the queue's error strategy (five seconds by default), and
+then gets a `QueueException.QueueFullException`. If an item cannot be handed to the reactive
+sink, for example because the queue has already been completed, the item is taken back off
+the queue and the producer gets a
+`QueueException.PublishingException`. Either way the producer finds out; an item is not
+silently lost.
+
+`peek()`, `size()`, `isEmpty()` and `toList()` inspect what is waiting without consuming it.
+
+== `DataflowTopic`: Hot Publish/Subscribe
+
+A topic has no memory. Each subscriber to `stream()` receives the events published from the
+moment it subscribes; nothing is replayed.
+
+[source,groovy]
+----
+def prices = new DataflowTopic<Quote>()
+
+prices.stream().subscribe { quote -> updateScreen(quote) }
+prices.stream().filter { it.symbol == 'BT.A' }.subscribe { quote -> audit(quote) }
+
+prices << new Quote('BT.A', 181.2)
+prices.complete()
+----
+
+Publishing with no subscriber attached drops the event quietly; that is the defined behaviour
+of a hot topic, not an error. A subscriber that cannot keep up may miss events. Any other
+failure to emit is passed to the topic's error strategy. `awaitCompletion()` returns a `Mono`
+that completes when the topic does.
+
+== Error Handling Strategy
+
+Both classes report failures through an `ErrorHandlingStrategy`, so that the policy is chosen
+once and can be replaced in a test.
+
+[cols="1,3",options="header"]
+|===
+| `ErrorMode` | What `DefaultErrorHandlingStrategy` does
+
+| `DEFAULT`
+| Logs the error with the item.
+
+| `DROP`
+| Logs a warning that the item was dropped.
+
+| `FAIL_FAST`
+| Logs and rethrows, wrapping a checked exception in a `RuntimeException`.
+
+| `RETRY`
+| Logs that a retry was requested. No retry is implemented; this mode is a placeholder.
+|===
+
+The default strategy has two settings: `publishTimeout` (a `Duration`, five seconds) and
+`logErrors` (true). A custom strategy implements `onError(throwable, item, mode)` and supplies
+its own values for both.
+
+[source,groovy]
+----
+def strategy = new DefaultErrorHandlingStrategy(publishTimeout: Duration.ofMillis(200))
+def queue = new DataflowQueue<Job>(100, strategy)
+----
+
+== Relationship to the Rest of the Library
+
+These classes depend on Project Reactor and are independent of the pools and promises in the
+earlier chapters; a `Flux` brings its own scheduling. Reach for them when the consumer is
+already reactive. For a pipeline of in-memory transformations use `Gstream` (<<ch-gstream>>);
+for message handling with state use an actor (<<ch-actors>>).

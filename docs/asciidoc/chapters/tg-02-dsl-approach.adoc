@@ -1,3 +1,4 @@
+[[tg-02]]
 = DSL Approach
 
 [abstract]
@@ -204,9 +205,7 @@ httpTask("api-call") {
 }
 ----
 
-IDE provides autocomplete and type checking:
-
-image::images/ide-autocomplete.png[]
+The IDE provides autocomplete and type checking for the typed builders.
 
 === Principle 5: Composability
 
@@ -270,7 +269,7 @@ def workflow = TaskGraph.build {
 * `failFast` - Stop on first failure
 * `addListener` - Register event listeners
 * `task()` - Define tasks
-* Gateway builders (covered in Chapter 12)
+* Gateway builders (covered in <<tg-12>>)
 
 === Task-Level DSL
 
@@ -700,8 +699,8 @@ This makes TaskGraph workflows easy to write, maintain, and evolve.
 
 == Next Steps
 
-* **Chapter 3** - Understand the foundation libraries (Pool & Promises)
-* **Chapter 7** - See practical examples of DSL usage
+* <<tg-03>> - Understand the foundation libraries (Pool & Promises)
+* <<tg-07>> - See practical examples of DSL usage
 
 
 == SPI Extension: Custom Task Types via ITaskProvider

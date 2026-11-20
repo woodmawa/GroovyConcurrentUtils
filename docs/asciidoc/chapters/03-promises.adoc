@@ -1,0 +1,241 @@
+[[ch-promises]]
+= Promises: Values That Arrive Later
+
+Package `org.softwood.promise`. A promise stands for a value that is not available yet. It is
+completed once, with a value or with an error, and anything registered against it is told
+when that happens. Promises are the currency of the library: a TaskGraph task returns one, an
+agent read returns one, and the dataflow layer (<<ch-dataflow>>) is what the default promise
+is built on.
+
+== One Interface, Three Implementations
+
+`Promise<T>` is an interface. The library ships three implementations of it, selected by the
+`PromiseImplementation` enum, so that code written against `Promise` does not depend on which
+asynchronous machinery sits underneath.
+
+[cols="1,3",options="header"]
+|===
+| Implementation | Backed by
+
+| `DATAFLOW` (default)
+| A GCU `DataflowVariable`. Completion, error and cancellation are mirrored onto the variable,
+which delivers the callbacks. This is the implementation TaskGraph uses.
+
+| `COMPLETABLE_FUTURE`
+| A plain `java.util.concurrent.CompletableFuture`.
+
+| `VERTX`
+| A Vert.x `Future`, for code running on a Vert.x event loop. The Vert.x factory is created on
+first use, so Vert.x is not started unless it is asked for.
+|===
+
+The default is read once from configuration (<<ch-configuration>>), key
+`promises.defaultImplementation`. An unrecognised value falls back to `DATAFLOW`. It can also
+be set in code with `PromiseConfiguration.setDefaultImplementation(impl)`, and any single
+promise can name its implementation when it is created.
+
+A promise is in one of four states, given by `PromiseState`: `PENDING`, `COMPLETED`, `FAILED`
+or `CANCELLED`.
+
+== Creating Promises
+
+`Promises` is the static entry point. It delegates to the factory for the chosen
+implementation.
+
+[source,groovy]
+----
+import org.softwood.promise.Promises
+
+Promise<Integer> empty  = Promises.newPromise()            // pending, completed later
+Promise<Integer> known  = Promises.value(42)               // already completed
+Promise<Integer> broken = Promises.failed(new IllegalStateException('no'))
+
+Promise<Integer> work = Promises.async { expensiveCalculation() }
+
+Promise<String> adapted = Promises.from(someCompletableFuture)
+Promise<String> onCf    = Promises.async(PromiseImplementation.COMPLETABLE_FUTURE) { 'x' }
+----
+
+`Promises.ensurePromise(result)` wraps a plain value in a completed promise and returns a
+promise unchanged, which is what lets a TaskGraph task body return either.
+
+== Completing a Promise
+
+[cols="2,3",options="header"]
+|===
+| Method | Effect
+
+| `accept(T value)`
+| Complete with a value.
+
+| `accept(Supplier<T>)`
+| Complete with the supplier's result.
+
+| `accept(CompletableFuture<T>)`, `accept(Promise<T>)`
+| Complete when the other future or promise completes, with its outcome.
+
+| `fail(Throwable)`, `reject(Throwable)`
+| Complete with an error. `reject` is an alias of `fail`.
+
+| `cancel(boolean mayInterruptIfRunning)`
+| Cancel a pending promise.
+|===
+
+A promise is completed once. Cancellation propagates down a chain: cancelling a promise
+cancels the promises derived from it. Calling `cancel` on a promise that has already completed
+or failed returns `false` and leaves its outcome alone, but still cancels its dependents.
+
+== Reading a Promise
+
+`get()` blocks until the promise is done and returns the value or throws the error.
+`get(timeout, unit)` does the same with a limit and throws `TimeoutException`. `isDone()`,
+`isCompleted()`, `isFailed()` and `isCancelled()` report state without blocking.
+
+Blocking is cheap on a virtual thread, which is where promise work runs by default. Prefer
+callbacks and composition anyway when the code is on a thread it does not own.
+
+== Callbacks
+
+[source,groovy]
+----
+promise
+    .onComplete { value -> log.info "got $value" }        // success only
+    .onError    { error -> log.warn "failed", error }     // failure only
+    .whenComplete { value, error -> release() }           // either
+----
+
+Each returns the promise, so callbacks can be chained. `tap { ... }` runs a side effect on
+success and passes the value through unchanged.
+
+== Composition
+
+Composition methods return a new promise and leave the original as it was.
+
+[cols="2,3",options="header"]
+|===
+| Method | Result
+
+| `then(fn)`, `map(fn)`
+| A promise for the transformed value.
+
+| `flatMap(fn)`
+| For a function that itself returns a promise: the result is that inner promise's outcome,
+not a promise of a promise.
+
+| `filter(predicate)`
+| The same value if the predicate holds. Otherwise the new promise fails with
+`NoSuchElementException`.
+
+| `recover(fn)`
+| On failure, a value computed from the error. On success, the original value.
+
+| `zip(other, combiner)`
+| Completes when both promises have, with the combined value. Fails if either fails.
+|===
+
+[source,groovy]
+----
+Promises.async { loadCustomer(id) }
+        .flatMap { customer -> Promises.async { loadOrders(customer) } }
+        .map     { orders -> orders.sum { it.total } }
+        .recover { error -> 0 }
+        .onComplete { total -> println total }
+----
+
+An error anywhere in a chain skips the remaining transformations and arrives at the first
+`recover` or `onError`.
+
+== Timeouts
+
+There are three, and the difference matters.
+
+[cols="2,3",options="header"]
+|===
+| Method | Behaviour
+
+| `timeout(time, unit)`
+| Returns a *new* promise that fails with `TimeoutException` if the original has not completed in time.
+
+| `timeout(time, unit, fallbackValue)`
+| Returns a *new* promise that completes with the fallback value on timeout.
+
+| `orTimeout(time, unit)`
+| Changes *this* promise so that it fails with `TimeoutException` on timeout. Everything already
+attached to it sees the failure.
+|===
+
+`Promises.timeout(time, unit) { ... }` starts a task with a time limit in one call.
+
+A timeout's timer is released as soon as its promise completes, so a long timeout on a
+promise that finishes quickly holds nothing afterwards.
+
+== Working with Several Promises
+
+[cols="2,3",options="header"]
+|===
+| Method | Result
+
+| `Promises.all(promises)`, `allOf(promises)`
+| A promise of the list of all values. Fails if any input fails.
+
+| `Promises.any(promises)`
+| The first *successful* result.
+
+| `Promises.race(promises)`
+| The first completion of any kind, success or failure.
+
+| `Promises.sequence(promises)`
+| The list of values, in input order.
+
+| `Promises.traverse(items, mapper)`
+| Runs the mapper over the items one after another, starting each promise only when the
+previous one has completed. Use it when the order or the degree of concurrency matters.
+
+| `Promises.zip(p1, p2, combiner)`
+| The static form of `zip`.
+|===
+
+`Promise.all` and `Promise.any` are also available as static methods on the interface.
+
+== Delay and Retry
+
+[source,groovy]
+----
+Promises.delay(500, TimeUnit.MILLISECONDS)                     // completes after the delay
+Promises.delay(2, TimeUnit.SECONDS) { refreshCache() }         // runs the task after the delay
+
+Promises.retry(3, 200, TimeUnit.MILLISECONDS) { callFlakyService() }
+----
+
+`retry(maxAttempts, delayBetweenAttempts, unit, task)` counts the first try as an attempt. It
+completes on the first success and fails with the last error once the attempts are used up.
+TaskGraph has its own retry policy at the task level (see the TaskGraph part); this one is for
+code using promises directly.
+
+== Choosing the Pool
+
+Asynchronous promise work runs on the current `ExecutorPool` (<<ch-pools>>). The pool is
+resolved from a thread-local context, falling back to a default.
+
+[source,groovy]
+----
+def pool = new ConcurrentPool(4)
+
+Promises.withPool(pool) {
+    Promises.async { cpuBoundWork() }      // runs on the 4-thread pool
+}
+
+Promises.setDefaultPool(pool)              // for everything that does not say otherwise
+----
+
+`withPool` restores the previous pool when the closure returns. This is also the hook tests
+use to run promise code on a pool they control.
+
+== Interoperating with `CompletableFuture`
+
+A promise converts to a `CompletableFuture` with Groovy coercion,
+`promise as CompletableFuture`, and `Promises.from(future)` goes the other way. That is enough
+to pass a promise to any Java API that takes a `CompletionStage`.
+
+A promise made from a future that failed carries the real cause: the `CompletionException`
+that a dependent stage wraps its failure in is removed.

@@ -1,0 +1,357 @@
+[[ch-actors]]
+= Actors: State Behind a Mailbox
+
+Package `org.softwood.actor`. An actor owns some state and a mailbox. Messages sent to it are
+queued and handled one at a time, so the handler can read and change the actor's state
+without locks: no two messages are ever processed at once. Everything else an actor system
+offers, supervision, hierarchy, scheduling, lifecycle monitoring and remoting, is built
+around that one rule.
+
+== The Actor System
+
+`ActorSystem` is the entry point. Actors created through it are registered, can be found by
+name, and are stopped together when the system shuts down. The system also owns the
+scheduler, the death-watch registry and the parent-child hierarchy, which is why an actor
+needs a system to use them.
+
+[source,groovy]
+----
+def system = new ActorSystem('orders')
+
+def counter = system.actor {
+    name 'counter'
+    state count: 0
+    onMessage { msg, ctx ->
+        ctx.state.count += msg
+        ctx.reply(ctx.state.count)
+    }
+}
+
+counter.tell(5)
+assert counter.askSync(1, Duration.ofSeconds(2)) == 6
+
+system.shutdown()
+----
+
+`system.actor('name') { msg, ctx -> ... }` is the short form for an actor that needs only a
+name and a handler. `createActor(name, handler, initialState)` is the plain-method form.
+`getActor(name)`, `hasActor(name)`, `getActorNames()` and `getActorCount()` query the
+registry; `removeActor(name)` takes one out. `ActorSystem` is `Closeable`, and `close()`
+is the same as `shutdown()`.
+
+=== Standalone actors
+
+`ActorFactory.create(name) { msg, ctx -> ... }` makes an actor with no system. It is meant
+for tests and for the rare actor that needs none of the system's services: a standalone actor
+cannot spawn children, watch other actors or schedule messages. `ActorFactory.builder(name,
+handler)` and the `createWithPool`, `createWithSharedPool` and `createWithMailboxLimit`
+methods configure the pool and mailbox of a standalone actor.
+
+== Defining Behaviour
+
+The builder closure passed to `system.actor` accepts three styles of handler.
+
+[source,groovy]
+----
+system.actor {
+    name 'router'
+
+    // 1. One handler for everything
+    onMessage { msg, ctx -> ... }          // 'react' is an alias
+
+    // 2. Or dispatch on type or predicate
+    when(Order)             { order, ctx -> ctx.reply(price(order)) }
+    when({ it == 'status' }) { msg, ctx -> ctx.reply(ctx.state.status) }
+    otherwise               { msg, ctx -> log.warn "unhandled: $msg" }
+}
+----
+
+`state` supplies the initial state map and `supervisionStrategy` sets how failures are handled
+(<<actor-supervision>>).
+
+== Sending Messages
+
+[cols="2,3",options="header"]
+|===
+| Method | Behaviour
+
+| `tell(msg)`, `send(msg)`
+| Fire and forget. Returns as soon as the message is queued.
+
+| `tell(msg, sender)`
+| As `tell`, recording the sending actor so the handler can answer it with `ctx.replyToSender`.
+
+| `askSync(msg, timeout)`, `ask(msg, timeout)`, `sendAndWait(msg, timeout)`, `actor << msg`
+| Send and block for the reply. Throws `TimeoutException` if none arrives in time. The default
+timeout is five seconds, which is also what the `<<` operator uses. Note that `<<` on an
+actor waits for a reply; it is not a fire-and-forget send.
+
+| `sendAndContinue(msg, continuation, timeout)`
+| Send and return at once; the continuation closure is called with the reply.
+|===
+
+On a local actor `ask` is the same call as `askSync` and blocks. On a remote reference
+(<<actor-remoting>>) `ask` returns a `CompletableFuture` and `askSync` blocks. Code that
+must work with both should call `askSync`.
+
+== The Handler Context
+
+The second argument to every handler is an `ActorContext`.
+
+[cols="2,3",options="header"]
+|===
+| Member | Purpose
+
+| `ctx.state`
+| The actor's private state map.
+
+| `ctx.reply(value)`
+| Answer an `ask`. `isAskMessage()` tells the handler whether anyone is waiting.
+
+| `ctx.deferReply()`
+| Tell the actor that the reply will be sent later, for example from another actor's answer.
+
+| `ctx.forward(target, msg)`, `ctx.forwardAndReply(target, msg, timeout)`
+| Pass work to another actor, by reference or by name. The second form waits for that actor's
+answer and uses it as this actor's reply.
+
+| `ctx.actorRef(name)`, `ctx.hasActor(name)`
+| Look up another actor in the system.
+
+| `ctx.broadcast(names, msg)`, `ctx.broadcastPattern(pattern, msg)`
+| Send to several actors.
+
+| `ctx.self()`, `ctx.tellSelf(msg)`, `ctx.replyToSender(msg)`, `ctx.hasSender()`
+| The actor itself and whoever sent the current message.
+
+| `ctx.spawn(...)`, `ctx.spawnForEach(...)`, `ctx.getChildren()`, `ctx.getParent()`
+| Child actors (<<actor-hierarchy>>).
+
+| `ctx.watch(actor)`, `ctx.unwatch(actor)`
+| Lifecycle monitoring (<<actor-deathwatch>>).
+
+| `ctx.scheduleOnce(...)`, `ctx.scheduleAtFixedRate(...)`, `ctx.scheduleWithFixedDelay(...)`
+| Timed messages to self (<<actor-scheduling>>).
+
+| `ctx.isAuthenticated()`, `ctx.getSubject()`, `ctx.hasRole(role)`, `ctx.requireRole(role)` and the `Any`/`All` variants
+| The caller's identity and roles where the message carried them. The `require` methods throw
+when the check fails.
+|===
+
+== Mailbox, Errors and Shutdown
+
+The mailbox is unbounded unless `setMaxMailboxSize(n)` is called; zero means unbounded. When a
+bounded mailbox is full, new messages are rejected and counted.
+
+An exception thrown by a handler does not stop the actor. It is counted, kept in a bounded
+list of recent errors (100 by default) and passed to the handler registered with
+`onError { e -> ... }`, and the supervision strategy then decides what happens next.
+`getErrors(max)` and `clearErrors()` read and reset the list.
+
+`stop()` is graceful: no new messages are accepted, every message already in the mailbox is
+processed, then the actor terminates. `stop(timeout)` does the same and reports whether it
+finished in time. `stopNow()` discards whatever is queued. `isStopped()` and `isTerminated()`
+report progress.
+
+An ask that will never be processed fails at once: when an actor is force-stopped, or stops
+itself, the callers of any asks still in the mailbox get an `IllegalStateException` (inside
+the `ExecutionException` from `askSync`) and do not sit out their timeout.
+
+A handler may stop its own actor, and a supervision strategy may do it on the handler's
+behalf. The stop takes effect when the current handler returns; the caller of the message
+that caused it still receives its reply or its error.
+
+`health()` and `metrics()` return maps for monitoring, including the counts of messages
+received, processed, failed and rejected.
+
+[[actor-supervision]]
+== Supervision
+
+A supervision strategy turns a handler failure into one of four directives.
+
+[cols="1,3",options="header"]
+|===
+| `SupervisorDirective` | Effect
+
+| `RESTART`
+| Discard the actor's state and carry on with a fresh instance.
+
+| `RESUME`
+| Ignore the failure and take the next message. State is kept.
+
+| `STOP`
+| Stop the actor permanently. The failing message's caller gets the error; asks still queued
+are failed. The same happens when the restart limit is reached, and when `ESCALATE` finds
+no parent to escalate to.
+
+| `ESCALATE`
+| Pass the failure to the parent actor's supervisor.
+|===
+
+Two strategies are provided. `OneForOneStrategy` applies the directive to the actor that
+failed, which is right when failures are independent. `AllForOneStrategy` applies it to all
+the siblings under the same supervisor, for actors that share a resource and must be reset
+together; use it with care, since one repeatedly failing actor restarts all of them.
+
+Both take a decider closure that maps the exception to a directive, and the same limits:
+
+[cols="2,1,3",options="header"]
+|===
+| Setting | Default | Meaning
+
+| `maxRestarts`
+| 10
+| Restarts allowed inside the window before the strategy gives up.
+
+| `withinDuration`
+| 1 minute
+| The window.
+
+| `useExponentialBackoff`
+| false
+| Wait longer between successive restarts.
+
+| `initialBackoff`, `maxBackoff`
+| 100 ms, 10 s
+| Bounds of the backoff.
+|===
+
+[source,groovy]
+----
+def strategy = new OneForOneStrategy(maxRestarts: 5, withinDuration: Duration.ofMinutes(1)) { t ->
+    switch (t) {
+        case IllegalArgumentException: return SupervisorDirective.RESUME
+        case IOException:              return SupervisorDirective.RESTART
+        default:                       return SupervisorDirective.ESCALATE
+    }
+}
+
+system.actor {
+    name 'worker'
+    supervisionStrategy strategy
+    onMessage { msg, ctx -> ... }
+}
+----
+
+`SupervisionStrategy.restartAlways()`, `resumeAlways()`, `stopAlways()` and `escalateAlways()`
+cover the simple cases. `defaultStrategy()` restarts with the default limits and exponential
+backoff.
+
+[[actor-hierarchy]]
+== Hierarchy
+
+An actor creates children from inside its handler. The system records the relationship, which
+is what gives `ESCALATE` somewhere to go.
+
+[source,groovy]
+----
+onMessage { msg, ctx ->
+    def child = ctx.spawn('parser') { line, childCtx -> childCtx.reply(parse(line)) }
+
+    List<Actor> workers = ctx.spawnForEach(files, 'scanner') { file, index, workerMsg, workerCtx ->
+        workerCtx.reply(scan(file))
+    }
+}
+----
+
+`spawnForEach` creates one child per item. Use it in place of `items.each { ctx.spawn(...) }`:
+closures nested several levels deep inside an actor handler can resolve names against the
+wrong delegate, and `spawnForEach` avoids the nesting.
+
+Two small helpers exist for the same reason. `CounterMap`, from `ctx.createCounterMap()`, is a
+map of counters with `increment`, `decrement`, `total` and `merge` that behaves predictably in
+nested closures where `counts[key] += 1` does not. The `@SafeActor` annotation on a class adds
+compile-time warnings for the problematic patterns. `ActorPatterns.aggregatorPattern(count,
+onComplete)` builds a handler that collects a known number of replies and then calls back.
+
+[[actor-deathwatch]]
+== Death Watch
+
+`ctx.watch(other)` asks to be told when another actor stops. The watcher receives a
+`Terminated` message carrying the stopped actor and, if it failed, the cause.
+
+[source,groovy]
+----
+onMessage { msg, ctx ->
+    if (msg == 'start') {
+        ctx.watch(ctx.spawn('worker') { m, c -> ... })
+    } else if (msg instanceof Terminated) {
+        log.warn "${msg.actor.name} stopped; replacing it"
+    }
+}
+----
+
+[[actor-scheduling]]
+== Scheduling
+
+An actor sends itself a message later, or repeatedly, without blocking its handler.
+
+[source,groovy]
+----
+Cancellable timeout = ctx.scheduleOnce(Duration.ofSeconds(5), 'timeout')
+Cancellable tick    = ctx.scheduleAtFixedRate(Duration.ZERO, Duration.ofSeconds(30), 'health-check')
+
+timeout.cancel()
+----
+
+The scheduled message arrives through the mailbox like any other, so it is handled in turn and
+sees consistent state. Timers are cleaned up when their actor terminates.
+
+[[actor-remoting]]
+== Remoting
+
+A `RemoteActorRef` implements `Actor` for an actor in another process, addressed by URI:
+`scheme://host:port/system/actorName`. Delivery is the job of a `RemotingTransport`.
+
+[cols="1,3",options="header"]
+|===
+| Scheme | Transport
+
+| `rsocket`
+| `RSocketTransport`. Binary, with connection reuse and back-pressure. The default and the
+recommended choice.
+
+| `http`
+| `HttpTransport`. JSON over `POST /tell` and `POST /ask`. Slower, but readable on the wire
+and easy to exercise with ordinary HTTP tools.
+
+| `microstream`
+| `MicroStreamTransport`. A skeleton that demonstrates the transport SPI and simulates
+delivery. Not for production use.
+|===
+
+[source,groovy]
+----
+system.enableRemoting([new RSocketTransport(system, 7000, true)])
+
+def pricing = system.remote('rsocket://pricing-host:7000/pricing/quoter')
+def quote = pricing.askSync(request, Duration.ofSeconds(3))
+----
+
+The RSocket and HTTP transports take an optional TLS configuration and an auth token set with
+`setAuthToken(token)`; see <<ch-security>>. `TransportRegistry` holds the transports by
+scheme and can set them up from configuration (`actor.remote.transport`, with a block of
+settings per transport). Message encoding is pluggable through `MessageSerializer`; JSON,
+MessagePack and Java serialization implementations are included.
+
+`JavaSerializer` deserialises through an allow-list, because Java deserialisation of bytes
+from another process can run code through whatever classes are on the classpath. By default
+it accepts JDK value types only (`java.lang`, `java.util`, `java.time`, `java.math`, and
+arrays of them) and rejects everything else with a `SerializationException`. An application
+that sends its own message classes names their packages:
+`new JavaSerializer(['com.myapp.messages.'])`. Prefer JSON or MessagePack where they are
+enough.
+
+A new transport implements `RemotingTransport`: `scheme()`, `start()`, `tell(uri, msg)`,
+`ask(uri, msg, timeout)` and `close()`.
+
+== Distributed Registry
+
+By default the actor registry is a local map. With the configuration key `distributed` set
+to true, `ActorRegistry` stores its entries in Hazelcast instead, so that systems on several
+nodes share one view of which actor lives where; `system.isDistributed()` reports the mode and
+`system.findActorNode(name)` returns the owning node. `HazelcastConfigBuilder` builds the
+Hazelcast configuration from application config and supports multicast, TCP/IP, Kubernetes
+and AWS discovery. Cluster entries record the owning node, a status and a heartbeat, and
+lifecycle changes are published as `ActorLifecycleEvent`. The shared cluster services are
+described in <<ch-clustering>>.

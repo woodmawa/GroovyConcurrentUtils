@@ -1,3 +1,4 @@
+[[tg-01]]
 = Architecture & Design Philosophy
 
 [abstract]
@@ -665,6 +666,6 @@ The layered architecture ensures separation of concerns while maintaining flexib
 
 == Next Steps
 
-* **Chapter 2** - Learn why we chose a DSL approach
-* **Chapter 3** - Deep dive into Pool and Promise foundations
-* **Chapter 4** - Understand the Task/Collection/Graph layers
+* <<tg-02>> - Learn why we chose a DSL approach
+* <<tg-03>> - Deep dive into Pool and Promise foundations
+* <<tg-04>> - Understand the Task/Collection/Graph layers

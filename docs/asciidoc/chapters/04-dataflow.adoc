@@ -1,0 +1,233 @@
+[[ch-dataflow]]
+= Dataflow: Single-Assignment Variables
+
+Package `org.softwood.dataflow`. A dataflow variable is a cell that is written once and can
+be read by any number of threads; a reader that arrives before the writer waits. Concurrent
+code written this way has no shared mutable state to guard, because nothing is ever
+overwritten.
+
+This layer carries more weight than its size suggests. The default promise is a wrapper over a
+dataflow variable, so every TaskGraph result, every task callback and every `Promises.all`
+travels through the code described here. Its delivery guarantees are the library's delivery
+guarantees; they are set out in <<dataflow-guarantees>>.
+
+== `DataflowExpression`: The Base
+
+`DataflowExpression<T>` is the single-assignment value itself. It moves exactly once from
+`PENDING` to one of three terminal states.
+
+[cols="1,3",options="header"]
+|===
+| State | Reached by
+
+| `SUCCESS`
+| `setValue(value)`. The value may be `null`.
+
+| `ERROR`
+| `setError(throwable)`.
+
+| `CANCELLED`
+| `setCancelled(cause)`. Held as a `CancellationException`.
+|===
+
+A second completion of any kind throws `IllegalStateException`. That is the single-assignment
+rule, enforced at runtime under a completion lock.
+
+`getValue()` blocks until the expression is complete, then returns the value or throws the
+error. `getValue(timeout, unit)` is the bounded form. `isBound()` is true in any terminal
+state, `hasError()` is true for both `ERROR` and `CANCELLED`, and `getCompletedAt()` records
+when completion happened.
+
+Listeners are registered with `whenBound { value -> ... }`. A listener is always invoked
+asynchronously on the expression's pool, never on the thread that registers it or the thread
+that binds the value, so registering a listener cannot re-enter the caller. A listener
+registered after completion is scheduled straight away. The expression also fires a JavaBeans
+`PropertyChangeEvent` on completion, for tooling.
+
+== `DataflowVariable`: The Working Type
+
+`DataflowVariable<T>` extends the expression with the API application code uses.
+
+=== Binding
+
+[source,groovy]
+----
+def total = new DataflowVariable<Integer>()
+
+total.bind(42)            // or:  total << 42
+total.bindError(new IllegalStateException('no stock'))
+total.bindCancelled()
+----
+
+A variable is created on the default pool, or on a pool passed to its constructor
+(<<ch-pools>>).
+
+=== Reading
+
+[cols="2,3",options="header"]
+|===
+| Method | Behaviour
+
+| `get()`
+| Blocks until bound. Returns the value or throws the error.
+
+| `get(timeout, unit)`, `get(Duration)`
+| Blocks up to the limit, then throws `TimeoutException`.
+
+| `getNonBlocking()`
+| The value if the variable completed successfully, otherwise `null`. Never blocks.
+
+| `getIfAvailable()`
+| The same as an `Optional`.
+
+| `isSuccess()`, `isBound()`, `hasError()`
+| State checks.
+
+| `toFuture()`
+| A `CompletableFuture` that completes with the variable.
+|===
+
+=== Callbacks
+
+[source,groovy]
+----
+total.whenAvailable { value -> println "total = $value" }     // success only
+total.whenError     { error -> log.warn 'failed', error }     // error or cancellation
+
+total >> { value -> println value }                           // operator form of whenAvailable
+----
+
+A cancelled variable calls its `whenError` callbacks and not its `whenAvailable` callbacks.
+
+=== Running a task into a variable
+
+`task { ... }` runs a closure, `Callable` or `Supplier` on the variable's pool and binds the
+result, or the exception, to the variable.
+
+[source,groovy]
+----
+def price = new DataflowVariable<BigDecimal>().task { lookupPrice(sku) }
+----
+
+The variable keeps a reference to the running work. `cancelTask(true)` interrupts it;
+`cancelTask(false)` cancels the variable and leaves the work to finish. `attachTask(future)`
+is how code that submits the work itself hands the `Future` to the variable so that
+cancellation can reach it. If the work finishes after the variable has already been completed
+some other way, the late result is dropped and logged at debug.
+
+=== Transformations
+
+`then(fn)` returns a new variable holding the transformed value; an error passes straight
+through. `recover(fn)` returns a new variable that takes a value computed from the error if
+there is one.
+
+The arithmetic operators are defined on variables. `a + b` on two variables returns a third
+that is bound when both operands are; `a + 5` maps the value. `-`, `*` and `/` behave the
+same way. If either side fails or is cancelled, the result carries that error.
+
+[source,groovy]
+----
+def net   = new DataflowVariable<BigDecimal>()
+def tax   = new DataflowVariable<BigDecimal>()
+def gross = net + tax                       // unbound until both are
+
+net << 100.0
+tax << 20.0
+assert gross.get() == 120.0
+----
+
+Any method the variable does not define is forwarded to the bound value, so
+`name.toUpperCase()` works on a `DataflowVariable<String>`. The call blocks until the variable
+is bound.
+
+`getMetrics()` returns the variable's type, state, completion time, error details and pool
+name for diagnostics. `toGstream()` exposes the value as a one-element stream (<<ch-gstream>>).
+
+== `Dataflows`: A Namespace of Variables
+
+`Dataflows` is a thread-safe container in which every property is a dataflow variable,
+created the first time it is mentioned. Reading a property blocks until it is bound; writing
+one binds it.
+
+[source,groovy]
+----
+def df = new Dataflows()
+
+pool.execute { df.total = df.net + df.tax }     // waits for both
+pool.execute { df.net = 100 }
+pool.execute { df.tax = 20 }
+
+assert df.total == 120
+----
+
+The order in which the three closures run does not matter. That is the point of the model:
+the dependencies between values decide the order, not the scheduler.
+
+Other forms:
+
+* `df[0] = 99` and `df[0]` address variables by index or any other key.
+* `df.x { value -> ... }` registers a callback on `x` without blocking.
+* Assigning one variable to another wires them: the target is bound when the source is. If
+  the source fails, the target fails with the same error.
+* Writing a property that is already bound throws `IllegalStateException`.
+* `getBoundValues()`, `getBoundProperties()` and `getUnboundProperties()` take non-blocking
+  snapshots; `contains`, `remove`, `clear`, `size` and iteration are available.
+
+== `DataflowFactory`: Tasks on a Chosen Pool
+
+`DataflowFactory` creates variables and launches tasks on one pool, so a component can be
+handed a factory and never mention a pool again. It is constructed with no argument for the
+default pool, or with an `ExecutorPool` or an `ExecutorService`.
+
+[source,groovy]
+----
+def factory = new DataflowFactory(pool)
+
+DataflowVariable<Report> report = factory.task { buildReport() }
+DataflowVariable<Report> bounded = factory.taskWithTimeout({ buildReport() }, 5, TimeUnit.SECONDS)
+
+def empty  = factory.createDataflowVariable()
+def preset = factory.createDataflowVariable(42)
+----
+
+`task` accepts a closure, `Callable`, `Supplier`, `Runnable`, or a `Function` with its input.
+`taskStream(tasks...)` runs several closures concurrently and returns their results as a
+`Gstream` in the order the tasks were given; a failure in any task is propagated.
+`taskStreamUnordered` returns results in the order they complete and leaves failed tasks
+out of the stream, so use `taskStream`, or `whenError` on the individual variables, when a
+failure must be seen.
+
+[[dataflow-guarantees]]
+== Delivery Guarantees
+
+These hold from version 1.2.0 and are covered by `DataflowIntegritySpec` and
+`CoreHardeningSpec`.
+
+A listener is never lost::
+Whether a listener is queued or scheduled immediately is decided under the same lock that
+completion takes. A listener registered at the same moment a variable is bound is delivered
+exactly once. This covers `whenBound`, `whenAvailable`, `whenError`, `then`, `recover`,
+`toFuture`, and every promise callback and combinator built on them.
+
+`get()` returns once the value is set::
+A promise's `get()` reads the variable's own future. There is no second future that could
+lag behind the first.
+
+An error is visible with its state::
+`setError` and `setCancelled` record the error before they change the state, so code that
+sees `hasError()` can always read the error.
+
+Cancellation reaches the work::
+A variable started with `task`, or a promise from `executeAsync`, holds the `Future` of its
+work. Cancelling with interrupt interrupts it.
+
+One listener cannot break another::
+Each listener is submitted to the pool as its own task, so a listener that throws does not
+stop the others. A listener that cannot be scheduled, because the pool has been closed, is
+logged and recorded in a list capped at 100 entries, read with
+`DataflowExpression.getListenerErrors()`. Listeners go through `pool.execute`, so a pool's
+admission limit applies to them too.
+
+What is not guaranteed: the order in which listeners on one variable run relative to each
+other, and anything about work that ignores interruption. Further dataflow items identified
+in the 2026-11-18 review remain open; `CHANGENOTE.md` lists them.

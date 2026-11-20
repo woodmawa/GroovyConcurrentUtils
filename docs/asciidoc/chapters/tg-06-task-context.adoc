@@ -1,3 +1,4 @@
+[[tg-06]]
 = TaskContext: Shared Execution State
 
 [abstract]
@@ -926,9 +927,9 @@ TaskContext is the glue that binds workflows together, providing a consistent ex
 
 == Next Steps
 
-* **Chapter 7** - Practical examples using TaskContext
-* **Chapter 9** - Security features in TaskContext
-* **Chapter 10** - Observability with events
+* <<tg-07>> - Practical examples using TaskContext
+* <<tg-09>> - Security features in TaskContext
+* <<tg-10>> - Observability with events
 
 
 == Context Explosion Protection

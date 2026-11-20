@@ -325,7 +325,7 @@ class GroovyAgent<T> implements Agent<T> {
     /** Returns an immutable defensive snapshot of state */
     @Override
     T getValue() {
-        stateVersion.incrementAndGet()
+        // GCU 1.2.1: a read no longer advances the state version (it used to, and updates did not).
         
         try {
             return immutableCopySupplier?.get() ?: wrappedObject
@@ -646,6 +646,7 @@ class GroovyAgent<T> implements Agent<T> {
                     while ((t = taskQueue.poll()) != null) {
                         try {
                             t.execute(wrappedObject)
+                            stateVersion.incrementAndGet()
                             tasksCompleted.incrementAndGet()
                             lastTaskCompletedAt = System.currentTimeMillis()
                         } catch (Throwable e) {

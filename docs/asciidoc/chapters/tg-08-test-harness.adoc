@@ -1,3 +1,4 @@
+[[tg-08]]
 = TaskGraph Test Harness
 
 [abstract]
@@ -888,6 +889,6 @@ With the test harness, you can confidently test workflows of any complexity.
 
 == Next Steps
 
-* **Chapter 7** - More examples to test
-* **Chapter 9** - Test security features
-* **Chapter 10** - Test observability features
+* <<tg-07>> - More examples to test
+* <<tg-09>> - Test security features
+* <<tg-10>> - Test observability features

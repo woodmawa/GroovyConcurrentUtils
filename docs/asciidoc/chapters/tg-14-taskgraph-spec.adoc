@@ -1,3 +1,4 @@
+[[tg-14]]
 = TaskGraphSpec Testing Framework
 
 [abstract]
@@ -14,7 +15,6 @@ The framework lives in `src/testFixtures/groovy/org/softwood/dag/test/` and is b
 
 
 == Dependency Setup
-[[_dependency_setup]]
 
 The testing framework is distributed as a Gradle https://docs.gradle.org/current/userguide/java_test_fixtures.html[test-fixtures] artifact, keeping JUnit and test-support code out of the main library jar.
 
@@ -1249,7 +1249,7 @@ With TaskGraphSpec, you can write tests that are:
 
 == Next Steps
 
-* **Chapter 7** - Study workflow examples to test
-* **Chapter 8** - Compare with full test harness capabilities
-* **Chapter 12** - Test gateway routing logic
-* **Chapter 13** - Test different task types
+* <<tg-07>> - Study workflow examples to test
+* <<tg-08>> - Compare with full test harness capabilities
+* <<tg-12>> - Test gateway routing logic
+* <<tg-13>> - Test different task types

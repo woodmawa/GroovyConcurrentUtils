@@ -1,3 +1,4 @@
+[[tg-03]]
 = Foundation Libraries: Pool & Promises
 
 [abstract]
@@ -1154,6 +1155,6 @@ These primitives are the building blocks that enable TaskGraph's powerful asynch
 
 == Next Steps
 
-* **Chapter 4** - Learn how Tasks, TaskCollections, and TaskGraph build on these foundations
-* **Chapter 6** - Understand how TaskContext provides execution context
+* <<tg-04>> - Learn how Tasks, TaskCollections, and TaskGraph build on these foundations
+* <<tg-06>> - Understand how TaskContext provides execution context
 * **Appendix B** - Performance tuning guidelines

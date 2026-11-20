@@ -51,7 +51,12 @@ class TaskBinding implements IBinding {
     
     @Override
     void set(String key, Object value) {
-        variables.put(key, value)
+        // GCU 1.2.1: the backing ConcurrentHashMap rejects null. Setting null means "no value": remove the key.
+        if (value == null) {
+            variables.remove(key)
+        } else {
+            variables.put(key, value)
+        }
     }
     
     @Override

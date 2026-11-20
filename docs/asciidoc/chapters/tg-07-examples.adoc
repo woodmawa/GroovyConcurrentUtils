@@ -1,3 +1,4 @@
+[[tg-07]]
 = Practical Examples and Usage Patterns
 
 [abstract]
@@ -792,6 +793,6 @@ def result = workflow.start().get()
 
 == Next Steps
 
-* **Chapter 8** - Test these patterns with the test harness
-* **Chapter 9** - Add security to workflows
-* **Chapter 10** - Monitor workflow execution
+* <<tg-08>> - Test these patterns with the test harness
+* <<tg-09>> - Add security to workflows
+* <<tg-10>> - Monitor workflow execution

@@ -1,3 +1,4 @@
+[[tg-13]]
 = Concrete Task Types Reference
 
 [abstract]
@@ -1340,7 +1341,7 @@ TaskGraph provides 15+ infrastructure task types plus intelligent agentic task t
 * ✅ **Utilities** - DelayTask, LogTask, TransformTask
 * ✅ **Intelligent** - LlmTask (`llm.inference`), ControlTask (`control.policy`)
 * ✅ **Human-in-loop (library)** - ManualTask (implemented in GCU with forms, notifications, escalation, timeout)
-* ✅ **Office Documents** - XlsxTask, DocxTask, PptxTask with full Groovy DSL and Apache POI adapters (see Chapter 15)
+* ✅ **Office Documents** - XlsxTask, DocxTask, PptxTask with full Groovy DSL and Apache POI adapters (see <<tg-15>>)
 * 🔶 **Planned** - `human.input` FlowTypeRegistry factory (wires ManualTask into flow graphs), `@EffectClass` annotation
 
 All tasks inherit features from TaskBase:
@@ -1361,8 +1362,8 @@ Intelligent task types additionally provide:
 
 == Next Steps
 
-* **Chapter 7** - Task usage examples
-* **Chapter 11** - TaskBase reference
-* **Chapter 5** - Create custom task types
-* **Chapter 15** - Office Document DSL (XlsxTask, DocxTask, PptxTask) — full DSL reference, adapter injection, POI notes
+* <<tg-07>> - Task usage examples
+* <<tg-11>> - TaskBase reference
+* <<tg-05>> - Create custom task types
+* <<tg-15>> - Office Document DSL (XlsxTask, DocxTask, PptxTask) — full DSL reference, adapter injection, POI notes
 * **mcp-agentic-workflow docs** - Full flow descriptor reference, FlowTypeRegistry, WorkingMemory lifecycle

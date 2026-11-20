@@ -1,0 +1,32 @@
+[[app-history]]
+= Where the History Lives
+
+This book describes the library as it stands. What changed, when and why is recorded
+elsewhere.
+
+[cols="2,3",options="header"]
+|===
+| Source | Holds
+
+| `CHANGENOTE.md` (repository root)
+| One section per version, newest first: what changed, why, and what a consumer has to do.
+The place to look before upgrading.
+
+| `archive/`
+| Documents this book replaced. The per-capability readmes that were the documentation before
+the book existed, the implementation notes written while individual task types were built,
+and the index and generated PDF of the earlier TaskGraph-only reference guide. Kept for
+reference; not maintained.
+
+| Git history
+| Everything else.
+|===
+
+== How This Book Was Assembled
+
+Parts I to IV were written against the source at the version in the book header, using the
+archived readmes as input and keeping only what the code still does. Part V is the earlier
+TaskGraph reference guide, moved into this book unchanged apart from its chapter on
+execution integrity and the corrections made for version 1.2.0. Its chapters are tutorial in
+style and predate the rest; where a Part V chapter and the source disagree, the source is
+right and the chapter is due an edit.

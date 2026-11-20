@@ -1,0 +1,179 @@
+[[ch-gstream]]
+= Gstream: Java Streams with Groovy Closures
+
+Package `org.softwood.gstream`. `Gstream<T>` wraps `java.util.stream.Stream<T>` so that a
+pipeline is written with Groovy closures and a few operations the Java API lacks. It is
+statically compiled, lazy in the same way a Java stream is, and available wherever the rest of
+the library hands back several results at once: `DataflowFactory.taskStream` returns one, and
+a `DataflowVariable` converts to one.
+
+== Three Things to Know First
+
+A `Gstream` is single-use::
+A terminal operation consumes it, exactly as with a Java stream. Build a new one to run the
+pipeline again.
+
+Unknown methods materialise the stream::
+A method `Gstream` does not define is forwarded to a `List` built from the stream, which gives
+access to the Groovy collection methods (`collate`, `inject`, `first` and so on). The whole
+stream is read into memory to do it. Do not pass a method name that comes from untrusted
+input.
+
+Parallel closures must be stateless::
+After `parallel()`, closures run on several threads at once.
+
+== Creating a Stream
+
+[source,groovy]
+----
+Gstream.of(1, 2, 3)
+Gstream.of(1..100)                       // a Groovy range
+Gstream.from(orders)                     // any Collection
+Gstream.from(javaStream)                 // an existing Stream
+Gstream.empty()
+
+Gstream.generate { random.nextInt() }.limit(10)       // infinite, so limit it
+Gstream.iterate(1) { it * 2 }.limit(8)
+
+Gstream.fromParallel(orders)             // parallel from the start
+Gstream.ofParallel(1, 2, 3)
+Gstream.concat(first, second)
+----
+
+`fromIntStream`, `fromLongStream` and `fromDoubleStream` box a primitive stream. `getStream()`
+returns the underlying Java stream when an API needs it.
+
+There is also a builder form for pipelines assembled in a closure:
+
+[source,groovy]
+----
+def result = Gstream.build {
+    from(1..10)
+    filter { it % 2 == 0 }
+    map { it * 10 }
+}.toList()
+----
+
+The builder accepts `from`, `of`, `elements`, `add`, `fromCollection`, `fromRange`,
+`parallel`, `filter`, `map`, `distinct`, `distinctBy`, `sorted`, `sortedBy`, `skip`, `limit`
+and `flatMapIterable`.
+
+== Intermediate Operations
+
+These return a new `Gstream` and do no work until a terminal operation runs.
+
+[cols="2,3",options="header"]
+|===
+| Operation | Notes
+
+| `filter`, `findAll`
+| Keep matching elements. `findAll` is the Groovy name for the same thing.
+
+| `map`, `flatMap`, `flatMapIterable`
+| `flatMap` takes a closure returning a `Stream`; `flatMapIterable` takes one returning any `Iterable`.
+
+| `mapMulti { value, emit -> ... }`
+| Each element emits zero, one or many outputs by calling `emit`.
+
+| `distinct`, `distinctBy { key }`
+| Remove duplicates, by equality or by a key.
+
+| `sorted`, `sorted { a, b -> ... }`, `sortedBy { key }`
+| Natural order, a comparator closure, or a key.
+
+| `limit`, `skip`, `takeWhile`, `dropWhile`
+| Bound the stream by count or by predicate.
+
+| `peek`, `tee`
+| Run a side effect per element and pass the element through.
+
+| `zip(other)`, `zipWithIndex()`
+| Pair elements with another stream's, or with their position, as `Tuple2`.
+
+| `chunked(size)`
+| Lists of up to `size` consecutive elements, without overlap.
+
+| `windowed(size)`
+| A sliding window: `[1,2,3,4,5].windowed(3)` gives `[1,2,3]`, `[2,3,4]`, `[3,4,5]`.
+
+| `onErrorContinue { error, value -> ... }`
+| Skip an element whose processing throws, and carry on. `value` is `null` when the exception
+was thrown before a value was produced.
+
+| `parallel`, `sequential`, `unordered`, `onClose`
+| As on a Java stream.
+|===
+
+== Terminal Operations
+
+[cols="2,3",options="header"]
+|===
+| Operation | Result
+
+| `toList`, `toSet`, `toUnmodifiableList`, `toUnmodifiableSet`, `toArray`, `toCollection { factory }`
+| Collect the elements.
+
+| `collectList { mapper }`
+| Map and collect in one step.
+
+| `toMap { key }`, `toMap({ key }, { value })`, `toMap({ key }, { value }, { a, b -> merged })`, `toConcurrentMap(...)`
+| Build a map. The three-argument form resolves duplicate keys.
+
+| `groupBy { classifier }`, `groupBy({ classifier }, collector)`
+| A map of lists, or of whatever the downstream collector produces.
+
+| `partitioningBy { predicate }`
+| A map with keys `true` and `false`.
+
+| `reduce(identity) { a, b -> ... }`, `reduce { a, b -> ... }`
+| Fold. The form without an identity returns an `Optional`.
+
+| `collect(collector)`
+| Any Java `Collector`.
+
+| `joining(delimiter)`
+| A string.
+
+| `count`, `min`, `max`, `minBy { key }`, `maxBy { key }`
+| Aggregates. `min` and `max` also take a comparator closure.
+
+| `summarizingInt`, `summarizingLong`, `summarizingDouble`
+| Count, sum, min, max and average in one pass.
+
+| `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`
+| Short-circuiting searches.
+
+| `forEach`
+| Run an action per element.
+|===
+
+[source,groovy]
+----
+Map<String, List<Order>> shippedByRegion = Gstream.from(orders)
+        .filter { it.status == 'SHIPPED' }
+        .groupBy { it.region }
+
+Map<String, Long> countByRegion = Gstream.from(orders)
+        .groupBy({ it.region }, Collectors.counting())
+
+List<List<Row>> batches = Gstream.from(rows).chunked(500).toList()
+----
+
+== Parallel Streams on a Chosen Pool
+
+A parallel Java stream runs on the common fork-join pool unless told otherwise.
+`executeWith(pool) { gs -> ... }` runs the terminal operation as a task on a GCU pool
+(<<ch-pools>>) and blocks the caller until it returns. The closure receives the stream and
+must call a terminal operation on it.
+
+[source,groovy]
+----
+def pool = new ConcurrentPool('reporting')
+
+List<Integer> evens = Gstream.of(1..1000)
+        .parallel()
+        .executeWith(pool) { gs -> gs.filter { it % 2 == 0 }.toList() }
+----
+
+It throws `IllegalStateException` if the pool is closed, and wraps a checked exception from
+the closure in a `RuntimeException`.

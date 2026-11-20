@@ -1,3 +1,4 @@
+[[tg-05]]
 = Extensibility Through SPI
 
 [abstract]
@@ -1054,6 +1055,6 @@ The SPI pattern enables TaskGraph to be both powerful out-of-the-box and infinit
 
 == Next Steps
 
-* **Chapter 11** - TaskBase reference with all extension points
-* **Chapter 13** - All provided concrete task types
+* <<tg-11>> - TaskBase reference with all extension points
+* <<tg-13>> - All provided concrete task types
 * **Appendix** - Complete SPI reference documentation

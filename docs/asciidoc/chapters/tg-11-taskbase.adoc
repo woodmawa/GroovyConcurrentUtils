@@ -1,3 +1,4 @@
+[[tg-11]]
 = TaskBase Reference
 
 [abstract]
@@ -970,6 +971,6 @@ All these features are available to every task through inheritance from TaskBase
 
 == Next Steps
 
-* **Chapter 13** - Concrete task implementations
-* **Chapter 5** - Extend TaskBase for custom tasks
-* **Chapter 8** - Test TaskBase features
+* <<tg-13>> - Concrete task implementations
+* <<tg-05>> - Extend TaskBase for custom tasks
+* <<tg-08>> - Test TaskBase features

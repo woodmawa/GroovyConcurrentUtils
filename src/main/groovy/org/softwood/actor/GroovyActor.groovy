@@ -283,20 +283,30 @@ class GroovyActor implements Actor {
     // Lifecycle Management
     // ─────────────────────────────────────────────────────────────
 
+    /** Private stop marker, compared by identity: no message a caller can send is mistaken for it. */
+    private static final Object STOP_SIGNAL = new Object()
+
+    /** The thread running the mailbox loop, so stop() can tell when it is being called from a handler. */
+    private volatile Thread loopThread
+    private volatile boolean discardPending = false
+    private volatile boolean selfStopRequested = false
+    private volatile Throwable selfStopCause
+
     @Override
     void stop() {
+        if (Thread.currentThread().is(loopThread)) {
+            requestSelfStop(null)
+            return
+        }
+
         if (!running.compareAndSet(true, false)) {
             return  // Already stopping
         }
 
         log.debug("[$name] Initiating graceful stop")
 
-        // Send stop signal
-        try {
-            mailbox.put(new MessageEnvelope("__STOP__"))
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt()
-        }
+        // Queued behind everything already in the mailbox: those messages are processed first.
+        signalStop()
 
         // Wait for termination
         try {
@@ -318,19 +328,18 @@ class GroovyActor implements Actor {
 
     @Override
     boolean stop(Duration timeout) {
+        if (Thread.currentThread().is(loopThread)) {
+            requestSelfStop(null)
+            return true
+        }
+
         if (!running.compareAndSet(true, false)) {
             return terminated.getCount() == 0  // Already stopping/stopped
         }
 
         log.debug("[$name] Initiating graceful stop with timeout")
 
-        // Send stop signal
-        try {
-            mailbox.put(new MessageEnvelope("__STOP__"))
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt()
-            return false
-        }
+        signalStop()
 
         // Wait for termination with timeout
         boolean completed
@@ -339,6 +348,10 @@ class GroovyActor implements Actor {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt()
             return false
+        }
+
+        if (completed) {
+            notifyWatchersAndCleanup(null)
         }
 
         // Shutdown owned pool
@@ -361,17 +374,18 @@ class GroovyActor implements Actor {
             return  // Already stopping
         }
 
+        // Anything the loop takes from here on is failed, not processed.
+        discardPending = true
         int discarded = mailbox.size()
-        mailbox.clear()
+        failPending()
 
         // Use debug level to avoid information disclosure
         log.debug("[$name] Force stopped, discarded $discarded messages")
 
-        // Send stop signal
-        try {
-            mailbox.put(new MessageEnvelope("__STOP__"))
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt()
+        if (Thread.currentThread().is(loopThread)) {
+            selfStopRequested = true
+        } else {
+            signalStop()
         }
 
         // Don't wait - force termination
@@ -817,15 +831,23 @@ class GroovyActor implements Actor {
         final CountDownLatch terminatedLatch = this.terminated
 
         pool.execute({
+            loopThread = Thread.currentThread()
             log.debug("[$name] Mailbox loop started")
 
             try {
-                while (running.get()) {
+                // GCU 1.2.1: the loop ends on the private stop signal, not on running == false. A graceful
+                // stop() therefore processes everything queued ahead of the signal (it used to drop it).
+                while (true) {
                     MessageEnvelope envelope = mailbox.take()
 
-                    if (!running.get() || envelope.payload == "__STOP__") {
+                    if (envelope.payload.is(STOP_SIGNAL)) {
                         log.debug("[$name] Stop signal received")
                         break
+                    }
+
+                    if (discardPending) {
+                        failEnvelope(envelope)
+                        continue
                     }
 
                     processing.set(true)
@@ -834,16 +856,75 @@ class GroovyActor implements Actor {
                     } finally {
                         processing.set(false)
                     }
+
+                    if (selfStopRequested) {
+                        log.debug("[$name] Stop requested from inside the handler")
+                        break
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt()
                 log.debug("[$name] Mailbox loop interrupted")
             } finally {
+                // Nobody will process what is left: fail the asks so their callers do not wait for a timeout.
+                failPending()
+                loopThread = null
                 // groovy type fix for the IDE
                 terminatedLatch.countDown()
                 log.debug("[$name] Mailbox loop terminated")
+                if (selfStopRequested) {
+                    finishSelfStop()
+                }
             }
         } as Runnable)
+    }
+
+    /** Fails the reply of an ask that will never be processed. A tell is simply dropped. */
+    private void failEnvelope(MessageEnvelope envelope) {
+        if (envelope != null && envelope.isAsk() && !envelope.replyFuture.isDone()) {
+            envelope.replyFuture.completeExceptionally(
+                    new IllegalStateException("Actor [" + name + "] stopped before the message was processed"))
+        }
+    }
+
+    private void failPending() {
+        List<MessageEnvelope> left = new ArrayList<MessageEnvelope>()
+        mailbox.drainTo(left)
+        for (MessageEnvelope e : left) {
+            failEnvelope(e)
+        }
+    }
+
+    private void signalStop() {
+        try {
+            mailbox.put(new MessageEnvelope(STOP_SIGNAL))
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    /**
+     * stop() called on the mailbox loop's own thread (a supervision STOP, the restart limit, an escalation
+     * with no parent, or a handler stopping its own actor). Waiting for termination here would be the loop
+     * waiting for itself, so the stop is recorded and the loop finishes it once the handler returns.
+     */
+    private void requestSelfStop(Throwable cause) {
+        if (!running.compareAndSet(true, false)) {
+            return
+        }
+        selfStopCause = cause
+        selfStopRequested = true
+    }
+
+    private void finishSelfStop() {
+        try {
+            notifyWatchersAndCleanup(selfStopCause)
+        } catch (Throwable t) {
+            log.warn("[$name] Cleanup after self-stop failed: ${t.class.simpleName}: ${t.message}")
+        }
+        if (ownsPool && pool != null) {
+            pool.shutdown()
+        }
     }
 
     private void processMessage(MessageEnvelope envelope) {

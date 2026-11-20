@@ -183,15 +183,10 @@ class ConfigLoader {
             ConfigSpec spec,
             String profile
     ) {
-        LinkedHashSet<Path> out = []
-
-        if (options.externalFiles instanceof List) {
-            options.externalFiles.each {
-                out.add(Paths.get(it.toString()))
-            }
-        }
-
-        return out.toList()
+        // GCU 1.2.1: one collection rule, the documented one. Files named by -Dapp.config, then the
+        // externalFiles option, then config[-profile].* in each directory from -Dapp.configDir and the
+        // externalDirs option. Before this only the externalFiles option was read.
+        return ExternalConfigSource.collect(options, spec, profile)
     }
 
     private static Map<String, Object> loadExternalFile(
@@ -233,7 +228,10 @@ class ConfigLoader {
         Properties p = System.getProperties()
         for (String k : p.stringPropertyNames()) {
             if (k.startsWith(spec.sysPropPrefix)
-                    && !spec.profileSysKeys.contains(k)) {
+                    && !spec.profileSysKeys.contains(k)
+                    // GCU 1.2.1: these two name where to find config; they are not settings themselves.
+                    && k != spec.externalFilesSysProp
+                    && k != spec.externalDirsSysProp) {
                 out.put(
                         k.substring(spec.sysPropPrefix.length()),
                         p.getProperty(k)

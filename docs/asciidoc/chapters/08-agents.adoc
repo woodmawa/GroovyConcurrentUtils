@@ -1,0 +1,151 @@
+[[ch-agents]]
+= Agents: Serialised Access to One Object
+
+Package `org.softwood.agent`. An agent wraps a single mutable object and applies every change
+to it in turn. Any number of threads may submit closures; the agent runs them one after
+another against the wrapped object, so the object itself needs no locking.
+
+An agent is the simplest of the three state-protection tools in the library. A dataflow
+variable (<<ch-dataflow>>) is written once. An actor (<<ch-actors>>) receives messages and
+decides what they mean. An agent receives the *change itself*, as a closure, and has no
+behaviour of its own.
+
+== Creating an Agent
+
+Agents are created through `AgentFactory`.
+
+[source,groovy]
+----
+Agent<Map> stats = AgentFactory.create([count: 0, errors: 0])
+
+Agent<Map> custom = AgentFactory.builder([count: 0])
+        .pool(myPool)                 // run on a chosen ExecutorPool (poolOwned: shut it down with the agent)
+        .maxQueueSize(1000)           // bound the pending-update queue
+        .onError { e -> log.warn 'update failed', e }
+        .build()
+----
+
+`createWithPool(value, poolName)`, `createWithSharedPool(value, pool)` and
+`createWithQueueLimit(value, max)` are shorthand for the common builder combinations.
+
+== Updating State
+
+The closure passed to an agent runs with the wrapped object as its delegate, so it refers to
+the object's properties directly.
+
+[cols="2,3",options="header"]
+|===
+| Method | Behaviour
+
+| `send { ... }`, `async { ... }`, `agent >> { ... }`
+| Queue an update and return immediately.
+
+| `sendAndGet({ ... }, timeoutSeconds)`, `sync({ ... }, timeoutSeconds)`, `agent << { ... }`
+| Queue an update, wait for it to run and return the closure's result. A timeout of zero
+waits without limit; an expired timeout throws `RuntimeException`.
+
+| `sendBatch(closures)`
+| Queue several updates in order.
+
+| `sendAndGetBatch(closures, timeoutSeconds)`
+| Queue several updates and return their results as a list.
+|===
+
+[source,groovy]
+----
+stats.send { count++ }
+stats >> { errors++ }
+
+int current = stats.sendAndGet({ count }, 2)
+----
+
+Updates from one thread are applied in the order they were sent. Updates from different
+threads are applied in the order they reach the queue.
+
+== Reading State
+
+`getValue()` returns a snapshot, not the live object. The snapshot is produced by the agent's
+copy strategy, so the caller can read it without racing the agent and cannot change the
+agent's state through it. The default strategy is a deep copy. If copying throws, the agent
+logs a warning, counts the failure and returns the live object, which is not safe to share;
+an object the default cannot copy should supply its own strategy:
+
+[source,groovy]
+----
+def agent = AgentFactory.builder(account)
+        .copyStrategy({ -> account.clone() })
+        .build()
+----
+
+`getStateVersion()` is a counter of updates applied. It advances once for each update that
+completes without throwing and is not changed by reads, so two equal readings mean no update
+ran in between.
+
+To read a value that must be consistent with a particular update, read it inside
+`sendAndGet` instead of calling `getValue()` afterwards.
+
+== Errors
+
+An update that throws does not stop the agent; the next update runs as normal. The failure is
+kept in a bounded list of recent errors and passed to the handler registered with
+`onError { e -> ... }`. `getErrors(max)` and `clearErrors()` read and reset the list. For a
+synchronous `sendAndGet`, the exception also reaches the caller.
+
+== Back-pressure
+
+The queue of pending updates is unbounded by default. `setMaxQueueSize(n)` bounds it, which
+protects the process when producers outrun the agent. `getMaxQueueSize()` reads the limit.
+
+== Shutdown and Monitoring
+
+`shutdown()` stops accepting updates and lets the queued ones finish.
+`shutdown(timeout, unit)` does the same and reports whether the queue drained in time.
+`shutdownNow()` discards what is queued. `isShutdown()` and `isTerminated()` report progress.
+
+`health()` and `metrics()` return maps suitable for a monitoring endpoint.
+
+== Agent Pools
+
+One agent applies updates serially, so one agent is one lane. `AgentPool` holds several
+agents, each with its own copy of the state, and spreads work across them. It suits state
+that can be partitioned or merged later: counters per worker, per-shard caches, accumulators
+that are summed at the end.
+
+[source,groovy]
+----
+AgentPool<Map> pool = AgentPoolFactory.create(4) { [count: 0] }
+
+pool.send { count++ }                       // round-robin to one agent
+pool.broadcast { count = 0 }                // every agent
+
+List<Map> all = pool.getAllValues()
+int total = all.sum { it.count }
+----
+
+[cols="2,3",options="header"]
+|===
+| Method | Behaviour
+
+| `send`, `sendAndGet`
+| Dispatch to the next agent in rotation.
+
+| `broadcast`, `broadcastAndGet`
+| Run on every agent. The second form returns all the results.
+
+| `getAllValues()`, `getValue(index)`, `getAgent(index)`, `getAgents()`, `size()`
+| Read state or reach an individual agent.
+
+| `onError`, `getAllErrors`, `clearAllErrors`, `setMaxQueueSize`
+| The single-agent settings applied across the pool.
+
+| `shutdown`, `shutdownNow`, `health`, `metrics`
+| Coordinated lifecycle and aggregated monitoring.
+|===
+
+The state factory closure passed to `AgentPoolFactory.create` is called once per agent, so
+each agent gets its own object. `AgentPoolFactory.builder(size) { ... }` adds `sharedPool`,
+`copyStrategy`, `maxQueueSize` and `onError`; `createWithDedicatedPools` gives each agent its own executor
+pool.
+
+Because dispatch is round-robin, two updates sent to a pool may run on different agents and
+see different state. Work that must see all the state belongs on a single agent.

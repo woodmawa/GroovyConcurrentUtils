@@ -11,7 +11,9 @@ import static org.junit.jupiter.api.Assertions.*
 @CompileDynamic
 class JavaSerializerTest {
     
-    private final JavaSerializer serializer = new JavaSerializer()
+    // GCU 1.2.1: deserialisation is allow-listed. This test's own message classes live under org.softwood.
+    // Refusal of a class that is not allowed is covered by Hardening121Spec (S1).
+    private final JavaSerializer serializer = new JavaSerializer(['org.softwood.'])
     
     @Test
     void test_serialize_deserialize_string() {

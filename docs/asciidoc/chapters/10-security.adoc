@@ -1,0 +1,147 @@
+[[ch-security]]
+= Security Services: Secrets, TLS and Tokens
+
+Package `org.softwood.security`. These are the building blocks the rest of the library uses
+when it crosses a trust boundary: reading a secret, opening a TLS connection, and proving who
+is calling. They are used by actor remoting (<<actor-remoting>>) and are available to
+applications directly.
+
+This chapter covers the shared services only. The controls that apply to TaskGraph tasks,
+script execution, file access and HTTP calls, and what those controls do and do not enforce,
+are in <<tg-09>> and <<tg-16>> in Part V.
+
+== Secrets
+
+A secret is looked up by key through a `SecretManager`, so that code asking for
+`DB_PASSWORD` does not know or care where it is kept.
+
+[source,groovy]
+----
+String password = SecretsResolver.resolve('DB_PASSWORD')
+String withDefault = SecretsResolver.resolve('CACHE_TTL', '300')
+String mustExist = SecretsResolver.resolveRequired('JWT_SECRET')     // throws if absent
+----
+
+`SecretsResolver` is the static front door. It delegates to whichever `SecretManager` is
+installed, by default `EnvironmentSecretManager`, which checks the environment variable of
+that name and then the system property. `setSecretManager(manager)` installs another;
+`resetToDefault()` puts the default back. `exists(key)` checks without reading, and
+`maskValue(value)` returns a form that is safe to log.
+
+[cols="2,3",options="header"]
+|===
+| Implementation | Notes
+
+| `EnvironmentSecretManager`
+| Environment variable, then system property. The default, with no extra dependencies.
+
+| `VaultSecretManager`
+| HashiCorp Vault. Needs the Vault client library added to the build.
+
+| `AwsSecretsManager`
+| AWS Secrets Manager, with an optional key prefix. Needs the AWS SDK.
+
+| `AzureKeyVaultManager`
+| Azure Key Vault. Needs the Azure Key Vault and identity libraries.
+|===
+
+The three external managers are provided as frameworks and are inactive until their client
+library is on the classpath and they are configured. Check `isInitialized()` before relying
+on one. A custom store implements the five methods of `SecretManager`: `getSecret`,
+`getRequiredSecret`, `secretExists`, `getManagerName` and `isInitialized`.
+
+== TLS
+
+`TlsContextBuilder` produces a `javax.net.ssl.SSLContext` from a keystore and a truststore.
+
+[source,groovy]
+----
+SSLContext ssl = TlsContextBuilder.builder()
+        .keyStore('/etc/certs/keystore.jks', SecretsResolver.resolveRequired('KEYSTORE_PASSWORD'))
+        .trustStore('/etc/certs/truststore.jks', SecretsResolver.resolveRequired('TRUSTSTORE_PASSWORD'))
+        .protocols(['TLSv1.3', 'TLSv1.2'])
+        .build()
+----
+
+A store may be named by path (`keyStore`, `trustStore`), by a configuration property
+(`keyStoreProperty`, `trustStoreProperty`) or by an environment variable (`keyStoreEnv`,
+`trustStoreEnv`). `keystoreType`, `protocols` and `cipherSuites` narrow what is accepted.
+
+=== Finding certificates
+
+`CertificateResolver` turns "the keystore" into an actual location by trying, in order:
+
+. an explicit path;
+. a system property;
+. an environment variable;
+. a property in a config file;
+. a classpath resource;
+. the bundled test certificates, in development mode only.
+
+The same deployment artefact can therefore find its certificates on a developer machine, in a
+container with mounted secrets, and in a test. `validatePath` confirms a resolved location is
+readable, and `validateCertificateExpiration(path, password, type)` checks that the
+certificates in a store have not expired. Development mode is off by default and should stay
+off outside development: it is what allows the test certificates to be used.
+
+== Authentication Tokens
+
+`JwtTokenService` issues and checks signed tokens for stateless authentication between
+processes. A token carries a subject, a list of roles, and issue and expiry times, and is
+signed with HMAC-SHA256.
+
+[source,groovy]
+----
+def tokens = new JwtTokenService(SecretsResolver.resolveRequired('JWT_SECRET'), Duration.ofHours(1))
+
+String token = tokens.generateToken('order-service', ['WRITER'])
+
+def claims = tokens.validateToken(token)      // throws if invalid or expired
+assert claims.subject == 'order-service'
+----
+
+* The secret must be at least 32 characters; a shorter one is refused at construction.
+* `validateToken` throws `InvalidTokenException` for a malformed token or a bad signature and
+  `ExpiredTokenException` for one past its expiry.
+* The signature comparison is constant-time, and the secret is held as bytes that
+  `destroy()` zeroes.
+
+`AuthConfig` is the settings object the remoting transports take: `enabled`, `jwtSecret`,
+`tokenExpiry` (one hour), `requireToken` (true), and the header and prefix the token travels
+in (`Authorization`, `Bearer `). `validate()` checks the combination is usable.
+
+`AuthContext` is what a validated token becomes on the receiving side: `getSubject()`,
+`getRoles()`, `hasRole`, `hasAnyRole`, `hasAllRoles`, and the `require...` forms that throw
+when the check fails. An actor handler reaches the same checks through its `ActorContext`.
+
+== Rate Limiting Authentication
+
+`AuthenticationRateLimiter` slows down password guessing. It counts failed attempts per
+username and per IP address and locks either out for a period once a threshold is reached.
+The defaults are five attempts and fifteen minutes.
+
+[source,groovy]
+----
+def limiter = new AuthenticationRateLimiter(maxAttempts: 5, lockoutDurationMinutes: 15)
+
+if (!limiter.isAllowed(username, ip)) {
+    throw new SecurityException('temporarily locked')
+}
+if (authenticate(username, password)) {
+    limiter.recordSuccessfulAttempt(username, ip)
+} else {
+    limiter.recordFailedAttempt(username, ip)
+}
+----
+
+`unlock(username)` and `unlockIp(ip)` lift a lockout by hand; `getFailedAttempts`,
+`getLockedUntil` and `getStatistics` report state. The limiter keeps its counts in memory, so
+it protects one process: several nodes each count separately.
+
+== What These Services Do Not Do
+
+They are mechanisms, not a policy. Nothing in this package turns security on for a
+capability that was not configured to use it: an actor transport started without a TLS
+configuration is unencrypted, and one started without an `AuthConfig` accepts any caller.
+The cluster layer has its own settings object, whose current state is described in
+<<ch-clustering>>.

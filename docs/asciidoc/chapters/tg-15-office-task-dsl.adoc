@@ -1,3 +1,4 @@
+[[tg-15]]
 = Office Document DSL — XlsxTask, DocxTask, PptxTask
 
 [abstract]
@@ -712,7 +713,7 @@ at compile time and are not recommended.
 
 == Next Steps
 
-* **Chapter 13** — All other concrete task types (SqlTask, HttpTask, FileTask, etc.)
-* **Chapter 11** — TaskBase reference (resolver-aware fields, effectClass, retry, circuit breaker)
-* **Chapter 7** — Task DAG usage examples
+* <<tg-13>> — All other concrete task types (SqlTask, HttpTask, FileTask, etc.)
+* <<tg-11>> — TaskBase reference (resolver-aware fields, effectClass, retry, circuit breaker)
+* <<tg-07>> — Task DAG usage examples
 * **mcp-groovy-filesystem-server docs** — `OfficeDocumentHandler` bridge (Phase 7) wires these adapters into the MCP tool surface (`read_office` / `write_office` actions)

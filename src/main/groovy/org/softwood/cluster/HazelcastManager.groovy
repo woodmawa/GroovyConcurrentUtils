@@ -1,6 +1,8 @@
 package org.softwood.cluster
 
 import com.hazelcast.config.Config
+import com.hazelcast.config.SSLConfig
+import com.hazelcast.config.security.RealmConfig
 import com.hazelcast.config.JoinConfig
 import com.hazelcast.config.NetworkConfig
 import com.hazelcast.core.Hazelcast
@@ -66,6 +68,17 @@ class HazelcastManager {
      *        Expected keys: enabled, port, cluster.name, cluster.members
      */
     synchronized void initialize(Map clusterConfig) {
+        initialize(clusterConfig, null)
+    }
+
+    /**
+     * Initialize Hazelcast with the provided configuration and security settings (GCU 1.2.1).
+     * With a security config a start-up failure is thrown, not swallowed: see {@link #buildConfig}.
+     *
+     * @param clusterConfig as for {@link #initialize(Map)}
+     * @param security settings to apply, or null for the unsecured behaviour of earlier versions
+     */
+    synchronized void initialize(Map clusterConfig, HazelcastSecurityConfig security) {
         if (initialized) {
             log.debug "HazelcastManager already initialized"
             return
@@ -93,42 +106,7 @@ class HazelcastManager {
         try {
             log.info "Initializing Hazelcast clustering..."
             
-            Config config = new Config()
-            
-            // Set cluster name
-            Map clusterMap = (clusterConfig.cluster ?: [:]) as Map
-            String clusterName = (clusterMap?.name ?: 'taskgraph-cluster') as String
-            config.setClusterName(clusterName)
-            log.debug "Cluster name: $clusterName"
-            
-            // Configure network
-            NetworkConfig networkConfig = config.getNetworkConfig()
-            
-            // Set port
-            int port = (clusterConfig.port ?: 5701) as int
-            networkConfig.setPort(port)
-            networkConfig.setPortAutoIncrement(true)
-            log.debug "Network port: $port"
-            
-            // Configure discovery
-            JoinConfig joinConfig = networkConfig.getJoin()
-            
-            // Disable multicast by default (use TCP for production)
-            joinConfig.getMulticastConfig().setEnabled(false)
-            
-            // Configure TCP/IP discovery
-            def members = clusterMap?.members
-            if (members && members instanceof List && !members.isEmpty()) {
-                // TCP discovery with explicit members
-                joinConfig.getTcpIpConfig()
-                    .setEnabled(true)
-                    .setMembers(members as List<String>)
-                log.info "TCP/IP discovery enabled with members: $members"
-            } else {
-                // Enable multicast for local development (no explicit members)
-                joinConfig.getMulticastConfig().setEnabled(true)
-                log.info "Multicast discovery enabled (no explicit members configured)"
-            }
+            Config config = buildConfig(clusterConfig, security)
             
             // Create Hazelcast instance
             hazelcastInstance = Hazelcast.newHazelcastInstance(config)
@@ -143,7 +121,107 @@ class HazelcastManager {
             enabled = false
             initialized = true
             hazelcastInstance = null
+            if (security != null) {
+                // A secured cluster was asked for and could not be started. Running unclustered silently, or
+                // retrying without the settings, would both hide that: fail where the caller can see it.
+                throw new IllegalStateException(
+                        "Hazelcast could not be started with the requested security settings: ${e.message}".toString(), e)
+            }
         }
+    }
+
+    /**
+     * Builds the Hazelcast configuration this manager starts with (GCU 1.2.1).
+     *
+     * <p>With no security config the result is what earlier versions built: the given port with
+     * auto-increment, TCP/IP discovery when {@code cluster.members} is set and multicast otherwise.</p>
+     *
+     * <p>With a {@link HazelcastSecurityConfig} the settings are validated and applied: bind address,
+     * port and port auto-increment, the member allow-list, multicast only if the config allows it, TLS
+     * and member authentication. There is no fallback to multicast: with multicast disabled and no
+     * members named, this method refuses. TLS and member authentication are Hazelcast Enterprise
+     * features; on the open-source edition Hazelcast itself refuses to start with them enabled, and
+     * {@link #initialize(Map, HazelcastSecurityConfig)} reports that as an error.</p>
+     */
+    static Config buildConfig(Map clusterConfig, HazelcastSecurityConfig security) {
+        Map cfgMap = clusterConfig ?: [:]
+        Config config = new Config()
+
+        Map clusterMap = (cfgMap.get('cluster') ?: [:]) as Map
+        String clusterName = (clusterMap.get('name') ?: 'taskgraph-cluster') as String
+        config.setClusterName(clusterName)
+
+        NetworkConfig networkConfig = config.getNetworkConfig()
+        JoinConfig joinConfig = networkConfig.getJoin()
+        joinConfig.getMulticastConfig().setEnabled(false)
+
+        Object members = clusterMap.get('members')
+        List<String> memberList = (members instanceof List) ?
+                ((List) members).collect { it.toString() } : new ArrayList<String>()
+
+        if (security == null) {
+            int legacyPort = (cfgMap.get('port') ?: 5701) as int
+            networkConfig.setPort(legacyPort)
+            networkConfig.setPortAutoIncrement(true)
+            if (!memberList.isEmpty()) {
+                joinConfig.getTcpIpConfig().setEnabled(true).setMembers(memberList)
+                log.info "TCP/IP discovery enabled with members: $memberList"
+            } else {
+                // Local development only: any member with the same cluster name on the segment can join.
+                joinConfig.getMulticastConfig().setEnabled(true)
+                log.info "Multicast discovery enabled (no explicit members configured)"
+            }
+            return config
+        }
+
+        security.validate()
+
+        int port = (cfgMap.get('port') ?: security.port) as int
+        networkConfig.setPort(port)
+        networkConfig.setPortAutoIncrement(security.portAutoIncrement)
+
+        if (security.bindAddress) {
+            networkConfig.getInterfaces().setEnabled(true).addInterface(security.bindAddress)
+        }
+
+        LinkedHashSet<String> allMembers = new LinkedHashSet<String>(memberList)
+        if (security.allowedMembers != null) {
+            allMembers.addAll(security.allowedMembers)
+        }
+        if (!allMembers.isEmpty()) {
+            joinConfig.getTcpIpConfig().setEnabled(true).setMembers(new ArrayList<String>(allMembers))
+        } else if (!security.disableMulticast) {
+            joinConfig.getMulticastConfig().setEnabled(true)
+        } else {
+            throw new IllegalStateException(
+                    'No way to find cluster members: multicast is disabled and neither cluster.members ' +
+                    'nor allowedMembers names any')
+        }
+
+        if (security.tlsEnabled) {
+            SSLConfig ssl = new SSLConfig().setEnabled(true)
+            ssl.setProperty('keyStore', security.resolveKeyStorePath())
+            ssl.setProperty('keyStorePassword', security.keyStorePassword)
+            ssl.setProperty('keyStoreType', security.keyStoreType)
+            String trustStore = security.resolveTrustStorePath()
+            if (trustStore) {
+                ssl.setProperty('trustStore', trustStore)
+                if (security.trustStorePassword) {
+                    ssl.setProperty('trustStorePassword', security.trustStorePassword)
+                }
+                ssl.setProperty('trustStoreType', security.trustStoreType)
+            }
+            ssl.setProperty('protocol', security.tlsProtocol)
+            networkConfig.setSSLConfig(ssl)
+        }
+
+        if (security.authenticationEnabled) {
+            RealmConfig realm = new RealmConfig()
+                    .setUsernamePasswordIdentityConfig(security.clusterUsername, security.clusterPassword)
+            config.getSecurityConfig().setEnabled(true).setMemberRealmConfig('gcu-members', realm)
+        }
+
+        return config
     }
     
     /**

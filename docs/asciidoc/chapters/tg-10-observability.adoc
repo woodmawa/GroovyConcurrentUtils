@@ -1,3 +1,4 @@
+[[tg-10]]
 = Observability and Monitoring
 
 [abstract]
@@ -977,6 +978,6 @@ With these observability features, you have complete visibility into your workfl
 
 == Next Steps
 
-* **Chapter 8** - Test observability features
-* **Chapter 7** - Observe example workflows
+* <<tg-08>> - Test observability features
+* <<tg-07>> - Observe example workflows
 * **Appendix** - Complete observability reference

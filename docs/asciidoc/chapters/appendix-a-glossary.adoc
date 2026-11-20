@@ -1,0 +1,27 @@
+[[app-glossary]]
+= Glossary
+
+[glossary]
+Actor:: An object with private state and a mailbox, which handles one message at a time.
+Admission control:: A limit on how many tasks a pool will have in flight at once.
+Agent:: A wrapper that applies closures to one mutable object in turn.
+Ask:: Sending a message to an actor and waiting for its reply. Compare _tell_.
+Bind:: To give a dataflow variable its one value, or its error.
+Circuit breaker:: A resilience pattern that stops calling a failing dependency for a while.
+Dataflow variable:: A single-assignment variable whose readers wait until it is bound.
+Death watch:: An actor's request to be told when another actor stops.
+DFV:: Short for dataflow variable.
+DSL:: Domain-specific language. Here, the Groovy builder syntax used to define graphs and actors.
+ExecutorPool:: The library's one interface for running and scheduling work.
+Gateway:: A TaskGraph node that decides, forks or joins the flow.
+Gstream:: The library's Groovy-closure wrapper over a Java stream.
+Hot topic:: A publish/subscribe channel with no replay: a subscriber sees only what is published after it subscribes.
+Mailbox:: The queue of messages waiting for an actor.
+Profile:: The named environment, such as `dev` or `test`, that selects configuration.
+Promise:: A placeholder for a value that will be supplied, or will fail, later.
+Single assignment:: The rule that a value may be set once and never changed.
+Supervision:: Deciding what happens to an actor when its handler throws.
+Task:: A unit of work in a TaskGraph.
+TaskGraph:: A directed acyclic graph of tasks, and the engine that runs it.
+Tell:: Sending a message to an actor without waiting for a reply.
+Virtual thread:: A lightweight JVM thread that makes blocking cheap, used by default pools.

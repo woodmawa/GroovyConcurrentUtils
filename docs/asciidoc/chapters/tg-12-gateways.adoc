@@ -1,3 +1,4 @@
+[[tg-12]]
 = Gateway Types Reference
 
 [abstract]
@@ -864,6 +865,6 @@ Gateways enable sophisticated workflow routing and orchestration patterns.
 
 == Next Steps
 
-* **Chapter 7** - Gateway usage examples
-* **Chapter 4** - Gateways in workflow architecture
-* **Chapter 13** - Combine gateways with task types
+* <<tg-07>> - Gateway usage examples
+* <<tg-04>> - Gateways in workflow architecture
+* <<tg-13>> - Combine gateways with task types

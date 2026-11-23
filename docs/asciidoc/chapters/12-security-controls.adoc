@@ -44,9 +44,8 @@ deliberate statement in the flow, visible to a reviewer.
 |===
 
 Version {gcu-version} implements all three levels for `ControlTask` rule conditions and
-`ScriptTask` scripts, with the capabilities `files` and `http`. `allow 'sql'`,
-`allow 'process'` and the `ShellTask` they depend on are not built yet. The sections below
-say what each area does now.
+`ScriptTask` scripts, with all four capabilities, and the `ShellTask` that `allow 'process'`
+turns on (1.4.1). The sections below say what each area does now.
 
 == Status at Version {gcu-version}
 
@@ -57,9 +56,11 @@ say what each area does now.
 | Script tasks (`ScriptTask`)
 | Enforced from 1.4.0. Restricted by default: a script names only the classes of the script
 profile, and at run time cannot call into files, URLs, processes, threads or reflection.
-`allow 'files'` and `allow 'http'` per graph; `trusted true` opts out.
-| As built, less `allow 'sql'` and `allow 'process'`. Not isolation: see below.
-| 1.4.0
+`allow 'files'`, `allow 'http'` (1.4.0), `allow 'sql'` and `allow 'process'` (1.4.1) per
+graph; `trusted true` opts out. From 1.4.1 a script reaches a capability only through its
+methods.
+| As built. Not isolation: see below.
+| 1.4.0, 1.4.1
 
 | Rule conditions (`ControlTask`)
 | Enforced from 1.4.0. A `when:` string is one expression from a fixed list of operations;
@@ -74,10 +75,20 @@ with `trusted true`.
 | As built.
 | 1.4.0
 
-| Shell commands
-| Not available as a task. A restricted script cannot start a process.
-| A `ShellTask`, off by default, with directory, environment, timeout and executable limits.
-| planned
+| Shell commands (`ShellTask`, `process`)
+| Enforced from 1.4.1. Off by default: the graph needs `allow 'process'` and names its
+interpreters. Working directory inside the graph's directories, scrubbed environment, script
+by file or stdin, timeout that stops the process tree, capped output, destructive-pattern
+tripwires, no elevation, an audit record per run.
+| As built. AW to plug in a runner that hands the command to FS `execute`.
+| 1.4.1
+
+| Database access from scripts (`sql`)
+| Enforced from 1.4.1. Only datasources the flow declares by name; parameterised statements;
+one statement per call; read-only unless declared `writable: true`; a row cap; an audit
+record per call.
+| As built. Back a read-only datasource with a read-only database account.
+| 1.4.1
 
 | HTTP calls (`HttpTask`)
 | Enforced from 1.3.0. Public hosts allowed; private networks blocked; a local address only
@@ -269,7 +280,18 @@ Capabilities (level 2) are granted per graph:
 * `allow 'http'` binds `http`: `get`, `post`, `put` and `delete`, each returning `status`,
   `body` and `headers`. Every address goes through the `HttpTask` guard, a local service
   needs `allowLocal`, and a redirect is returned, not followed.
-* `allow 'sql'` and `allow 'process'` are refused in this version.
+* `allow 'sql'` (1.4.1) binds `sql`: `query`, `queryForMap`, `queryForObject` and `update`
+  on the datasources the graph declares. See <<script-sql>>.
+* `allow 'process'` (1.4.1) binds `process`: `shell(interpreter, script, args)`, with the
+  checks of a `ShellTask`. See <<shell-commands>>. It is not called `run`: a restricted
+  script may not call `run()`, which would run the script itself again.
+
+A script reaches a capability only through the methods listed (1.4.1). Groovy lets a caller
+read a private field through property syntax and call a private method by name, so before
+1.4.1 a script could reach what a capability holds: it could add a local service to the
+list `http` checks against and then call it, or raise the size limit of `files`. Now any
+property, index or operator on a capability, and any method it does not list, is a
+`SecurityException`.
 
 `trusted true` (level 3) compiles the script as plain Groovy and hands it the `TaskContext`
 itself, as every script had before 1.4.0, and logs a warning each run. `sandboxed false` is
@@ -294,27 +316,141 @@ What it does not do. It is a reduction inside one JVM, not isolation:
   write `order.total`, not `order['total']`. Maps and lists index as usual.
 * `println` writes to standard output. In a process that speaks a protocol there, use `log`.
 
+[[shell-commands]]
 == Shell Commands
 
-*Today.* The library has no task that runs an operating-system command. A restricted script
-cannot start a process; a `trusted true` script can, as any Groovy can.
+*From 1.4.1.* A `ShellTask` runs a PowerShell, cmd, bash or Python script as a separate
+process, which cannot touch the graph or the context in memory. A restricted script reaches
+the same thing through `process.shell(...)`, with the same checks. Both are off unless the
+graph says:
 
-*Agreed design (not yet built).* A `ShellTask` for PowerShell, bash, cmd and a real Python
-interpreter. It runs a separate process, which cannot touch the graph or the context in
-memory, and it is off unless the graph grants `allow 'process'`. Its limits:
+[source,groovy]
+----
+allow 'process'
+interpreters 'powershell', 'python'
+----
 
-* the working directory must be inside the directories the graph allows;
-* the script is passed by file or standard input, never on the command line;
-* the environment is emptied and only named variables are passed in;
-* a timeout always applies and ends the whole process tree;
-* output is capped;
-* only executables on the graph's list may be started;
-* obviously destructive commands are refused, as a check against mistakes;
-* no elevation and no interactive prompts; a non-zero exit fails the task;
-* each run is recorded with the interpreter, the directory and a hash of the script.
+`allow 'process'` alone runs nothing. The checks, all made before any process starts and,
+where they can be, when the graph is validated:
+
+[cols="1,3",options="header"]
+|===
+| Control | What it does
+
+| Interpreters
+| Only those the graph names. `interpreterPath 'python', '...'` picks the executable.
+
+| The script
+| Goes to the interpreter by a temporary file in a directory of its own (PowerShell, cmd) or
+by standard input (bash, Python), never on the command line. Standard input is closed once
+the script is written, and interpreters start non-interactive and without profiles.
+
+| Arguments
+| Passed as a list, with no shell in between: `;`, `{vbar}`, `$(...)` arrive as text. On Windows
+a double quote or a line break is refused for every interpreter, and cmd and bash take only
+letters, digits and `_ . , : / = + @ -` (cmd also `\`), because cmd and the WSL bash
+launcher read their command line again as a shell would.
+
+| Working directory
+| The graph's `workingDirectory`, or one inside it and its `allowedDirectories`.
+
+| Environment
+| Rebuilt for each run: the few variables an interpreter needs to start (on Windows
+`SystemRoot`, `PATH`, `TEMP`, `USERPROFILE` and their like; nothing naming the user or the
+machine), those the graph names with `passEnvironment`, and those the task sets with `env`.
+
+| Time
+| `processTimeout`, 60 seconds by default. At the limit the process and every process it
+started are stopped, and the task fails with a `TimeoutException`. The same when the task
+is cancelled. Known gap in {gcu-version}: "every process it started" means every process
+still linked to it by its parent. A process whose parent has already exited is not reached.
+Git Bash (MSYS) starts the commands a script runs through a stub that exits at once, so
+they are reached only through bash itself: seen with `sleep 60 &`, which survives the
+timeout. A Windows Job Object closes this; until then, prefer PowerShell or Python for
+long-running work, and do not leave background commands running from a bash script.
+
+| Output
+| stdout kept up to `maxOutput` (1 MB), stderr up to `maxErrorOutput` (64 KB); the rest is
+read and dropped, and the result says `stdoutTruncated` or `stderrTruncated`.
+
+| Tripwires
+| Refused before running: for PowerShell `Remove-Item` and its aliases, `Clear-Content`,
+`Stop-Computer`, `Stop-Process`, `Format-Volume`, `Invoke-Expression`/`iex`,
+`Set-ExecutionPolicy`; for cmd `del`, `rd`, `format`, `shutdown`, `reg delete`, `taskkill`
+and their like; for bash `rm`, `chmod`, `kill`, `shutdown`, `mkfs`, `dd of=`, a fork bomb,
+a download piped to a shell; for Python `shutil.rmtree`, the `os` delete and exec calls,
+`subprocess`, `ctypes`. A check against mistakes and steered content, not a boundary.
+
+| Elevation
+| `sudo`, `doas`, `runas`, `su`, `-Verb RunAs` are refused, trusted or not.
+
+| Exit code
+| A non-zero exit fails a `ShellTask` as an ordinary failure, so its retry policy applies.
+`process.shell` returns the code for the script to read.
+
+| Audit
+| Each run is logged on `org.softwood.dag.audit` and passed to `TaskContext.auditListener`
+if set: task, interpreter, working directory, SHA-256 of the script, argument count, exit
+code, duration, truncation, trusted, timed out.
+|===
+
+A refusal is a `SecurityException`, fails the graph's validation where it can be known then,
+and is never retried.
+
+`trusted true` on a `ShellTask` skips the interpreter list and the tripwires. It does not
+skip `allow 'process'`, the working directory, the environment, elevation, the timeout or
+the output caps, and it is logged each run.
+
+A flow can run its shells somewhere else with `shellRunner` on the graph or `runner` on the
+task (a `ShellRunner`). The checks above run before any runner sees the request. The
+agentic-workflow server is to plug in one that hands the command to the filesystem server's
+`execute`, so the platform keeps one guard.
 
 The process runs as the same operating-system user as the JVM. The directory list and that
 user's own rights are the real limit.
+
+[[script-sql]]
+== Database Access from Scripts
+
+*From 1.4.1.* The flow author declares a datasource by name, and `allow 'sql'` gives a
+restricted script `sql` to use it:
+
+[source,groovy]
+----
+allow 'sql'
+datasource 'orders', ordersProvider                       // an SqlProvider: read-only
+datasource 'audit', auditProvider, writable: true, maxRows: 500
+
+scriptTask('report') {
+    script '''
+        def rows = sql.query('orders', 'select name, qty from orders where qty > ?', [2])
+        rows.collect { it.name }
+    '''
+}
+----
+
+* A script names a datasource; it never supplies a URL, a driver or a provider, and it
+  cannot reach the provider, a connection or the list of datasources.
+* One statement per call. Quoted text and comments are skipped when looking for a second;
+  where a database could read the text differently the check sees more code, not less.
+* A query starts with `SELECT` or `WITH` and has no write word anywhere in its code
+  (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, schema changes, procedure calls). That
+  matters: a database can delete inside a query (H2's `old table (delete ...)`, a Postgres
+  `WITH ... DELETE`).
+* `update` needs `writable: true` on the datasource and takes `INSERT`, `UPDATE`, `DELETE` or
+  `MERGE`, never a schema change, a grant or a procedure call.
+* A query that returns more than `maxRows` rows (10,000 by default) fails. The rows are
+  fetched before they are counted: the cap limits what the script gets, not what the
+  database reads.
+* Each call is logged and passed to the audit listener: datasource, operation, SHA-256 of
+  the statement, rows.
+* A refusal is a `SecurityException` and is not retried.
+* There is no query timeout of its own: `scriptTimeout` abandons a long call; it does not
+  cancel it on the database.
+
+The statement check reads text, not a database's grammar. Back a read-only datasource with a
+database account that cannot write: that is the real control. The flow owns each provider and
+closes it; the graph does not.
 
 == HTTP Calls
 
@@ -502,6 +638,11 @@ which has to be real for the flow to work. Exception messages are not passed thr
   default scope.
 . Name local services with `allowLocal`; keep `trusted true` on an `HttpTask` for hosts on a
   network you control.
+. Grant `allow 'process'` only to graphs that run shells, name only the interpreters they
+  use, and keep `trusted true` on a `ShellTask` for scripts you wrote. Pass variables with
+  `passEnvironment` by name.
+. Declare a datasource writable only when a script must write, and give each datasource its
+  own database account with the rights it needs.
 . Mark as `remote` only the actors other processes need. Give a transport on a wider
   address both authentication and TLS.
 . Pass a `HazelcastSecurityConfig` with message signing when clustering, listen for task

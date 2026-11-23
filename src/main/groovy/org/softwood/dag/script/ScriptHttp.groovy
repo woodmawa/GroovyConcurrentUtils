@@ -22,8 +22,21 @@ import java.time.Duration
  *
  * <p>Each call returns a map: {@code status} (int), {@code body} (text), {@code headers}
  * (lower-case name to the first value).</p>
+ *
+ * <p>1.4.1: a script reaches only {@code get}, {@code post}, {@code put} and {@code delete}
+ * ({@link ScriptCapability}). Before 1.4.1 a script could add a local service to the allowance
+ * this object holds, through Groovy property syntax, and then call it.</p>
  */
-class ScriptHttp {
+class ScriptHttp implements ScriptCapability {
+
+    private static final Set<String> OFFERED = Collections.unmodifiableSet(
+            new LinkedHashSet<String>(['get', 'post', 'put', 'delete']))
+
+    @Override
+    String capabilityName() { 'http' }
+
+    @Override
+    Set<String> offeredMethods() { OFFERED }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30)
 
@@ -35,7 +48,7 @@ class ScriptHttp {
             .build()
 
     ScriptHttp(TaskContext ctx) {
-        this.allowLocal = ctx?.httpAllowLocal != null ? new ArrayList<String>(ctx.httpAllowLocal) : []
+        this.allowLocal = Collections.unmodifiableList(ctx?.httpAllowLocal != null ? new ArrayList<String>(ctx.httpAllowLocal) : new ArrayList<String>())
     }
 
     Map<String, Object> get(String url, Map<String, Object> headers = [:]) {

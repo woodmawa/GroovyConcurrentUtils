@@ -102,12 +102,65 @@ class TaskContext implements Closeable {
      * GCU 1.4.0 (D2, level 2): the capabilities this graph grants its restricted scripts, set with
      * {@code allow '...'} in the graph DSL. 'files' binds {@code files} (bounded by the FileTask
      * directory rules above); 'http' binds {@code http} (bounded by the HttpTask guard and
-     * {@link #httpAllowLocal}). Empty by default: a restricted script reaches nothing outside itself.
+     * {@link #httpAllowLocal}). 1.4.1: 'sql' binds {@code sql} (the datasources below); 'process'
+     * binds {@code process} and is what lets a ShellTask run at all. Empty by default: a restricted
+     * script reaches nothing outside itself, and no shell runs.
      */
     final Set<String> scriptCapabilities = java.util.concurrent.ConcurrentHashMap.<String>newKeySet()
 
     /** The capability names {@code allow} accepts in this version. */
-    static final Set<String> SCRIPT_CAPABILITIES = Collections.unmodifiableSet(new LinkedHashSet<String>(['files', 'http']))
+    static final Set<String> SCRIPT_CAPABILITIES = Collections.unmodifiableSet(new LinkedHashSet<String>(['files', 'http', 'sql', 'process']))
+
+    /**
+     * GCU 1.4.1 (D2): the interpreters this graph's shell runs may use (powershell, cmd, bash,
+     * python), set with {@code interpreters ...}. Empty by default: {@code allow 'process'} alone
+     * runs nothing.
+     */
+    final Set<String> processInterpreters = java.util.concurrent.ConcurrentHashMap.<String>newKeySet()
+
+    /** GCU 1.4.1: an executable for an interpreter, set with {@code interpreterPath 'python', '...'}. */
+    final Map<String, String> interpreterPaths = new java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * GCU 1.4.1: environment variables of this JVM that a shell run may see, beyond the short list an
+     * interpreter needs to start. Set with {@code passEnvironment ...}.
+     */
+    final Set<String> passEnvironment = java.util.concurrent.ConcurrentHashMap.<String>newKeySet()
+
+    /**
+     * GCU 1.4.1: the runner for this graph's shell runs; null means a local child process. AW sets one
+     * that hands the command to FS execute. GCU's checks run before any runner.
+     */
+    volatile org.softwood.dag.task.shell.ShellRunner shellRunner = null
+
+    /**
+     * GCU 1.4.1 (D2, allow 'sql'): the datasources this graph declares by name, for restricted scripts
+     * to use through {@code sql}. Set with {@code datasource 'name', provider} in the graph DSL.
+     */
+    final Map<String, org.softwood.dag.task.sql.ScriptDatasource> datasources =
+            new java.util.concurrent.ConcurrentHashMap<String, org.softwood.dag.task.sql.ScriptDatasource>()
+
+    /**
+     * GCU 1.4.1: told of every shell run and every {@code sql} call, with a map of what was done
+     * ({@code kind} 'shell' or 'sql', the task, and for a shell the interpreter, working directory,
+     * script hash and exit code; for sql the datasource, statement hash and rows). Null by default:
+     * the record is then only logged, on the logger {@code org.softwood.dag.audit}.
+     */
+    volatile Closure auditListener = null
+
+    private static final org.slf4j.Logger AUDIT_LOG = org.slf4j.LoggerFactory.getLogger('org.softwood.dag.audit')
+
+    /** GCU 1.4.1: log an audit record and pass it to the listener. A failing listener is logged, never thrown. */
+    void audit(Map<String, Object> record) {
+        AUDIT_LOG.info('{}', record)
+        Closure listener = auditListener
+        if (listener == null) return
+        try {
+            listener.call(record)
+        } catch (Throwable t) {
+            log.warn("TaskContext.audit(): the audit listener failed ({})", t.toString())
+        }
+    }
 
     // Resource monitoring (set by TaskGraph if configured)
     def resourceMonitor = null

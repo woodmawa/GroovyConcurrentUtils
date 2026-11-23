@@ -21,7 +21,7 @@ Note: Kafka is accessed via `messagingTask()` with a Kafka provider; S3/cloud st
 
 TaskGraph provides 15+ concrete task types organized by category:
 
-* **Core Tasks** - ServiceTask, ScriptTask
+* **Core Tasks** - ServiceTask, ScriptTask, ShellTask (1.4.1)
 * **HTTP/REST** - HttpTask, RestTask, GraphQLTask
 * **Database** - SqlTask, NoSqlTask, BatchSqlTask
 * **File Operations** - FileTask, CsvTask, JsonTask, XmlTask
@@ -111,7 +111,7 @@ scriptTask("custom-base") {
 }
 ----
 
-A graph can grant its restricted scripts guarded helpers:
+A graph can grant its restricted scripts guarded helpers. A script reaches each one only through its methods (1.4.1):
 
 [source,groovy]
 ----
@@ -160,6 +160,65 @@ scriptTask("housekeeping") {
     '''
 }
 ----
+
+From 1.4.1 a script can also query the datasources the graph declares, and run a shell script with the checks of a `ShellTask` (below):
+
+[source,groovy]
+----
+TaskGraph.build {
+    allow 'sql', 'process'
+    datasource 'orders', ordersProvider               // an SqlProvider; read-only
+    interpreters 'powershell'
+    workingDirectory '/var/app/run-42'
+
+    scriptTask("check") {
+        script '''
+            def open = sql.queryForObject('orders', 'select count(*) from orders where status = ?', ['OPEN'])
+            def disk = process.shell('powershell', 'Get-PSDrive C | Select-Object -ExpandProperty Free')
+            return [open: open, freeBytes: disk.stdout.trim() as long, exit: disk.exitCode]
+        '''
+    }
+}
+----
+
+`sql` has `query`, `queryForMap`, `queryForObject` and, on a datasource declared `writable: true`, `update`. `process` has `shell(interpreter, script, args)`, which returns the same map as a `ShellTask` and does not fail on a non-zero exit. <<ch-security-controls>> has the rules for both.
+
+=== ShellTask
+
+Runs a PowerShell, cmd, bash or Python script as an operating-system process (1.4.1). Off by default: the graph grants it with `allow 'process'` and names the interpreters it may use.
+
+[source,groovy]
+----
+TaskGraph.build {
+    allow 'process'
+    interpreters 'powershell', 'python'
+    interpreterPath 'python', 'C:/Python314/python.exe'   // optional: the executable to start
+    workingDirectory '/var/app/run-42'
+    allowedDirectories '/var/app/shared'
+    passEnvironment 'JAVA_HOME'                         // variables of this JVM a script may see
+
+    shellTask("list") {
+        interpreter 'powershell'
+        script '''
+            param()
+            Get-ChildItem -Name | ForEach-Object { "$_" }
+            Write-Output "args: $args"
+        '''
+        args 'one', 'two words'                          // a list: no shell parses it
+        workingDirectory 'incoming'                      // inside the graph's directories
+        env 'REPORT_MODE', 'short'
+        processTimeout Duration.ofSeconds(20)            // default 60 s; stops the process tree
+        maxOutput 256 * 1024                             // stdout bytes kept; default 1 MB
+        retry { maxAttempts 2 }                          // a non-zero exit is retried
+    }
+}
+----
+
+The result is a map: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, `stderrTruncated`, `durationMs`. A non-zero exit fails the task as an ordinary failure, so its retry policy applies. `args { ctx, prev -> [...] }` computes the arguments when the task runs.
+
+The script goes to the interpreter by a temporary file (PowerShell, cmd) or by standard input (bash, Python), never on the command line. The environment is rebuilt from a short keep-list, `passEnvironment` and `env`. Destructive commands (`Remove-Item`, `rm`, `del`, `shutil.rmtree` and their like) and elevation are refused before anything runs; so is an interpreter the graph did not name. Each run leaves an audit record (`TaskContext.auditListener`). On Windows, arguments to cmd and bash are limited to plain characters. The `bash` on a Windows `PATH` is often the WSL launcher; to use Git for Windows, name it: `interpreterPath 'bash', 'C:/Program Files/Git/bin/bash.exe'`.
+
+`trusted true` skips the interpreter list and the tripwires, and keeps everything else. `shellRunner` on the graph, or `runner` on the task, runs the checked request somewhere else, for example through another process's guarded executor. <<ch-security-controls>> has the full list of controls.
 
 == HTTP/REST Tasks
 

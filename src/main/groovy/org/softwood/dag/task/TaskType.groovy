@@ -46,6 +46,12 @@ enum TaskType {
     SCRIPT(ScriptTask, false),
 
     /**
+     * 1.4.1: shell task - a PowerShell, cmd, bash or Python script run as an operating system
+     * process. Off by default: the graph needs allow 'process' and interpreters.
+     */
+    SHELL(ShellTask, false),
+
+    /**
      * Send task for sending messages/events to external systems.
      * Supports HTTP, webhooks, message queues, and other protocols.
      * 
@@ -306,6 +312,10 @@ enum TaskType {
             case 'code':
             case 'eval':
                 return SCRIPT
+            case 'shell':
+            case 'shelltask':
+            case 'command':
+                return SHELL
             case 'send':
             case 'sendtask':
             case 'publish':

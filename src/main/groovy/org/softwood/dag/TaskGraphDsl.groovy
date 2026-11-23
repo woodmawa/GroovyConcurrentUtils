@@ -269,8 +269,13 @@ class TaskGraphDsl {
      *       graph's working directory and its {@code allowedDirectories}.</li>
      *   <li>{@code allow 'http'}: scripts get {@code http}, to make requests the HttpTask guard
      *       accepts; a local service still needs {@code allowLocal}.</li>
+     *   <li>1.4.1: {@code allow 'sql'}: scripts get {@code sql}, to query the datasources the graph
+     *       declares with {@code datasource}.</li>
+     *   <li>1.4.1: {@code allow 'process'}: the graph's ShellTasks may run, and scripts get
+     *       {@code process}; both only with the interpreters the graph names with
+     *       {@code interpreters}.</li>
      * </ul>
-     * With no {@code allow}, a restricted script reaches nothing outside itself.
+     * With no {@code allow}, a restricted script reaches nothing outside itself and no shell runs.
      *
      * Usage:
      *   allow 'files', 'http'
@@ -278,16 +283,112 @@ class TaskGraphDsl {
     void allow(String... capabilities) {
         capabilities.each { String capability ->
             String name = capability?.toLowerCase()
-            if (name == 'sql' || name == 'process') {
-                throw new IllegalArgumentException(
-                    "allow '${capability}' is not available in this version: it is planned with ShellTask")
-            }
             if (!org.softwood.dag.task.TaskContext.SCRIPT_CAPABILITIES.contains(name)) {
                 throw new IllegalArgumentException(
                     "allow '${capability}': unknown capability. Known: ${org.softwood.dag.task.TaskContext.SCRIPT_CAPABILITIES.join(', ')}")
             }
             graph.ctx.scriptCapabilities.add(name)
         }
+    }
+
+    /**
+     * GCU 1.4.1 (D2): the interpreters this graph's shell runs may use: powershell, cmd, bash,
+     * python. Needed with {@code allow 'process'}, which alone runs nothing.
+     *
+     * Usage:
+     *   allow 'process'
+     *   interpreters 'powershell', 'python'
+     */
+    void interpreters(String... names) {
+        names.each { String n ->
+            def interpreter = org.softwood.dag.task.shell.Interpreter.of(n)
+            if (interpreter == null) {
+                throw new IllegalArgumentException(
+                    "interpreters: unknown interpreter '${n}'. Known: ${org.softwood.dag.task.shell.Interpreter.ids().join(', ')}")
+            }
+            graph.ctx.processInterpreters.add(interpreter.id)
+        }
+    }
+
+    /**
+     * GCU 1.4.1: the executable to start for an interpreter, when the one on the PATH is not the one
+     * wanted (a Windows Store Python stub, say).
+     *
+     * Usage:
+     *   interpreterPath 'python', 'C:/Python314/python.exe'
+     */
+    void interpreterPath(String interpreterName, String executable) {
+        def interpreter = org.softwood.dag.task.shell.Interpreter.of(interpreterName)
+        if (interpreter == null || !executable?.trim()) {
+            throw new IllegalArgumentException("interpreterPath: an interpreter (${org.softwood.dag.task.shell.Interpreter.ids().join(', ')}) and an executable are required")
+        }
+        graph.ctx.interpreterPaths[interpreter.id] = executable.trim()
+    }
+
+    /**
+     * GCU 1.4.1: variables of this JVM's environment that the graph's shell runs may see. A shell run
+     * otherwise gets only what an interpreter needs to start.
+     *
+     * Usage:
+     *   passEnvironment 'JAVA_HOME', 'GRADLE_USER_HOME'
+     */
+    void passEnvironment(String... names) {
+        names.each { String n ->
+            if (!(n ==~ /[A-Za-z_][A-Za-z0-9_]*/)) {
+                throw new IllegalArgumentException("passEnvironment: '${n}' is not an environment variable name")
+            }
+            graph.ctx.passEnvironment.add(n)
+        }
+    }
+
+    /**
+     * GCU 1.4.1: the runner for this graph's shell runs, in place of a local child process. GCU's
+     * checks still run first.
+     */
+    void shellRunner(org.softwood.dag.task.shell.ShellRunner runner) {
+        graph.ctx.shellRunner = runner
+    }
+
+    /**
+     * GCU 1.4.1 (D2, allow 'sql'): declare a datasource by name for restricted scripts. Read-only
+     * unless {@code writable: true}; {@code maxRows} caps a query result (10,000 by default). The
+     * flow author owns the provider and closes it.
+     *
+     * Usage:
+     *   allow 'sql'
+     *   datasource 'orders', ordersProvider
+     *   datasource 'audit', auditProvider, writable: true, maxRows: 500
+     */
+    void datasource(Map options, String name, Object provider) {
+        if (!(provider instanceof org.softwood.dag.task.sql.SqlProvider)) {
+            throw new IllegalArgumentException("datasource '${name}': an SqlProvider is required, not ${provider?.getClass()?.name}: a script never supplies a URL")
+        }
+        Set<String> unknown = (options?.keySet() ?: []).collect { it.toString() }.findAll { !(it in ['writable', 'maxRows']) } as Set<String>
+        if (unknown) {
+            throw new IllegalArgumentException("datasource '${name}': unknown option(s) ${unknown.join(', ')}; known: writable, maxRows")
+        }
+        def ds = new org.softwood.dag.task.sql.ScriptDatasource(name, (org.softwood.dag.task.sql.SqlProvider) provider,
+                options?.writable as boolean,
+                options?.maxRows != null ? (options.maxRows as int) : org.softwood.dag.task.sql.ScriptDatasource.DEFAULT_MAX_ROWS)
+        graph.ctx.datasources[ds.name] = ds
+    }
+
+    void datasource(String name, Object provider) {
+        datasource([:], name, provider)
+    }
+
+    /**
+     * GCU 1.4.1 (D2): a task that runs a PowerShell, cmd, bash or Python script as a process. Needs
+     * {@code allow 'process'} and {@code interpreters} on the graph. See ShellTask.
+     *
+     * Usage:
+     *   shellTask('list') {
+     *       interpreter 'powershell'
+     *       script 'Get-ChildItem'
+     *   }
+     */
+    ITask shellTask(String id, @DelegatesTo(org.softwood.dag.task.ShellTask) Closure config) {
+        return task(id, TaskType.SHELL, config)
     }
 
     /**

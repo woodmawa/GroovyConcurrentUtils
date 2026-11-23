@@ -3,6 +3,55 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 1.4.1 (2026-11-23): ShellTask, allow 'process', allow 'sql', and capabilities reachable only through their methods
+
+Source: release 3b of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 8), decision D2 (remainder); design agreed with Will 2026-11-23 in project doc `gcu/design-1.4.1`.
+This release adds capabilities that are off by default and closes one hole in 1.4.0. Code that relied on the hole has to change: see "What you must change".
+Tests: 2756 run, 0 failing, 1 pending (2648 at 1.4.0, plus 108 in three new specs: 50 in `Hardening141ShellSpec`, one of them a `@PendingFeature` for the known gap below, 33 in `Hardening141SqlSpec`, 25 in `Hardening141CarriedSpec`). One 1.4.0 test changed on purpose: `allow 'process'` and `allow 'sql'` are no longer refused, so `Hardening140ScriptSpec` now checks the refusal of unknown names only.
+Red first, on 1.4.0. `Hardening141ShellSpec` 46 of 46 red and `Hardening141SqlSpec` 31 of its first 31 red, all because the API did not exist; the two `old table (delete ...)` rows were added later, after a mutation check, and the four Git Bash tests after the servers' regression; neither has a red run. `Hardening141CarriedSpec`: 9 red because the old behaviour was wrong (a script could read and change what `files` and `http` hold), 15 green coverage tests of behaviour that was already right, 1 skipped (the symbolic link test needs a Windows account that may create links).
+Mutation checks, eleven runs, nine caught at once: `allow 'process'` (1 red), the interpreter list (2), the tripwires (19), the environment scrub (2), stopping the process tree (1), the output cap (2), the read-only datasource (2), one statement per call (1), the row cap (2). The write-word check in a query survived: every case was also refused by another check. Two cases were added where it is the only check, H2 queries that delete through `old table (...)`, and with them it is caught (2 red).
+
+### What you must change
+
+1. **A restricted script that reads or sets a property of `files` or `http`, indexes them, or calls a method they do not list.** Refused from 1.4.1 with a `SecurityException`. `files` offers `read`, `readLines`, `exists`, `size`, `list`, `write`, `append`; `http` offers `get`, `post`, `put`, `delete`. Nothing in the MCP servers' main source does this.
+
+Nothing else changes for existing flows: `ShellTask`, `allow 'process'` and `allow 'sql'` are new and off unless asked for.
+
+### Added
+
+Shell execution (D2, item 7)
+
+- **`ShellTask`** (`shellTask(id) { ... }`, `TaskType.SHELL`, alias `shell`): runs a PowerShell, cmd, bash or Python script as a process. DSL: `interpreter`, `script`, `args` (values or a closure of `(ctx, prev)`), `workingDirectory`, `env`, `processTimeout` (default 60 s), `maxOutput` (1 MB), `maxErrorOutput` (64 KB), `runner`, `trusted`. Result: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, `stderrTruncated`, `durationMs`. A non-zero exit fails the task as an ordinary failure (`ShellTask.ShellExecutionException`), so the retry policy applies.
+- **Off by default.** New graph words: `allow 'process'` and `interpreters 'powershell', ...`; without both the graph does not start. Also `interpreterPath name, executable`, `passEnvironment names...`, `shellRunner runner`.
+- **The checks** (`org.softwood.dag.task.shell.ShellGuard`), made before any runner sees the run and, where they can be, when the graph is validated: interpreter named by the graph; script by temporary file (PowerShell, cmd) or stdin (bash, Python), never on the command line; arguments as a list, with no NUL, and on Windows no double quote or line break, and plain characters only for cmd and bash (both read their command line again); working directory inside the graph's directories; environment rebuilt from a keep-list, `passEnvironment` and `env`; destructive-pattern tripwires per interpreter; no elevation (`sudo`, `runas`, `-Verb RunAs`, `su`), trusted or not.
+- **Running** (`LocalShellRunner`): stdin closed after the script; interpreters non-interactive and without profiles; output read as it comes and capped; on timeout or interrupt the process and every process it started are stopped.
+- **`trusted true`** skips the interpreter list and the tripwires; everything else stays (Will, 2026-11-23). `allow 'process'` is still needed.
+- **Audit**: each run is logged on `org.softwood.dag.audit` and passed to the new `TaskContext.auditListener`: task, interpreter, working directory, SHA-256 of the script, argument count, exit code, duration, truncation, trusted, timed out.
+- **A runner of the flow's own**: new interface `ShellRunner` (`ShellResult run(ShellRequest)`), set on the graph or the task. For AW to hand the command to FS `execute`.
+- **`allow 'process'` in a restricted script** binds `process`: `process.shell(interpreter, script, args)`, the same checks and runner, returning the result map without failing on a non-zero exit. Not `run`: the script profile refuses `run()` everywhere, because on a script it runs the script again.
+
+Database access from scripts (D2, `allow 'sql'`)
+
+- New graph word `datasource 'name', provider` (an `SqlProvider`), with `writable: true` and `maxRows: n`; stored as `TaskContext.datasources` (`ScriptDatasource`).
+- **`allow 'sql'`** binds `sql` (`ScriptSql`): `query`, `queryForMap`, `queryForObject`, and `update` on a writable datasource. Every call names a declared datasource; parameters by `?`.
+- `SqlStatementCheck`: one statement per call (quoted text and comments skipped; where a database could read more code, the check does too); a query starts with `SELECT` or `WITH` and contains no write word; `update` takes `INSERT`, `UPDATE`, `DELETE`, `MERGE` and no schema change, grant or procedure call.
+- A query result over `maxRows` (10,000 by default) fails the call; it is counted after it is fetched. Each call leaves an audit record (datasource, operation, statement hash, rows).
+
+### Changed
+
+- **A script reaches a capability only through its methods.** New `ScriptCapability`, implemented by `ScriptFiles`, `ScriptHttp`, `ScriptSql` and `ScriptProcess`; `ScriptGuard` refuses any property read or write, index, operator, iteration or unlisted method on one. Before 1.4.1, Groovy's access to private members let a script add `localhost:<port>` to `http.allowLocal` and then call that service, set `files.config.maxFileSizeBytes`, or call `files.checked(...)`. `http`'s copy of the local allowance is also unmodifiable now.
+- `allow` accepts `sql` and `process`.
+- `SecureScriptBase`'s class comment describes what it is now: the helpers, not the control.
+
+### Not verified
+
+- bash on Windows is run through Git for Windows (`interpreterPath 'bash', 'C:/Program Files/Git/bin/bash.exe'`), with tests that run when it is installed: stdin delivery, working directory, arguments, scrubbed environment, a timeout that stops bash, and a non-zero exit. The WSL launcher that `bash` on PATH usually is was not run; on Windows, bash arguments stay limited to plain characters for both.
+- **Known gap: a timeout does not reach a process whose parent has already exited.** The process tree is found by walking parents. MSYS (Git Bash) starts a script's commands through a fork stub that exits at once (seen: `sleep.exe`'s parent pid gone from the start), so `sleep 60 &` in a Git Bash script survives the timeout; so would any double-forked process. `Hardening141ShellSpec` holds it as a `@PendingFeature`. The fix is a Windows Job Object (and a process group elsewhere), planned for a later release.
+- The symbolic link test did not run (no right to create links on the test machine).
+- No `ShellTask` was run through a runner other than the test's own: the AW runner that delegates to FS is for the AW brief.
+- `sql` with any database but H2. The statement check is text, not a grammar: a read-only datasource should have a read-only database account.
+- No memory limit on a shell's process; a tripwire is a check against mistakes, not a boundary.
+
 ## 1.4.0 (2026-11-20): restricted evaluation for rule conditions and scripts
 
 Source: release 3 of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 7), decision D2.

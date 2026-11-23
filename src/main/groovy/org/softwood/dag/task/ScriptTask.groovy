@@ -10,6 +10,8 @@ import org.softwood.dag.script.ScriptContextView
 import org.softwood.dag.script.ScriptFiles
 import org.softwood.dag.script.ScriptHttp
 import org.softwood.dag.script.ScriptInterruptedError
+import org.softwood.dag.script.ScriptProcess
+import org.softwood.dag.script.ScriptSql
 import org.softwood.promise.Promise
 
 import javax.script.ScriptEngine
@@ -55,8 +57,10 @@ import java.util.concurrent.TimeoutException
  * </ul>
  *
  * <h3>Capabilities (level 2)</h3>
- * <p>{@code allow 'files'} on the graph binds {@code files}; {@code allow 'http'} binds {@code http}.
- * See {@link ScriptFiles} and {@link ScriptHttp}.</p>
+ * <p>{@code allow 'files'} on the graph binds {@code files}; {@code allow 'http'} binds {@code http};
+ * 1.4.1: {@code allow 'sql'} binds {@code sql} and {@code allow 'process'} binds {@code process}.
+ * See {@link ScriptFiles}, {@link ScriptHttp}, {@link ScriptSql} and {@link ScriptProcess}. A script
+ * reaches only the methods of these objects, never what they hold.</p>
  *
  * <h3>trusted true (level 3)</h3>
  * <p>The script is compiled as plain Groovy and is given the TaskContext itself, as every script
@@ -411,6 +415,8 @@ class ScriptTask extends TaskBase<Object> implements SelfValidating {
         if (!trustedTask && ctx?.scriptCapabilities) {
             if (ctx.scriptCapabilities.contains('files')) bindings.put('files', new ScriptFiles(ctx))
             if (ctx.scriptCapabilities.contains('http')) bindings.put('http', new ScriptHttp(ctx))
+            if (ctx.scriptCapabilities.contains('sql')) bindings.put('sql', new ScriptSql(ctx, id))
+            if (ctx.scriptCapabilities.contains('process')) bindings.put('process', new ScriptProcess(ctx, id))
         }
 
         // Add user-provided bindings

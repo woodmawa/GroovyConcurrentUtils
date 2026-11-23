@@ -580,7 +580,7 @@ class Hardening140ScriptSpec extends Specification {
         thrown(IllegalArgumentException)
 
         where:
-        capability << ['process', 'sql', 'everything']
+        capability << ['everything', 'shell', 'network']   // 1.4.1: 'process' and 'sql' are capabilities now (Hardening141ShellSpec)
     }
 
     // ------------------------------------------------------------------ level 2: allow 'http'

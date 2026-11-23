@@ -3,55 +3,25 @@ package org.softwood.dag.task
 import groovy.transform.CompileStatic
 
 /**
- * Secure base class for Groovy scripts executed by ScriptTask.
+ * The base class of a restricted ScriptTask script: the helpers a script can call by name.
  *
- * <p>This base class restricts dangerous operations to prevent:
  * <ul>
- *   <li>Arbitrary code execution (exec, shell commands)</li>
- *   <li>File system access (unless explicitly allowed)</li>
- *   <li>Network access (unless explicitly allowed)</li>
- *   <li>Reflection abuse</li>
- *   <li>Class loading abuse</li>
+ *   <li>{@code log(message)}, {@code log(level, message)}: to stderr, so an MCP stdio transport is
+ *       not disturbed;</li>
+ *   <li>{@code parseJson(text)}, {@code toJson(value)};</li>
+ *   <li>{@code now()}: the clock in milliseconds;</li>
+ *   <li>{@code sleep(millis)}: at most 60 seconds.</li>
  * </ul>
  *
- * <h3>Allowed Operations:</h3>
- * <ul>
- *   <li>Basic math and string operations</li>
- *   <li>Collection manipulation (List, Map, Set)</li>
- *   <li>Date/time operations</li>
- *   <li>JSON parsing/serialization</li>
- *   <li>Access to script bindings (ctx, r, prev, etc.)</li>
- *   <li>Logging via provided logger</li>
- * </ul>
+ * <p>1.4.1: this class is not what restricts a script. Since 1.4.0 that is done by
+ * {@link org.softwood.dag.script.RestrictedCompiler} (the script profile, checked when the graph is
+ * validated) and {@link org.softwood.dag.script.ScriptGuard} (the receiver of every call, checked
+ * while the script runs). The name checks in {@code invokeMethod}, {@code getProperty} and
+ * {@code setProperty} below are left from before 1.4.0; they are a second line only, and the
+ * {@code sandboxed} word they were written for is now {@code trusted false}, the default.</p>
  *
- * <h3>Blocked Operations:</h3>
- * <ul>
- *   <li>System.exec, Runtime.exec, ProcessBuilder</li>
- *   <li>File I/O (File, FileInputStream, FileOutputStream)</li>
- *   <li>Network I/O (Socket, URL.openConnection)</li>
- *   <li>Class.forName, ClassLoader operations</li>
- *   <li>Reflection (Method.invoke, Field.set)</li>
- *   <li>System.exit, Runtime.halt</li>
- * </ul>
- *
- * <h3>Usage:</h3>
- * <pre>
- * scriptTask("safe-script") {
- *     language "groovy"
- *     sandboxed true  // Enable secure mode (default)
- *     script '''
- *         // Safe operations
- *         def result = input.values.sum()
- *         log "Calculated sum: ${result}"
- *         return result
- *
- *         // Blocked operations (will throw SecurityException)
- *         // "ls".execute()  // ❌ Blocked
- *         // new File("/etc/passwd").text  // ❌ Blocked
- *         // new URL("http://evil.com").text  // ❌ Blocked
- *     '''
- * }
- * </pre>
+ * <p>A flow can give a script a base class of its own with {@code customScriptBaseClass}; the
+ * script is still compiled under the profile.</p>
  *
  * @author Will Woodman
  * @since 2.0

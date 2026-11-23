@@ -16,8 +16,20 @@ import java.nio.file.Files
  * D9): the strict limits, inside the graph's working directory (the JVM's if the graph names none)
  * and the directories the graph names with {@code allowedDirectories}. A relative path is taken
  * from the working directory. A path outside the scope is a {@link SecurityException}.</p>
+ *
+ * <p>1.4.1: a script reaches only the methods below ({@link ScriptCapability}); the scope and
+ * limits this object holds cannot be read or changed from the script.</p>
  */
-class ScriptFiles {
+class ScriptFiles implements ScriptCapability {
+
+    private static final Set<String> OFFERED = Collections.unmodifiableSet(
+            new LinkedHashSet<String>(['read', 'readLines', 'exists', 'size', 'list', 'write', 'append']))
+
+    @Override
+    String capabilityName() { 'files' }
+
+    @Override
+    Set<String> offeredMethods() { OFFERED }
 
     private final File base
     private final FileTaskSecurityConfig config

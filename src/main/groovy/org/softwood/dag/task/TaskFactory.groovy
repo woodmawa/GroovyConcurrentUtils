@@ -109,6 +109,17 @@ class TaskFactory {
     }
 
     /**
+     * 1.4.1: create a ShellTask - a PowerShell, cmd, bash or Python script run as a process.
+     * Runs only in a graph with allow 'process' and the interpreter named.
+     */
+    static ShellTask createShellTask(String id, String name, TaskContext ctx) {
+        validateTaskId(id)
+        validateTaskName(name)
+        log.debug("Creating ShellTask: id=$id, name=$name")
+        return new ShellTask(id, name, ctx)
+    }
+
+    /**
      * Create a SendTask - external message/event sending task.
      *
      * @param id unique task identifier
@@ -529,6 +540,9 @@ class TaskFactory {
 
             case TaskType.SCRIPT:
                 return createScriptTask(id, name, ctx)
+
+            case TaskType.SHELL:
+                return createShellTask(id, name, ctx)
 
             case TaskType.SEND:
                 return createSendTask(id, name, ctx)

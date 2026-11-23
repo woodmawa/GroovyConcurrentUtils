@@ -4,7 +4,7 @@ Will Woodman <will@woodmawa.com>
 // The TaskGraph chapters only, as a book of their own for printing and desk reference.
 // The same chapter files are Part V of index.adoc (the full library book): edit them once.
 // Keep :gcu-version: in step with index.adoc.
-:gcu-version: 1.4.0
+:gcu-version: 1.4.1
 :revnumber: {gcu-version}
 :toc: left
 :toclevels: 3

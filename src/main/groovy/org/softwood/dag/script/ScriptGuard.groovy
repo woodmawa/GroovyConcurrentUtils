@@ -35,10 +35,14 @@ final class ScriptGuard {
     static Object checked(Object receiver, String method, boolean spread) {
         if (receiver == null) return null
         if (spread) {
-            for (Object element : elementsOf(receiver)) requireReceiver(element, method + '()')
+            for (Object element : elementsOf(receiver)) {
+                requireReceiver(element, method + '()')
+                requireOffered(element, method)
+            }
             return receiver
         }
         requireReceiver(receiver, method + '()')
+        requireOffered(receiver, method)
         if (method == 'parse') {
             String type = receiver.getClass().name
             if (type.startsWith('groovy.json.') || type.startsWith('groovy.xml.') || type.startsWith('groovy.yaml.')) {
@@ -51,6 +55,7 @@ final class ScriptGuard {
     /** The receiver of a property read. A property the list does not have is read from each element. */
     static Object checkedGet(Object receiver, String property, boolean spread) {
         if (receiver == null) return null
+        noMembers(receiver, property)
         if (receiver instanceof Map && !spread) return receiver
         if (spread || (receiver instanceof Collection &&
                 InvokerHelper.getMetaClass(receiver).hasProperty(receiver, property) == null)) {
@@ -64,6 +69,7 @@ final class ScriptGuard {
     /** The receiver of a property write. */
     static Object checkedSet(Object receiver, String property) {
         if (receiver == null) return null
+        noMembers(receiver, property)
         if (receiver instanceof Map) return receiver
         if (receiver instanceof Closure) {
             throw refused("a script cannot set '${property}' on a closure")
@@ -75,6 +81,7 @@ final class ScriptGuard {
     /** The receiver of an index, read or written. An object's properties are not reached by index. */
     static Object indexable(Object receiver) {
         if (receiver == null) return null
+        noMembers(receiver, 'an index')
         if (receiver instanceof Map || receiver instanceof Collection || receiver instanceof CharSequence ||
                 receiver.getClass().isArray() || allowedType(receiver.getClass())) {
             return receiver
@@ -85,6 +92,7 @@ final class ScriptGuard {
     /** The left operand of an operator that writes to or pipes its receiver: << >> >>> |. */
     static Object checkedOp(Object receiver, String operator) {
         if (receiver == null) return null
+        noMembers(receiver, operator)
         requireReceiver(receiver, operator)
         return receiver
     }
@@ -96,11 +104,30 @@ final class ScriptGuard {
      */
     static Object passable(Object value, String what) {
         if (value == null || value instanceof Class) return value
+        noMembers(value, what)
         requireReceiver(value, what)
         return value
     }
 
     // ------------------------------------------------------------------ the rule
+
+    /** 1.4.1: on a capability object a script may call only the methods it offers. */
+    private static void requireOffered(Object receiver, String method) {
+        if (receiver instanceof ScriptCapability) {
+            ScriptCapability capability = (ScriptCapability) receiver
+            if (!capability.offeredMethods().contains(method)) {
+                throw refused("${capability.capabilityName()} offers ${capability.offeredMethods().sort().join(', ')}: a script cannot call ${method}() on it")
+            }
+        }
+    }
+
+    /** 1.4.1: a capability object is reached only through its methods: no property, index or operator. */
+    private static void noMembers(Object receiver, String what) {
+        if (receiver instanceof ScriptCapability) {
+            ScriptCapability capability = (ScriptCapability) receiver
+            throw refused("${capability.capabilityName()} is used only through its methods (${capability.offeredMethods().sort().join(', ')}): a script cannot use ${what} on it")
+        }
+    }
 
     private static void requireReceiver(Object receiver, String what) {
         if (receiver == null) return

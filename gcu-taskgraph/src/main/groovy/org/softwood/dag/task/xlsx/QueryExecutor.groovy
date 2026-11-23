@@ -29,7 +29,12 @@ import java.time.ZoneId
  */
 class QueryExecutor {
 
-    static List execute(QueryPlan plan, XSSFWorkbook wb) {
+    /**
+     * @return a {@code List} for list_of_maps and list_of_lists, a {@code Map} keyed by {@code keyColumn} for
+     *         map_by_key. 2.0.2: declared {@code Object} -- it was {@code List}, so map_by_key always failed with a
+     *         GroovyCastException.
+     */
+    static Object execute(QueryPlan plan, XSSFWorkbook wb) {
         XSSFSheet sheet = plan.sheetName ? wb.getSheet(plan.sheetName) : wb.getSheetAt(0)
         if (!sheet) throw new IllegalArgumentException("Sheet '${plan.sheetName}' not found in workbook")
 
@@ -57,18 +62,39 @@ class QueryExecutor {
             headers << (cell ? cellString(cell, evaluator) : "Col${c + 1}")
         }
 
+        // 2.0.2: map_by_key needs a key column that is a header, checked before any row is read
+        if (plan.format == 'map_by_key') {
+            if (!plan.keyColumn)
+                throw new IllegalArgumentException("QueryPlan.keyColumn is required for format='map_by_key'")
+            if (!headers.contains(plan.keyColumn))
+                throw new IllegalArgumentException(
+                    "QueryExecutor: keyColumn '${plan.keyColumn}' is not a header -- the headers are ${headers}")
+            if (plan.columns && !plan.columns.contains(plan.keyColumn))
+                throw new IllegalArgumentException(
+                    "QueryExecutor: keyColumn '${plan.keyColumn}' must be one of the projected columns ${plan.columns}")
+        }
+
         // ---- Column projection ----
         List<Integer> colIndices   // 0-based offsets from firstCol
         if (plan.columns) {
-            colIndices = plan.columns.collect { String nameOrLetter ->
+            // 2.0.1: a column that is neither a header nor a letter inside the range is refused by name.
+            // Before 2.0.1 it was dropped silently, so a typo returned rows without that column.
+            List<String> unknown = []
+            colIndices = []
+            plan.columns.each { String nameOrLetter ->
                 int idx = headers.indexOf(nameOrLetter)
-                if (idx < 0) {
+                if (idx < 0 && nameOrLetter ==~ /[A-Za-z]{1,3}/) {
                     // Try column letter: convert to 0-based absolute, then subtract firstCol
-                    int abs = CellReference.convertColStringToIndex(nameOrLetter)
+                    int abs = CellReference.convertColStringToIndex(nameOrLetter.toUpperCase())
                     idx = abs - firstCol
                 }
-                (idx >= 0 && idx < headers.size()) ? idx : null
-            }.findAll { it != null }
+                if (idx >= 0 && idx < headers.size()) colIndices << idx
+                else unknown << nameOrLetter
+            }
+            if (unknown) {
+                throw new IllegalArgumentException(
+                    "QueryExecutor: unknown column(s) ${unknown} -- the headers are ${headers}; a column letter must fall inside the range")
+            }
         } else {
             colIndices = (0..<headers.size()).toList()
         }
@@ -103,8 +129,6 @@ class QueryExecutor {
 
         // ---- Final format ----
         if (plan.format == 'map_by_key') {
-            if (!plan.keyColumn)
-                throw new IllegalArgumentException("QueryPlan.keyColumn is required for format='map_by_key'")
             return result.collectEntries { Map row -> [(row[plan.keyColumn]): row] }
         }
         return result

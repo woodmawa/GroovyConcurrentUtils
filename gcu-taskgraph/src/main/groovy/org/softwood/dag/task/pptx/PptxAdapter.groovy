@@ -2,6 +2,10 @@ package org.softwood.dag.task.pptx
 
 import groovy.util.logging.Slf4j
 import org.apache.poi.sl.usermodel.PictureData
+import org.apache.poi.sl.usermodel.Placeholder
+import org.apache.poi.xslf.usermodel.XSLFAutoShape
+import org.apache.poi.xslf.usermodel.XSLFConnectorShape
+import org.apache.poi.xslf.usermodel.XSLFTextShape
 import org.apache.poi.xslf.usermodel.XMLSlideShow
 import org.apache.poi.xslf.usermodel.XSLFNotes
 import org.apache.poi.xslf.usermodel.XSLFPictureData
@@ -15,6 +19,8 @@ import org.apache.poi.xslf.usermodel.XSLFTextBox
 import org.apache.poi.xslf.usermodel.XSLFTextParagraph
 import org.apache.poi.xslf.usermodel.XSLFTextRun
 import org.softwood.dag.task.docx.TableSpec
+import org.softwood.dag.task.office.OfficeFiles
+import org.softwood.dag.task.xlsx.StyleSpec
 import org.softwood.dag.task.xlsx.model.RichRun
 
 import java.awt.Color
@@ -40,6 +46,13 @@ import java.awt.geom.Rectangle2D
  * POI XSLF {@code setAnchor} expects a {@link Rectangle2D} in <em>points</em>
  * (1/72 inch).  Conversion: {@code emu / 12700.0 = points}.
  * (1 inch = 914400 EMU = 72 points → 1 EMU = 72/914400 = 1/12700 points.)
+ *
+ * <p>GCU 2.0.1: speaker notes are written (a property the notes slide does not have made them throw, and the error
+ * was swallowed); a named layout is found (the lookup returned from inside an each closure, so it never did) and an
+ * unknown one is refused; the title and properties, RECTANGLE / OVAL / LINE shapes, a text shape's bold, italic, font
+ * and fill, the defaultLayout background and fonts and the transition speed are applied; a missing image fails
+ * instead of being skipped. CHART, defaultLayout theme and accentColor and named styles are refused by name before
+ * anything is written ({@link #checkPlan}); files are written atomically.</p>
  */
 @Slf4j
 class PptxAdapter {
@@ -74,13 +87,13 @@ class PptxAdapter {
         String           filePath = config.filePath as String
         if (!plan)     throw new IllegalArgumentException('PptxAdapter GENERATE: config.presentationPlan (PresentationPlan) is required')
         if (!filePath) throw new IllegalArgumentException('PptxAdapter GENERATE: config.filePath is required')
+        checkPlan(plan.slides, plan, 'GENERATE')
 
         XMLSlideShow ss = new XMLSlideShow()
         try {
+            checkLayouts(ss, plan.slides, 'GENERATE')
             applyPresentationPlan(ss, plan)
-            File file = new File(filePath)
-            file.parentFile?.mkdirs()
-            new FileOutputStream(file).withCloseable { out -> ss.write(out) }
+            OfficeFiles.writeAtomically(new File(filePath)) { OutputStream out -> ss.write(out) }
         } finally {
             ss.close()
         }
@@ -101,11 +114,8 @@ class PptxAdapter {
                     Map slideInfo = [index: i + 1, title: null, notes: null, shapes: []]
                     // Title
                     try { slideInfo.title = slide.title } catch (ignored) {}
-                    // Notes
-                    try {
-                        XSLFNotes notes = ss.getNotesSlide(slide)
-                        if (notes) slideInfo.notes = notes.textBody?.text
-                    } catch (ignored) {}
+                    // Notes (2.0.1: from the notes body placeholder; a notes slide has no textBody property)
+                    slideInfo.notes = notesText(ss, slide)
                     // Shape text
                     slide.shapes.each { shape ->
                         try {
@@ -127,12 +137,14 @@ class PptxAdapter {
         String    filePath  = config.filePath as String
         if (!slidePlan) throw new IllegalArgumentException('PptxAdapter ADD_SLIDE: config.slide (SlidePlan) is required')
         if (!filePath)  throw new IllegalArgumentException('PptxAdapter ADD_SLIDE: config.filePath is required')
+        checkPlan([slidePlan], null, 'ADD_SLIDE')
 
         File file = new File(filePath)
         XMLSlideShow ss = file.exists() ? openExisting(file) : new XMLSlideShow()
         try {
+            checkLayouts(ss, [slidePlan], 'ADD_SLIDE')
             writeSlidePlan(ss, slidePlan)
-            new FileOutputStream(file).withCloseable { out -> ss.write(out) }
+            OfficeFiles.writeAtomically(file) { OutputStream out -> ss.write(out) }
         } finally {
             ss.close()
         }
@@ -168,44 +180,61 @@ class PptxAdapter {
     // =========================================================================
 
     private static void applyPresentationPlan(XMLSlideShow ss, PresentationPlan plan) {
+        // 2.0.1: title and core properties (they were never written)
+        if (plan.title || plan.properties) {
+            def cp = ss.properties.coreProperties
+            if (plan.title)                   cp.title       = plan.title
+            if (plan.properties?.author)      cp.creator     = plan.properties.author
+            if (plan.properties?.subject)     cp.setSubjectProperty(plan.properties.subject)
+            if (plan.properties?.description) cp.setDescription(plan.properties.description)
+            if (plan.properties?.keywords)    cp.keywords    = plan.properties.keywords
+            if (plan.properties?.category)    cp.category    = plan.properties.category
+            if (plan.properties?.company)     ss.properties.extendedProperties.underlyingProperties.company = plan.properties.company
+        }
         // Slides
         plan.slides.each { SlidePlan sp -> writeSlidePlan(ss, sp, plan.defaultLayout) }
     }
 
     private static void writeSlidePlan(XMLSlideShow ss, SlidePlan sp,
                                         SlideLayoutSpec defaultLayout = null) {
-        // Resolve layout
+        // Resolve layout (an unknown name was refused by checkLayouts)
         XSLFSlideLayout layout = resolveLayout(ss, sp.layout)
         XSLFSlide slide = layout ? ss.createSlide(layout) : ss.createSlide()
 
-        // Title placeholder
+        // 2.0.1: slide background from the presentation default
+        if (defaultLayout?.background) slide.background.fillColor = hexToColor(defaultLayout.background)
+
+        // Title: the layout's title placeholder when it has one, else a text box
         if (sp.title) {
-            try {
-                slide.titleShape?.text = sp.title
-            } catch (ignored) {
-                // Some layouts have no title placeholder — create a text box instead
+            XSLFTextShape titleShape = slide.placeholders.find { XSLFTextShape ph ->
+                ph.textType == Placeholder.TITLE || ph.textType == Placeholder.CENTERED_TITLE
+            }
+            if (titleShape) {
+                titleShape.text = sp.title
+            } else {
                 XSLFTextBox tb = slide.createTextBox()
                 tb.anchor = new Rectangle2D.Double(30, 10, 620, 50)
                 tb.text   = sp.title
+                titleShape = tb
             }
+            applyFonts(titleShape, defaultLayout?.fontFamily, defaultLayout?.titleFontSize ?: 0)
         }
 
         // Shapes
-        sp.shapes?.each { ShapeSpec shape -> writeShape(ss, slide, shape) }
+        sp.shapes?.each { ShapeSpec shape -> writeShape(ss, slide, shape, defaultLayout) }
 
         // Transition
         if (sp.transition && sp.transition.type != TransitionType.NONE) {
             applyTransition(slide, sp.transition)
         }
 
-        // Notes
+        // 2.0.1: speaker notes go in the notes slide's body placeholder. The old code set a textBody property the
+        // notes slide does not have, caught the exception and logged it at debug, so notes were silently dropped.
         if (sp.notes) {
-            try {
-                XSLFNotes notes = ss.getNotesSlide(slide) ?: ss.createNotesSlide(slide)
-                if (notes?.textBody) notes.textBody.text = sp.notes
-            } catch (ignored) {
-                log.debug 'PptxAdapter: could not set notes for slide — {}', ignored.message
-            }
+            XSLFNotes notes = ss.getNotesSlide(slide)
+            XSLFTextShape body = notes?.placeholders?.find { XSLFTextShape ph -> ph.textType == Placeholder.BODY }
+            if (!body) throw new IllegalStateException('PptxAdapter: the notes slide has no body placeholder to hold speaker notes')
+            body.text = sp.notes
         }
     }
 
@@ -213,7 +242,7 @@ class PptxAdapter {
     // Shape writing
     // =========================================================================
 
-    private static void writeShape(XMLSlideShow ss, XSLFSlide slide, ShapeSpec spec) {
+    private static void writeShape(XMLSlideShow ss, XSLFSlide slide, ShapeSpec spec, SlideLayoutSpec defaultLayout = null) {
         Rectangle2D anchor = toAnchor(spec)
 
         switch (spec.type) {
@@ -223,58 +252,106 @@ class PptxAdapter {
             case ShapeType.TABLE:
                 writeTableShape(slide, spec.table, anchor)
                 break
+            case ShapeType.RECTANGLE:
+                writeAutoShape(slide, spec, anchor, org.apache.poi.sl.usermodel.ShapeType.RECT, defaultLayout)
+                break
+            case ShapeType.OVAL:
+                writeAutoShape(slide, spec, anchor, org.apache.poi.sl.usermodel.ShapeType.ELLIPSE, defaultLayout)
+                break
+            case ShapeType.LINE:
+                writeLine(slide, spec, anchor)
+                break
+            case ShapeType.CHART:
+                throw new IllegalArgumentException('PptxAdapter: CHART shapes are not supported')
             default:
-                writeTextShape(slide, spec, anchor)
+                writeTextShape(slide, spec, anchor, defaultLayout)
         }
     }
 
-    private static void writeTextShape(XSLFSlide slide, ShapeSpec spec, Rectangle2D anchor) {
+    /** 2.0.1: RECTANGLE and OVAL used to fall through to a text box. */
+    private static void writeAutoShape(XSLFSlide slide, ShapeSpec spec, Rectangle2D anchor,
+                                       org.apache.poi.sl.usermodel.ShapeType type, SlideLayoutSpec defaultLayout) {
+        XSLFAutoShape shape = slide.createAutoShape()
+        shape.shapeType = type
+        shape.anchor    = anchor.width > 0 ? anchor : new Rectangle2D.Double(50, 50, 200, 100)
+        if (spec.style?.fill?.foreground) shape.fillColor = hexToColor(spec.style.fill.foreground)
+        if (spec.style?.border?.color)    shape.lineColor = hexToColor(spec.style.border.color)
+        if (spec.text || spec.richText)   fillText(shape, spec, defaultLayout)
+    }
+
+    /** 2.0.1: LINE used to fall through to a text box. */
+    private static void writeLine(XSLFSlide slide, ShapeSpec spec, Rectangle2D anchor) {
+        XSLFConnectorShape line = slide.createConnector()
+        line.anchor    = anchor
+        line.lineColor = hexToColor(spec.style?.border?.color ?: '#000000')
+        line.lineWidth = 1.0d
+    }
+
+    private static void writeTextShape(XSLFSlide slide, ShapeSpec spec, Rectangle2D anchor, SlideLayoutSpec defaultLayout = null) {
         XSLFTextBox tb = slide.createTextBox()
         tb.anchor      = anchor.width > 0 ? anchor : new Rectangle2D.Double(50, 50, 500, 100)
+        fillText(tb, spec, defaultLayout)
+        // 2.0.1: the shape's fill
+        if (spec.style?.fill?.foreground) tb.fillColor = hexToColor(spec.style.fill.foreground)
+    }
+
+    /**
+     * Text and its formatting for a text box or auto-shape. Plain text takes the shape style's font (bold, italic,
+     * underline, name, size, colour -- 2.0.1: only size and colour were applied), falling back to the presentation
+     * default font family and body size. A rich-text run's own formatting wins; the defaults fill what it leaves unset.
+     */
+    private static void fillText(XSLFTextShape shape, ShapeSpec spec, SlideLayoutSpec defaultLayout) {
+        def f = spec.style?.font
+        String family = f?.name ?: defaultLayout?.fontFamily
+        int size      = (f?.size ?: 0) > 0 ? f.size : (defaultLayout?.bodyFontSize ?: 0)
 
         if (spec.richText) {
-            tb.clearText()
-            XSLFTextParagraph para = tb.addNewTextParagraph()
+            shape.clearText()
+            XSLFTextParagraph para = shape.addNewTextParagraph()
             spec.richText.each { RichRun rr ->
                 if (!rr?.text) return
                 XSLFTextRun run = para.addNewTextRun()
                 run.setText(rr.text)
-                if (rr.bold)        run.bold      = true
-                if (rr.italic)      run.italic    = true
+                if (rr.bold)        run.bold       = true
+                if (rr.italic)      run.italic     = true
                 if (rr.underline)   run.underlined = true
-                if (rr.fontName)    run.fontFamily = rr.fontName
-                if (rr.fontSize > 0) run.fontSize  = (double) rr.fontSize
+                String rf = rr.fontName ?: family
+                if (rf)             run.fontFamily = rf
+                int rs = rr.fontSize > 0 ? rr.fontSize : size
+                if (rs > 0)         run.fontSize   = (double) rs
                 if (rr.color)       run.fontColor  = hexToColor(rr.color)
+                else if (f?.color)  run.fontColor  = hexToColor(f.color)
             }
         } else if (spec.text) {
-            tb.text = spec.text
-        }
-
-        // Inline style — font size and fill
-        if (spec.style?.font?.size > 0) {
-            tb.textParagraphs.each { XSLFTextParagraph p ->
-                p.textRuns.each { XSLFTextRun r -> r.fontSize = (double) spec.style.font.size }
+            shape.text = spec.text
+            shape.textParagraphs.each { XSLFTextParagraph p ->
+                p.textRuns.each { XSLFTextRun r ->
+                    if (f?.bold)      r.bold       = true
+                    if (f?.italic)    r.italic     = true
+                    if (f?.underline) r.underlined = true
+                    if (family)       r.fontFamily = family
+                    if (size > 0)     r.fontSize   = (double) size
+                    if (f?.color)     r.fontColor  = hexToColor(f.color)
+                }
             }
         }
-        if (spec.style?.font?.color) {
-            Color c = hexToColor(spec.style.font.color)
-            tb.textParagraphs.each { XSLFTextParagraph p ->
-                p.textRuns.each { XSLFTextRun r -> r.fontColor = c }
+    }
+
+    /** Font family and size on every run of a shape (the title, from the presentation default). */
+    private static void applyFonts(XSLFTextShape shape, String family, int size) {
+        shape?.textParagraphs?.each { XSLFTextParagraph p ->
+            p.textRuns.each { XSLFTextRun r ->
+                if (family)   r.fontFamily = family
+                if (size > 0) r.fontSize   = (double) size
             }
         }
     }
 
     private static void writeImageShape(XMLSlideShow ss, XSLFSlide slide,
                                          ShapeSpec spec, Rectangle2D anchor) {
-        if (!spec.imagePath) {
-            log.warn 'PptxAdapter: IMAGE shape has no imagePath — skipping'
-            return
-        }
-        File imgFile = new File(spec.imagePath)
-        if (!imgFile.exists()) {
-            log.warn 'PptxAdapter: image file not found: {}', spec.imagePath
-            return
-        }
+        // 2.0.1: a missing image fails the plan (checkPlan refuses it first); it used to be skipped with a warning
+        File imgFile = spec.imagePath ? new File(spec.imagePath) : null
+        if (!imgFile?.isFile()) throw new IllegalArgumentException("PptxAdapter: image not found: ${spec.imagePath}".toString())
         String ext = spec.imagePath.tokenize('.').last().toLowerCase()
         PictureData.PictureType picType
         switch (ext) {
@@ -330,20 +407,25 @@ class PptxAdapter {
     // =========================================================================
 
     private static void applyTransition(XSLFSlide slide, TransitionSpec spec) {
+        def ctSlide = slide.xmlObject
+        def trans   = ctSlide.isSetTransition() ? ctSlide.transition : ctSlide.addNewTransition()
+        switch (spec.type) {
+            case TransitionType.FADE:  trans.addNewFade();  break
+            case TransitionType.PUSH:  trans.addNewPush();  break
+            case TransitionType.WIPE:  trans.addNewWipe();  break
+            case TransitionType.SPLIT: trans.addNewStrips(); break
+            case TransitionType.ZOOM:  trans.addNewZoom();  break
+            default: break
+        }
+        // 2.0.1: the duration sets the speed (OOXML has three: up to 500 ms fast, up to 1 s medium, longer slow).
+        // Set as the attribute through a cursor: the STTransitionSpeed schema type is not in poi-ooxml-lite.
+        // Errors are no longer swallowed at debug level.
+        String speed = spec.durationMs <= 500 ? 'fast' : spec.durationMs <= 1000 ? 'med' : 'slow'
+        def cursor = trans.newCursor()
         try {
-            def ctSlide = slide.xmlObject
-            def trans   = ctSlide.isSetTransition() ? ctSlide.transition : ctSlide.addNewTransition()
-            // Duration in ms → tenths of a second for OOXML (advTm in ms, spd in string)
-            switch (spec.type) {
-                case TransitionType.FADE:  trans.addNewFade();  break
-                case TransitionType.PUSH:  trans.addNewPush();  break
-                case TransitionType.WIPE:  trans.addNewWipe();  break
-                case TransitionType.SPLIT: trans.addNewStrips(); break
-                case TransitionType.ZOOM:  trans.addNewZoom();  break
-                default: break
-            }
-        } catch (Exception e) {
-            log.debug 'PptxAdapter: could not apply transition {} — {}', spec.type, e.message
+            cursor.setAttributeText(new javax.xml.namespace.QName('spd'), speed)
+        } finally {
+            cursor.dispose()
         }
     }
 
@@ -351,13 +433,69 @@ class PptxAdapter {
     // Helpers
     // =========================================================================
 
+    /**
+     * The layout with this name, or null for no name. 2.0.1: the old lookup returned from inside an each closure,
+     * which only ends that iteration, so it always returned null and a named layout was never used.
+     */
     private static XSLFSlideLayout resolveLayout(XMLSlideShow ss, String layoutName) {
-        if (!layoutName || ss.slideMasters.isEmpty()) return null
-        ss.slideMasters.each { master ->
+        if (!layoutName) return null
+        for (def master : ss.slideMasters) {
             XSLFSlideLayout found = master.slideLayouts.find { it.name == layoutName }
             if (found) return found
         }
-        return null
+        throw new IllegalArgumentException("PptxAdapter: layout '${layoutName}' not found (available: ${layoutNames(ss)})".toString())
+    }
+
+    private static List<String> layoutNames(XMLSlideShow ss) {
+        ss.slideMasters.collectMany { master -> master.slideLayouts.collect { it.name } } as List<String>
+    }
+
+    /** Every slide's layout must exist in the presentation: refused by name before anything is written. */
+    private static void checkLayouts(XMLSlideShow ss, List<SlidePlan> slides, String action) {
+        List<String> known = layoutNames(ss)
+        List<String> problems = []
+        slides.eachWithIndex { SlidePlan sp, int i ->
+            if (sp.layout && !known.contains(sp.layout)) problems << "slides[${i}].layout '${sp.layout}' not found (available: ${known})".toString()
+        }
+        OfficeFiles.refuse("PptxAdapter ${action}".toString(), problems)
+    }
+
+    private static final Set<String> PROPERTY_KEYS = ['author', 'subject', 'description', 'category', 'keywords', 'company'] as Set
+
+    /**
+     * Refuse, before anything is written, a field this adapter cannot apply -- every problem named at once.
+     * {@code plan} is null for ADD_SLIDE (one slide, no presentation-level fields).
+     */
+    static void checkPlan(List<SlidePlan> slides, PresentationPlan plan, String action) {
+        List<String> problems = []
+        if (plan) {
+            if (plan.defaultLayout?.theme)       problems << 'defaultLayout.theme is not supported: POI cannot switch a theme -- start from a template instead'
+            if (plan.defaultLayout?.accentColor) problems << 'defaultLayout.accentColor is not supported: theme colours cannot be changed -- set colours on each shape'
+            if (plan.styles)                     problems << 'styles is not supported: no shape refers to a named style -- set style on each shape'
+            plan.properties?.keySet()?.each { Object k ->
+                if (!PROPERTY_KEYS.contains(k as String)) problems << "properties.${k} is not supported (${PROPERTY_KEYS.sort()})".toString()
+            }
+        }
+        slides.eachWithIndex { SlidePlan sp, int i ->
+            sp.shapes?.eachWithIndex { ShapeSpec sh, int j ->
+                String w = "slides[${i}].shapes[${j}]"
+                if (sh.type == ShapeType.CHART) problems << "${w}.type CHART is not supported".toString()
+                if (sh.type == ShapeType.TABLE && !sh.table) problems << "${w}.table is required for TABLE".toString()
+                if (sh.type == ShapeType.IMAGE) {
+                    if (!sh.imagePath)                         problems << "${w}.imagePath is required for IMAGE".toString()
+                    else if (!new File(sh.imagePath).isFile()) problems << "${w}.imagePath: image not found: ${sh.imagePath}".toString()
+                }
+            }
+        }
+        OfficeFiles.refuse("PptxAdapter ${action}".toString(), problems)
+    }
+
+    /** Speaker notes text from the notes slide's body placeholder, or null when the slide has none. */
+    private static String notesText(XMLSlideShow ss, XSLFSlide slide) {
+        XSLFNotes notes = slide.notes
+        if (!notes) return null
+        XSLFTextShape body = notes.placeholders.find { XSLFTextShape ph -> ph.textType == Placeholder.BODY }
+        return body?.text
     }
 
     private static XMLSlideShow openExisting(File file) {

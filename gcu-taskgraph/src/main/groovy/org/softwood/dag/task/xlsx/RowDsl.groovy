@@ -54,7 +54,9 @@ class RowDsl {
         if (opts?.height != null) _height   = opts.height as float
         if (opts?.hidden != null) _hidden   = opts.hidden as boolean
         if (opts?.values) {
-            (opts.values as List).each { v -> cell(v) }
+            // 2.0.1: add each as a value cell. cell(v) dispatched a String to cell(String ref), so every text value
+            // was read as a column reference ('name' -> column -1) and the adapter failed.
+            (opts.values as List).each { Object v -> _cells << new CellSpec(colIndex: _nextCol++, value: v, styleRef: _styleRef) }
         }
     }
 
@@ -98,6 +100,9 @@ class RowDsl {
      *   cell 'D', formula: 'SUM(D2:D10)'
      * </pre>
      */
+    /** Named-argument form, {@code cell 'B3', value:1}: Groovy passes named arguments first (2.0.1). */
+    CellSpec cell(Map<String, Object> opts, String ref) { cell(ref, opts) }
+
     CellSpec cell(String ref, Map<String, Object> opts = [:]) {
         def dsl = new CellDsl()
         _applyMapOpts(dsl, opts)

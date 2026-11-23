@@ -2,7 +2,13 @@ package org.softwood.dag.task
 
 import groovy.util.logging.Slf4j
 import org.softwood.promise.Promise
+import org.softwood.dag.task.xlsx.CellSpec
+import org.softwood.dag.task.xlsx.DataRowsSpec
 import org.softwood.dag.task.xlsx.QueryPlan
+import org.softwood.dag.task.xlsx.RowSpec
+import org.softwood.dag.task.xlsx.SheetPlan
+import org.softwood.dag.task.xlsx.WorkbookPlan
+import org.softwood.dag.task.xlsx.XlsxWorkbookDsl
 
 /**
  * A DAG task that reads from or writes to Excel workbooks (.xlsx).
@@ -14,11 +20,15 @@ import org.softwood.dag.task.xlsx.QueryPlan
  * <h3>Actions:</h3>
  * <pre>
  *   READ      – Read rows from a sheet, returns List&lt;Map&gt; by default.
- *   WRITE     – Write headers + rows to a sheet (overwrites).
- *   APPEND    – Append rows to an existing sheet.
- *   TRANSFORM – Read, apply rowTransformer (or LLM), write back.
- *   CREATE    – Create a new workbook from scratch.
+ *   WRITE     – Write headers + rows to a sheet (replaces that sheet; other sheets kept).
+ *   APPEND    – Append rows after the sheet's last row (headers first when the file is new).
+ *   TRANSFORM – Read the sheet, apply rowTransformer to each row, write it back.
+ *   CREATE    – Create a new workbook from headers + rows.
+ *   GENERATE  – Build the workbook from a {@code workbook { }} closure (also APPEND/TRANSFORM with one).
  * </pre>
+ * <p>GCU 2.0.1: before it only READ worked -- WRITE and CREATE were unknown to the adapter, APPEND and TRANSFORM sent
+ * rows where it needs a plan, and {@code workbook { }} was never read. {@code useLlmTransform} is refused by name:
+ * no LLM transform is implemented.</p>
  *
  * <h3>Params:</h3>
  * <pre>
@@ -146,10 +156,26 @@ class XlsxTask extends TaskBase<Object> {
         Map<String, Object> memory = resolveWorkingMemory(ctx)
 
         return ctx.promiseFactory.executeAsync {
-            Map config = buildConfig(memory, prevValue)
-            log.debug "XlsxTask '${id}': executing action=${action} on ${filePath}"
+            String act = (action ?: 'READ').toUpperCase()
+            if (!ACTIONS.contains(act)) {
+                throw new IllegalArgumentException("XlsxTask '${id}': unknown action '${action}' (${ACTIONS.join(', ')})".toString())
+            }
+            log.debug "XlsxTask '${id}': executing action=${act} on ${filePath}"
 
-            Object result = xlsxCallFn.call(action.toUpperCase(), config)
+            Object result
+            if (workbookDslClosure) {
+                // 2.0.1: the workbook { } DSL builds a WorkbookPlan; its deferredRows take their data from working
+                // memory (sharedFacts, then runContext), or from the previous result when that is a map.
+                if (!PLAN_ACTIONS.contains(act)) {
+                    throw new IllegalArgumentException("XlsxTask '${id}': workbook { } needs action GENERATE, APPEND or TRANSFORM, not ${act}".toString())
+                }
+                def dsl = new XlsxWorkbookDsl(ctx, prevValue, this)
+                executeDeferredConfig(workbookDslClosure, dsl, ctx, prevValue)
+                WorkbookPlan plan = dsl.build()
+                result = xlsxCallFn.call(act, [filePath: filePath, plan: plan, data: deferredData(plan, memory, prevValue)])
+            } else {
+                result = runFlat(act, buildConfig(memory, prevValue))
+            }
 
             if (outputKey && result != null) {
                 storeResult(ctx, outputKey, result)
@@ -158,6 +184,103 @@ class XlsxTask extends TaskBase<Object> {
             log.info "XlsxTask '${id}': completed, result type=${result?.getClass()?.simpleName}"
             result
         }
+    }
+
+    /** Actions this task takes. READ/QUERY/GENERATE/APPEND/TRANSFORM go to the adapter; WRITE and CREATE are row writes. */
+    static final List<String> ACTIONS = ['READ', 'WRITE', 'CREATE', 'APPEND', 'TRANSFORM', 'GENERATE']
+    private static final Set<String> PLAN_ACTIONS = ['GENERATE', 'APPEND', 'TRANSFORM'] as Set
+    private static final String ROWS_KEY = '__xlsxTaskRows'
+
+    /** The workbook { } closure, when the DSL is used (2.0.1: it was never read before). */
+    Closure workbookDslClosure
+
+    /**
+     * Build the workbook from a {@link XlsxWorkbookDsl} closure. Sets the action to GENERATE unless it is already
+     * APPEND or TRANSFORM.
+     */
+    void workbook(@DelegatesTo(XlsxWorkbookDsl) Closure cl) {
+        workbookDslClosure = cl
+        if (!['APPEND', 'TRANSFORM'].contains((action ?: '').toUpperCase())) action = 'GENERATE'
+    }
+
+    /**
+     * The flat (no-DSL) actions, expressed as plans the adapter takes. Before 2.0.1 only READ worked: WRITE and CREATE
+     * reached the adapter as unknown actions, and APPEND and TRANSFORM sent rows where the adapter needs a plan.
+     */
+    private Object runFlat(String act, Map<String, Object> config) {
+        List<List<Object>> data = normaliseRows(config.rows as List)
+        switch (act) {
+            case 'READ':
+                return xlsxCallFn.call('READ', config)
+            case 'CREATE':
+                return xlsxCallFn.call('GENERATE', [filePath: filePath, plan: rowsPlan(true, headers ? 2 : 1), data: [(ROWS_KEY): data]])
+            case 'WRITE':
+                // replaces this sheet; other sheets in an existing workbook are kept
+                return xlsxCallFn.call(new File(filePath).exists() ? 'TRANSFORM' : 'GENERATE',
+                                       [filePath: filePath, plan: rowsPlan(true, headers ? 2 : 1), data: [(ROWS_KEY): data]])
+            case 'APPEND':
+                // rows after the sheet's last row; a new file gets the headers first
+                boolean fresh = !new File(filePath).exists()
+                WorkbookPlan p = fresh ? rowsPlan(true, headers ? 2 : 1) : rowsPlan(false, null)
+                return xlsxCallFn.call('APPEND', [filePath: filePath, plan: p, data: [(ROWS_KEY): data]])
+            case 'TRANSFORM':
+                return transformRows()
+            default: // GENERATE with no workbook { }
+                throw new IllegalArgumentException("XlsxTask '${id}': GENERATE needs a workbook { } closure".toString())
+        }
+    }
+
+    private Object transformRows() {
+        if (useLlmTransform) {
+            throw new UnsupportedOperationException("XlsxTask '${id}': useLlmTransform is not implemented -- pass a rowTransformer closure".toString())
+        }
+        if (!rowTransformer) {
+            throw new IllegalArgumentException("XlsxTask '${id}': TRANSFORM needs a rowTransformer closure".toString())
+        }
+        Map read = xlsxCallFn.call('READ', [filePath: filePath, sheetName: sheetName, readFormat: 'list_of_maps']) as Map
+        List<Map> before = (read?.get(sheetName) ?: []) as List<Map>
+        List<Map> after  = before.collect { Map row -> rowTransformer.call(row) as Map }
+        List<String> hdrs = after ? (after[0].keySet().collect { it as String }) : (headers ?: [])
+        List<List<Object>> data = after.collect { Map row -> hdrs.collect { String h -> row[h] } }
+        WorkbookPlan plan = new WorkbookPlan(sheets: [new SheetPlan(name: sheetName,
+            rows: hdrs ? [new RowSpec(rowIndex: 1, cells: hdrs.collect { new CellSpec(value: it) })] : [],
+            deferredRows: [new DataRowsSpec(startAt: hdrs ? 2 : 1, dataKey: ROWS_KEY)])])
+        xlsxCallFn.call('TRANSFORM', [filePath: filePath, plan: plan, data: [(ROWS_KEY): data]])
+        return [filePath: filePath, sheet: sheetName, transformed: data.size()]
+    }
+
+    /** One sheet: an optional header row (row 1), then the task's rows from {@link #ROWS_KEY} from startAt (1-based; null = after the last row). */
+    private WorkbookPlan rowsPlan(boolean withHeaders, Integer startAt) {
+        List<RowSpec> head = (withHeaders && headers) ? [new RowSpec(rowIndex: 1, cells: headers.collect { new CellSpec(value: it) })] : []
+        new WorkbookPlan(sheets: [new SheetPlan(name: sheetName, rows: head,
+            deferredRows: [new DataRowsSpec(startAt: startAt, dataKey: ROWS_KEY)])])
+    }
+
+    /** Rows as lists: a list of maps is laid out in {@link #headers} order when given, else the first map's key order. */
+    private List<List<Object>> normaliseRows(List rows) {
+        if (!rows) return []
+        if (rows[0] instanceof Map) {
+            List<String> keys = headers ?: ((rows[0] as Map).keySet().collect { it as String })
+            if (!headers) headers = keys
+            return rows.collect { Object r -> keys.collect { String k -> (r as Map)[k] } }
+        }
+        return rows.collect { Object r -> r instanceof List ? (r as List) : [r] }
+    }
+
+    /** Data for the plan's deferredRows keys: working memory first, then a map previous result. Missing keys are left out (the adapter refuses them by name). */
+    private static Map deferredData(WorkbookPlan plan, Map<String, Object> memory, Object prevValue) {
+        Map data = [:]
+        plan.sheets.each { SheetPlan sp ->
+            sp.deferredRows?.each { DataRowsSpec d ->
+                String k = d.dataKey
+                if (!k || data.containsKey(k)) return
+                Object v = (memory?.sharedFacts as Map)?.get(k)
+                if (v == null) v = (memory?.runContext as Map)?.get(k)
+                if (v == null && prevValue instanceof Map && (prevValue as Map).containsKey(k)) v = (prevValue as Map)[k]
+                if (v != null) data[k] = v
+            }
+        }
+        return data
     }
 
     // -------------------------------------------------------------------------
@@ -226,11 +349,13 @@ class XlsxTask extends TaskBase<Object> {
      * and be wired before the adapter is ready.</p>
      *
      * @param plan the query descriptor built by {@link org.softwood.dag.task.xlsx.QueryDsl}
-     * @return List of rows in the format specified by {@link org.softwood.dag.task.xlsx.QueryPlan#format}
+     * @return rows in the format specified by {@link org.softwood.dag.task.xlsx.QueryPlan#format}: a List, or for
+     *         map_by_key a Map keyed by the key column (2.0.2: declared Object; as List it turned that Map into a
+     *         list of entries)
      */
-    List query(QueryPlan plan) {
+    Object query(QueryPlan plan) {
         if (!xlsxCallFn) throw new IllegalStateException("XlsxTask '${id}': xlsxCallFn has not been injected by the server factory")
         if (!filePath)   throw new IllegalStateException("XlsxTask '${id}': filePath is required for query()")
-        return xlsxCallFn.call('QUERY', [query: plan, filePath: filePath]) as List
+        return xlsxCallFn.call('QUERY', [query: plan, filePath: filePath])
     }
 }

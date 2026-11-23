@@ -79,6 +79,37 @@ Supported actions per format:
 
 ---
 
+=== Applied or Refused (2.0.1)
+
+Since 2.0.1 every field of a plan is either applied to the file or refused by name before any file is opened. The
+refusal is an `IllegalArgumentException` that starts `XlsxAdapter: nothing written --` (or `DocxAdapter`,
+`PptxAdapter`) and lists every problem in the plan, not only the first. Before 2.0.1 a number of fields were
+silently dropped: row and column styles, a sheet's default style, data validation, conditional formatting,
+zebra stripes, range comments, deferred rows, cell images, pptx speaker notes, shape types other than text boxes,
+named pptx layouts, docx list numbering and table styles.
+
+What is refused rather than applied:
+
+* a `styleRef` that names no style; an unknown validation or conditional-format type or operator; a validation or
+  format without the fields its type needs; a group range that is not `2:5`, `2..5`, `[2, 5]` or an `IntRange`;
+* `deferredRows` whose `dataKey` has no rows in `config.data` (XlsxTask supplies them from working memory);
+* a cell or shape `imagePath` that does not exist, an unknown `imageType`;
+* workbook options other than `createIfMissing` and `evaluateFormulas` (the DSL's own defaults pass);
+* pptx: `layout { theme }`, `layout { accentColor }`, named styles, `CHART` shapes, a `TABLE` shape with no table,
+  a slide layout name the template does not have;
+* docx: a `properties` key other than author, subject, description, category, keywords, company; a page size other
+  than A4, A3, LETTER, LEGAL;
+* a query `columns` entry that is neither a header nor a column letter inside the range; a map_by_key `keyColumn`
+  that is not a header, or is left out of `columns` (2.0.2: map_by_key itself works now -- before 2.0.2 every
+  map_by_key query failed with a GroovyCastException, and `XlsxTask.query` is declared `Object`).
+
+Every write goes to a temporary file beside the target and is moved into place, so a failed write leaves the old
+file as it was.
+
+`XlsxTask` actions: `READ`, `CREATE` (new file from `headers`/`rows`), `WRITE` (replace the sheet in an existing
+file, create it otherwise), `APPEND` (rows after the last row), `TRANSFORM` (read, `rowTransformer`, write back),
+and `GENERATE` from `workbook { ... }`. Before 2.0.1 only `READ` worked and the workbook DSL was not wired in.
+
 == Shared Concepts
 
 === StyleSpec and Style Inheritance
@@ -412,12 +443,10 @@ pptxTask('generate-deck') {
         properties author: 'Strategy Team', subject: 'Quarterly Review'
 
         layout {
-            theme       'Office Theme'
             background  '#FFFFFF'
             fontFamily  'Calibri'
             titleFontSize 28
             bodyFontSize  18
-            accentColor '#1F497D'
         }
 
         slide {
@@ -513,9 +542,11 @@ Standard POI layout names (matched against `XSLFSlideLayout.name`):
 | `EXTRACT_TEXT` | Return plain `String` of all slide text concatenated
 |===
 
-NOTE: `STTransitionSpeed` is not available in `poi-ooxml:5.3.0` (requires `poi-ooxml-full`).
-Transitions apply type (FADE/PUSH/WIPE etc.) without an explicit speed override.
-See <<poi-dependencies>> for details.
+NOTE: Since 2.0.1 a transition's `durationMs` sets the speed attribute (up to 500 ms fast, up to 1000 ms medium,
+longer slow), written directly so that `poi-ooxml-lite` is enough. `layout { theme ... }`,
+`layout { accentColor ... }`, named `style(...)` blocks and `CHART` shapes are refused by name: POI cannot switch a
+theme or change theme colours, nothing on a slide can reference a named style, and no chart writer exists. Start
+from a template for a theme, and set colours and fonts on each shape.
 
 ---
 
@@ -616,10 +647,10 @@ Each task computes `effectClass` from its `action` field:
 ----
 // build.gradle — required for office adapter functionality
 implementation 'org.apache.poi:poi:5.3.0'
-implementation 'org.apache.poi:poi-ooxml:5.3.0'
 
-// For tests — brings in full ooxml schema bindings (CTPageMar, CTPageSz etc.)
-testImplementation 'org.apache.poi:poi-ooxml-full:5.3.0'
+// poi-ooxml with the full schemas instead of lite: docx page setup needs CTPageMar, CTPageSz, STConformanceClass ...
+implementation('org.apache.poi:poi-ooxml:5.3.0') { exclude group: 'org.apache.poi', module: 'poi-ooxml-lite' }
+implementation 'org.apache.poi:poi-ooxml-full:5.3.0'
 ----
 
 [WARNING]
@@ -630,9 +661,10 @@ Classes in `org.openxmlformats.schemas.*` (e.g. `CTPageMar`, `CTPageSz`,
 If you see `ClassNotFoundException` for schema classes, add `poi-ooxml-full` to your
 dependencies.
 
-`STTransitionSpeed` is intentionally not used in `PptxAdapter` to avoid the full
-schema dependency in production — transitions apply type (FADE/PUSH etc.) without
-an explicit speed setting.
+Since 2.0.1 `DocxAdapter` turns that error, during page setup, into an `IllegalStateException` that names
+`poi-ooxml-full`; before 2.0.1 it was swallowed and the page setup silently skipped.
+`STTransitionSpeed` is intentionally not used in `PptxAdapter`: the transition speed is set as a plain
+attribute, so pptx needs no full-schema class.
 ====
 
 [WARNING]

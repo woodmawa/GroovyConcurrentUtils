@@ -3,15 +3,25 @@ package org.softwood.dag.task.docx
 import groovy.util.logging.Slf4j
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment
 import org.apache.poi.xwpf.usermodel.UnderlinePatterns
+import org.apache.poi.xwpf.usermodel.XWPFAbstractNum
 import org.apache.poi.xwpf.usermodel.XWPFDocument
+import org.apache.poi.xwpf.usermodel.XWPFNumbering
+import org.apache.poi.xwpf.usermodel.XWPFStyle
+import org.apache.poi.xwpf.usermodel.XWPFStyles
 import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
 import org.apache.poi.xwpf.usermodel.XWPFTable
 import org.apache.poi.xwpf.usermodel.XWPFTableCell
 import org.apache.poi.xwpf.usermodel.XWPFTableRow
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTLvl
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPageMar
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPageSz
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyle
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STPageOrientation
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STStyleType
+import org.softwood.dag.task.office.OfficeFiles
 import org.softwood.dag.task.xlsx.StyleResolver
 import org.softwood.dag.task.xlsx.StyleSpec
 import org.softwood.dag.task.xlsx.model.RichRun
@@ -35,6 +45,13 @@ import java.math.BigInteger
  * </ul>
  *
  * <p>Reuses {@link StyleResolver} from the xlsx package — no duplication.</p>
+ *
+ * <p>GCU 2.0.1: headings get heading styles the document defines (a new document had none, so Word showed them as
+ * body text); bullet and numbered items get list numbering (they had none); table header/body styles and column
+ * widths, a section style's font, and the category/company properties are applied. Page setup needs the full OOXML
+ * schemas: with only {@code poi-ooxml-lite} on the classpath it fails with a message naming {@code poi-ooxml-full}
+ * (it used to be swallowed, and the NoClassDefFoundError escaped anyway). Every plan field is applied or refused
+ * by name before the file is written ({@link #checkPlan}); files are written atomically.</p>
  */
 @Slf4j
 class DocxAdapter {
@@ -66,15 +83,14 @@ class DocxAdapter {
         String       filePath = config.filePath as String
         if (!plan)     throw new IllegalArgumentException('DocxAdapter GENERATE: config.documentPlan (DocumentPlan) is required')
         if (!filePath) throw new IllegalArgumentException('DocxAdapter GENERATE: config.filePath is required')
+        checkPlan(plan, config)
 
         XWPFDocument doc = config.templatePath
             ? openTemplate(config.templatePath as String)
             : new XWPFDocument()
         try {
             applyDocumentPlan(doc, plan)
-            File file = new File(filePath)
-            file.parentFile?.mkdirs()
-            new FileOutputStream(file).withCloseable { out -> doc.write(out) }
+            OfficeFiles.writeAtomically(new File(filePath)) { OutputStream out -> doc.write(out) }
         } finally {
             doc.close()
         }
@@ -166,9 +182,7 @@ class DocxAdapter {
                     }
                 }
             }
-            File out = new File(outputPath)
-            out.parentFile?.mkdirs()
-            new FileOutputStream(out).withCloseable { os -> merged.write(os) }
+            OfficeFiles.writeAtomically(new File(outputPath)) { OutputStream os -> merged.write(os) }
         } finally {
             merged.close()
         }
@@ -180,7 +194,7 @@ class DocxAdapter {
     // =========================================================================
 
     private static void applyDocumentPlan(XWPFDocument doc, DocumentPlan plan) {
-        // Core properties
+        // Core properties (2.0.1: category and company too)
         if (plan.title || plan.properties) {
             def cp = doc.properties.coreProperties
             if (plan.title)                      cp.title       = plan.title
@@ -188,24 +202,34 @@ class DocxAdapter {
             if (plan.properties?.subject)        cp.setSubjectProperty(plan.properties.subject)
             if (plan.properties?.description)    cp.setDescription(plan.properties.description)
             if (plan.properties?.keywords)       cp.keywords    = plan.properties.keywords
+            if (plan.properties?.category)       cp.category    = plan.properties.category
+            if (plan.properties?.company)        doc.properties.extendedProperties.underlyingProperties.company = plan.properties.company
         }
+
+        // 2.0.1: heading styles for the levels used, and one bullet numbering shared by every bullet list
+        ensureHeadingStyles(doc, plan.sections.findAll { it.heading }.collect { it.headingLevel } as Set<Integer>)
+        Map<String, BigInteger> lists = [:]
 
         // Sections
         plan.sections.each { SectionSpec spec ->
-            writeSection(doc, spec, plan.styles ?: [:])
+            writeSection(doc, spec, plan.styles ?: [:], lists)
         }
 
-        // Page setup
+        // Page setup -- needs the full OOXML schemas; a missing schema class is named, not swallowed (2.0.1)
         if (plan.page) {
             try {
                 applyPageSetup(doc, plan.page)
-            } catch (Exception e) {
-                // STConformanceClass / ooxml-schemas not on classpath — page setup skipped
+            } catch (NoClassDefFoundError e) {
+                throw new IllegalStateException("DocxAdapter: page setup needs the full OOXML schemas -- put " +
+                    "org.apache.poi:poi-ooxml-full on the classpath in place of poi-ooxml-lite (missing: ${e.message})".toString(), e)
             }
         }
     }
 
-    private static void writeSection(XWPFDocument doc, SectionSpec spec, Map<String, StyleSpec> styles) {
+    private static void writeSection(XWPFDocument doc, SectionSpec spec, Map<String, StyleSpec> styles,
+                                     Map<String, BigInteger> lists) {
+        StyleSpec style = spec.style ? StyleResolver.resolve(spec.style, styles) : null
+
         // Heading
         if (spec.heading) {
             XWPFParagraph h = doc.createParagraph()
@@ -214,14 +238,15 @@ class DocxAdapter {
             run.setText(spec.heading)
         }
 
-        // Rich text paragraph (takes precedence over plain text)
+        // Rich text paragraph (takes precedence over plain text); each run's own formatting wins over the section's
         if (spec.richText) {
             XWPFParagraph p = doc.createParagraph()
-            applyParagraphStyle(p, spec.style, styles)
+            applyParagraphStyle(p, style)
             spec.richText.each { RichRun rr ->
                 if (!rr?.text) return
                 XWPFRun run = p.createRun()
                 run.setText(rr.text)
+                applyRunStyle(run, style)
                 if (rr.bold)      run.bold      = true
                 if (rr.italic)    run.italic    = true
                 if (rr.underline) run.setUnderline(UnderlinePatterns.SINGLE)
@@ -231,25 +256,25 @@ class DocxAdapter {
             }
         } else if (spec.text) {
             XWPFParagraph p = doc.createParagraph()
-            applyParagraphStyle(p, spec.style, styles)
-            p.createRun().setText(spec.text)
+            applyParagraphStyle(p, style)
+            XWPFRun run = p.createRun()
+            run.setText(spec.text)
+            applyRunStyle(run, style)
         }
 
         // Table
         if (spec.table) writeTable(doc, spec.table, styles)
 
-        // Bullet list
-        spec.bulletList?.each { String item ->
-            XWPFParagraph p = doc.createParagraph()
-            p.style = 'ListBullet'
-            p.createRun().setText(item)
+        // 2.0.1: list items carry real list numbering. They used to get the style ids ListBullet / ListNumber, which a
+        // new document does not define, and no numbering, so Word showed them as plain paragraphs.
+        if (spec.bulletList) {
+            BigInteger numId = lists['bullet'] ?: (lists['bullet'] = addListNumbering(doc, lists, 'bullet'))
+            spec.bulletList.each { String item -> writeListItem(doc, item, numId, style) }
         }
-
-        // Numbered list
-        spec.numberedList?.each { String item ->
-            XWPFParagraph p = doc.createParagraph()
-            p.style = 'ListNumber'
-            p.createRun().setText(item)
+        if (spec.numberedList) {
+            // each numbered list restarts at 1
+            BigInteger numId = addListNumbering(doc, lists, 'decimal')
+            spec.numberedList.each { String item -> writeListItem(doc, item, numId, style) }
         }
     }
 
@@ -257,6 +282,8 @@ class DocxAdapter {
         int cols = spec.headers ? spec.headers.size()
                  : spec.rows   ? spec.rows[0].size()
                  : 1
+        StyleSpec headerStyle = spec.headerStyle ? StyleResolver.resolve(spec.headerStyle, styles) : null
+        StyleSpec bodyStyle   = spec.bodyStyle   ? StyleResolver.resolve(spec.bodyStyle, styles)   : null
 
         // doc.createTable(1, cols) creates one pre-populated row — reuse it rather than
         // removing it (createRow() on an empty table returns a row with no cells).
@@ -264,7 +291,7 @@ class DocxAdapter {
 
         int nextRow = 0   // index of next row to fill (0 = pre-created row)
 
-        // Header row — fill the pre-created row
+        // Header row — fill the pre-created row (bold by default; 2.0.1: headerStyle applied over it)
         if (spec.headerRow && spec.headers) {
             XWPFTableRow headerRow = table.getRow(nextRow++)
             spec.headers.eachWithIndex { String header, int i ->
@@ -273,8 +300,9 @@ class DocxAdapter {
                     : headerRow.addNewTableCell()
                 cell.text = header
                 cell.paragraphs.each { XWPFParagraph p ->
-                    p.runs.each { XWPFRun r -> r.bold = true }
+                    p.runs.each { XWPFRun r -> r.bold = true; applyRunStyle(r, headerStyle) }
                 }
+                if (headerStyle?.fill?.foreground) cell.color = normalizeHex(headerStyle.fill.foreground)
             }
         }
 
@@ -287,17 +315,140 @@ class DocxAdapter {
                     ? row.getCell(i)
                     : row.addNewTableCell()
                 cell.text = value ?: ''
+                if (bodyStyle?.fill?.foreground) cell.color = normalizeHex(bodyStyle.fill.foreground)
+                cell.paragraphs.each { XWPFParagraph p ->
+                    p.runs.each { XWPFRun r -> applyRunStyle(r, bodyStyle) }
+                }
+            }
+        }
+
+        // 2.0.1: column widths in twips, on the table grid and on every cell
+        if (spec.columnWidths) {
+            def ctTbl = table.CTTbl
+            def grid  = ctTbl.tblGrid ?: ctTbl.addNewTblGrid()
+            while (grid.sizeOfGridColArray() > 0) grid.removeGridCol(0)
+            spec.columnWidths.each { Integer w -> grid.addNewGridCol().w = BigInteger.valueOf(w as long) }
+            table.rows.each { XWPFTableRow row ->
+                row.tableCells.eachWithIndex { XWPFTableCell c, int i ->
+                    if (i < spec.columnWidths.size()) c.width = String.valueOf(spec.columnWidths[i])
+                }
             }
         }
     }
 
-    private static void applyParagraphStyle(XWPFParagraph p, StyleSpec style,
-                                             Map<String, StyleSpec> styles) {
-        if (!style) return
-        StyleSpec resolved = StyleResolver.resolve(style, styles)
+    /** Paragraph alignment from an already-resolved style. */
+    private static void applyParagraphStyle(XWPFParagraph p, StyleSpec resolved) {
         if (resolved?.alignment?.horizontal) {
             p.alignment = parseAlignment(resolved.alignment.horizontal)
         }
+    }
+
+    /** Run font from an already-resolved style (2.0.1: a section style's font used to be ignored). */
+    private static void applyRunStyle(XWPFRun run, StyleSpec resolved) {
+        def f = resolved?.font
+        if (!f) return
+        if (f.bold)          run.bold      = true
+        if (f.italic)        run.italic    = true
+        if (f.underline)     run.setUnderline(UnderlinePatterns.SINGLE)
+        if (f.strikethrough) run.strikeThrough = true
+        if (f.size > 0)      run.fontSize  = f.size
+        if (f.color)         run.setColor(normalizeHex(f.color))
+        if (f.name)          run.fontFamily = f.name
+    }
+
+    private static void writeListItem(XWPFDocument doc, String item, BigInteger numId, StyleSpec style) {
+        XWPFParagraph p = doc.createParagraph()
+        p.numID = numId
+        p.numILvl = BigInteger.ZERO
+        applyParagraphStyle(p, style)
+        XWPFRun run = p.createRun()
+        run.setText(item)
+        applyRunStyle(run, style)
+    }
+
+    private static final List<Integer> HEADING_HALF_POINTS = [32, 26, 24, 22, 22, 22]
+
+    /** Define Heading1..6 for the levels used, when the document (new, or a template) does not define them. */
+    private static void ensureHeadingStyles(XWPFDocument doc, Set<Integer> levels) {
+        if (!levels) return
+        XWPFStyles styles = doc.styles ?: doc.createStyles()
+        levels.each { Integer n ->
+            String id = "Heading${n}"
+            if (styles.styleExist(id)) return
+            CTStyle ct = CTStyle.Factory.newInstance()
+            ct.styleId = id
+            ct.type    = STStyleType.PARAGRAPH
+            ct.addNewName().val     = "heading ${n}".toString()
+            ct.addNewBasedOn().val  = 'Normal'
+            ct.addNewNext().val     = 'Normal'
+            ct.addNewUiPriority().val = BigInteger.valueOf(9)
+            ct.addNewQFormat()
+            def ppr = ct.addNewPPr()
+            ppr.addNewKeepNext()
+            ppr.addNewOutlineLvl().val = BigInteger.valueOf(n - 1)
+            def rpr = ct.addNewRPr()
+            rpr.addNewB()
+            rpr.addNewSz().val = BigInteger.valueOf(HEADING_HALF_POINTS[n - 1])
+            styles.addStyle(new XWPFStyle(ct, styles))
+        }
+    }
+
+    /**
+     * A new list numbering instance ({@code bullet} or {@code decimal}) on one shared abstract definition per kind.
+     * Returns its numId. The abstract ids are cached in {@code lists} under {@code abs-<kind>}.
+     */
+    private static BigInteger addListNumbering(XWPFDocument doc, Map<String, BigInteger> lists, String kind) {
+        XWPFNumbering numbering = doc.numbering ?: doc.createNumbering()
+        BigInteger abstractId = lists["abs-${kind}".toString()]
+        if (abstractId == null) {
+            CTAbstractNum cta = CTAbstractNum.Factory.newInstance()
+            cta.abstractNumId = BigInteger.valueOf(numbering.abstractNums.size())
+            CTLvl lvl = cta.addNewLvl()
+            lvl.ilvl = BigInteger.ZERO
+            lvl.addNewStart().val   = BigInteger.ONE
+            lvl.addNewNumFmt().val  = kind == 'bullet' ? STNumberFormat.BULLET : STNumberFormat.DECIMAL
+            lvl.addNewLvlText().val = kind == 'bullet' ? '•' : '%1.'
+            def ind = lvl.addNewPPr().addNewInd()
+            ind.left    = BigInteger.valueOf(720)
+            ind.hanging = BigInteger.valueOf(360)
+            abstractId = numbering.addAbstractNum(new XWPFAbstractNum(cta, numbering))
+            lists["abs-${kind}".toString()] = abstractId
+        }
+        return numbering.addNum(abstractId)
+    }
+
+    private static final Set<String> PROPERTY_KEYS = ['author', 'subject', 'description', 'category', 'keywords', 'company'] as Set
+    private static final Set<String> PAGE_SIZES    = ['A4', 'A3', 'LETTER', 'LEGAL'] as Set
+
+    /** Refuse, before anything is written, a plan field this adapter cannot apply -- every problem named at once. */
+    static void checkPlan(DocumentPlan plan, Map config) {
+        List<String> problems = []
+        Map<String, StyleSpec> styles = plan.styles ?: [:]
+        plan.properties?.keySet()?.each { Object k ->
+            if (!PROPERTY_KEYS.contains(k as String)) problems << "properties.${k} is not supported (${PROPERTY_KEYS.sort()})".toString()
+        }
+        if (config.templatePath && !new File(config.templatePath as String).isFile()) problems << "templatePath not found: ${config.templatePath}".toString()
+        if (plan.page) {
+            if (!PAGE_SIZES.contains((plan.page.size ?: 'A4').toUpperCase())) problems << "page.size '${plan.page.size}' is not supported (${PAGE_SIZES.sort()})".toString()
+            if (!(plan.page.orientation in ['portrait', 'landscape'])) problems << "page.orientation '${plan.page.orientation}' must be portrait or landscape".toString()
+        }
+        Closure extendsCheck = { String where, StyleSpec s ->
+            if (s?.extendsStyle && !styles.containsKey(s.extendsStyle)) problems << "${where}.extendsStyle '${s.extendsStyle}' is not in styles".toString()
+        }
+        plan.sections.eachWithIndex { SectionSpec s, int i ->
+            String w = "sections[${i}]"
+            if (s.heading && (s.headingLevel < 1 || s.headingLevel > 6)) problems << "${w}.headingLevel ${s.headingLevel} must be 1 to 6".toString()
+            extendsCheck(w + '.style', s.style)
+            if (s.table) {
+                int cols = s.table.headers ? s.table.headers.size() : (s.table.rows ? s.table.rows[0].size() : 1)
+                if (s.table.columnWidths && s.table.columnWidths.size() != cols) {
+                    problems << "${w}.table.columnWidths has ${s.table.columnWidths.size()} widths for ${cols} columns".toString()
+                }
+                extendsCheck(w + '.table.headerStyle', s.table.headerStyle)
+                extendsCheck(w + '.table.bodyStyle', s.table.bodyStyle)
+            }
+        }
+        OfficeFiles.refuse('DocxAdapter GENERATE', problems)
     }
 
     // =========================================================================

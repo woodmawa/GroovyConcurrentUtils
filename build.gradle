@@ -45,7 +45,7 @@ plugins {
 // 1.4.2: a shell run on Windows is held in a Job Object, so a timeout stops processes whose parent has already exited (see CHANGENOTE.md). 1.4.1: ShellTask (allow 'process' + interpreters), allow 'sql' on named datasources, a capability reachable only through its methods (see CHANGENOTE.md, "What you must change"). 1.4.0: restricted evaluation - ControlTask rule conditions and ScriptTask scripts compiled under a profile, trusted true, allow 'files'/'http', enforced scriptTimeout, failure signal on events and exceptions (see CHANGENOTE.md, "What you must change"). 1.3.0: safe defaults - HttpTask guard, FileTask strict by default, remote transports on loopback with marked actors, cluster event signing and deserialisation allow-list (see CHANGENOTE.md, "What you must change"). 1.2.2: defects - TaskContext builder config and lazy caches, one promise state, dataflow listeners/timeouts/interrupts/task overloads, actor mailbox resize, JWT with no exp, opt-in result redaction (see CHANGENOTE.md). 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
 allprojects {
     group = 'org.softwood'
-    version = '2.0.0'
+    version = '2.0.2'
 }
 
 // Repositories are declared once, in settings.gradle (dependencyResolutionManagement, PREFER_SETTINGS).

@@ -153,6 +153,9 @@ class SheetDsl {
      * Row at an explicit index with named options.
      * <pre>row 1, style:'header', height:24, values:['A','B','C']</pre>
      */
+    /** Named-argument form, {@code row 1, values:[...]}: Groovy passes named arguments first (2.0.1). */
+    void row(Map<String, Object> opts, int index) { row(index, opts) }
+
     void row(int index, Map<String, Object> opts) {
         def dsl = new RowDsl()
         dsl.applyOptions(opts)
@@ -214,6 +217,9 @@ class SheetDsl {
      * Standalone cell at an absolute ref.
      * <pre>cell 'A105', value:'Footer', style:'footer'</pre>
      */
+    /** Named-argument form, {@code cell 'B3', value:1} (2.0.1). */
+    void cell(Map<String, Object> opts, String ref) { cell(ref, opts) }
+
     void cell(String ref, Map<String, Object> opts = [:]) {
         def dsl = new CellDsl()
         if (opts.value   != null) dsl.value(opts.value)
@@ -243,6 +249,9 @@ class SheetDsl {
      * Column spec with named options.
      * <pre>column 'A', width:20</pre>
      */
+    /** Named-argument form, {@code column 'A', width:12} (2.0.1). */
+    void column(Map<String, Object> opts, String ref) { column(ref, opts) }
+
     void column(String ref, Map<String, Object> opts) {
         def dsl = new ColumnDsl()
         if (opts.width    != null) dsl.width(opts.width as Number)
@@ -277,6 +286,9 @@ class SheetDsl {
      * Range operation with named options.
      * <pre>range 'A1:H1', style:'header'</pre>
      */
+    /** Named-argument form, {@code range 'A1:C3', style:'x'} (2.0.1). */
+    void range(Map<String, Object> opts, String ref) { range(ref, opts) }
+
     void range(String ref, Map<String, Object> opts) {
         def dsl = new RangeDsl()
         if (opts.style       != null) dsl.style(opts.style as String)

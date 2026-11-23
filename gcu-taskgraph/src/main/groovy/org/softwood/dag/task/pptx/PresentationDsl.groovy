@@ -16,15 +16,11 @@ import org.softwood.dag.task.xlsx.StyleSpec
  *           properties author:'Finance Bot', subject:'Q3 Results'
  *
  *           layout {
- *               theme         'Office Theme'
  *               background    '#FFFFFF'
  *               fontFamily    'Calibri'
  *               titleFontSize 28
  *               bodyFontSize  18
- *               accentColor   '#1F4E78'
  *           }
- *
- *           style('highlight') { font bold:true, color:'#FF0000' }
  *
  *           slide {
  *               title  'Q3 Financial Review'
@@ -76,10 +72,8 @@ class PresentationDsl {
      * Configure the default slide layout / theme.
      * <pre>
      *   layout {
-     *       theme         'Office Theme'
      *       background    '#FFFFFF'
      *       titleFontSize 28
-     *       accentColor   '#1F4E78'
      *   }
      * </pre>
      */
@@ -96,6 +90,8 @@ class PresentationDsl {
 
     /**
      * Define a named text style for this presentation.
+     * 2.0.1: PptxAdapter refuses a plan with named styles -- no slide or shape can reference one, so they were
+     * dropped silently. Set bold/italic/font/colour on each shape instead.
      * <pre>style('highlight') { font bold:true, color:'#FF0000' }</pre>
      */
     void style(String name, @DelegatesTo(StyleDsl) Closure cl) {
@@ -171,7 +167,7 @@ class PresentationDsl {
 
         LayoutDsl(SlideLayoutSpec spec) { _spec = spec }
 
-        /** Theme name recognised by the POI adapter, e.g. {@code 'Office Theme'}. */
+        /** 2.0.1: refused by PptxAdapter -- POI cannot switch a theme; start from a template instead. */
         void theme(String t)         { _spec.theme         = t }
         /** Slide background fill colour: {@code '#RRGGBB'}. */
         void background(String c)    { _spec.background    = c }
@@ -181,7 +177,7 @@ class PresentationDsl {
         void titleFontSize(int s)    { _spec.titleFontSize = s }
         /** Body text point size. */
         void bodyFontSize(int s)     { _spec.bodyFontSize  = s }
-        /** Accent / highlight colour: {@code '#RRGGBB'}. */
+        /** 2.0.1: refused by PptxAdapter -- theme colours cannot be changed; set colours on each shape. */
         void accentColor(String c)   { _spec.accentColor   = c }
     }
 }

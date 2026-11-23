@@ -3,6 +3,47 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 2.0.2 (2026-11-23): an xlsx map_by_key query works
+
+Source: found by MCP FS 0.11.4's new integration spec the same evening (session 2026-11-23-11-14), after 2.0.1 was published to mavenLocal; 2.0.1 is not changed, so this is 2.0.2. Changes are in `gcu-taskgraph` only.
+Tests: 2822 tests, 1 failure, 46 skipped: the one failure, `ParallelGatewayTaskTest.testParallelGatewayInGraph`, passed 9 of 9 alone three times; it appends to an unsynchronised list from two parallel branches (a test race, not touched here). Two new tests in `Hardening201OfficeSpec` (47 in all), both red on 2.0.1. Mutation check: the key-column guard switched off, caught (1 red).
+
+### What you must change
+
+1. **`XlsxTask.query(QueryPlan)` and `QueryExecutor.execute` are declared `Object`** (were `List`): a List for list_of_maps and list_of_lists, a Map keyed by `keyColumn` for map_by_key. Code that assigned the result to a `List` variable keeps working for the list formats.
+2. **A map_by_key `keyColumn` that is not a header, or is left out of `columns`, is refused by name** before any row is read.
+
+### Fixed
+
+- **map_by_key never worked:** `QueryExecutor.execute` was declared `List` and returned the Map it built, so every map_by_key query failed with a GroovyCastException; `XlsxTask.query` would have turned the Map into a list of entries with `as List`.
+
+## 2.0.1 (2026-11-23): office adapters apply every plan field or refuse it by name
+
+Source: Will, 2026-11-23 17:00 and 17:09 (session 2026-11-23-11-14): fix the office path and give it real integration tests, and "mend gcu as well if that's not actually working". Found while making MCP FS drive the GCU plans: much of the office model was accepted by the DSL and the plan objects and then silently not written.
+Changes are in `gcu-taskgraph` only; the other modules are rebuilt at 2.0.1 unchanged.
+Tests: 2820 tests, 0 failures, 46 skipped: the 2.0.0 suite (2775) plus `Hardening201OfficeSpec` (45). No existing test changed.
+Red first: new `Hardening201OfficeSpec` (45 tests). On the 2.0.0 source 42 of the first 43 were red, each for the old behaviour; the green one, landscape page setup, is existing behaviour kept as a guard. The query-columns test (added later) was red with its guard disabled. Mutation checks, all caught (red count of 44 or 45): atomic write 33, refusal guard 5, row/default style 2, data validation 2, conditional format 3, pptx notes 1, pptx layout lookup 1, docx numbering 1, XlsxTask memory data 1, DSL values cells 2, DSL named-argument row 2, query unknown columns 1.
+
+### What you must change
+
+1. **A plan that used a field GCU cannot apply now fails** with `IllegalArgumentException: <Adapter>: nothing written -- <every problem>`, where 2.0.0 wrote the file without it. Refused: pptx `layout { theme }`, `layout { accentColor }`, named pptx `style(...)`, `CHART` shapes, a `TABLE` shape with no table, an unknown slide layout; a missing `styleRef`; an unknown validation or conditional-format type or operator; workbook options other than `createIfMissing` / `evaluateFormulas`; docx `properties` keys other than author, subject, description, category, keywords, company; a page size other than A4, A3, LETTER, LEGAL. Remove the field, or (theme) start from a template.
+2. **`deferredRows` need their data:** pass `config.data` (dataKey to rows) to the adapter; XlsxTask passes working memory (`sharedFacts`, then `runContext`), then a Map previous value. 2.0.0 ignored deferred rows.
+3. **A missing image now fails** (cell `imagePath`, IMAGE shape) instead of being skipped.
+4. **A query `columns` entry that is not a header or a letter inside the range fails**, naming it and the headers; 2.0.0 dropped it.
+5. **docx page setup needs `poi-ooxml-full` at run time** (exclude `poi-ooxml-lite`). Under lite it now throws an `IllegalStateException` that says so; 2.0.0 swallowed the `NoClassDefFoundError` and skipped the page setup.
+6. **XlsxTask's flat actions now work:** `CREATE`, `WRITE`, `APPEND`, `TRANSFORM` (with `rowTransformer`); `useLlmTransform` throws `UnsupportedOperationException`. In 2.0.0 only `READ` did anything.
+
+### Fixed (each was silently dropped or wrong in 2.0.0)
+
+- **xlsx:** a row `styleRef` reached no cell; the sheet `defaultStyle` was ignored; column `styleRef` and `outlineLevel` ignored; range `dataValidation`, `conditionalFormat` (cellValue, formula, colorScale, dataBar, iconSet), `zebraStripe` and `comment` never applied; `deferredRows` never written; cell `imagePath` ignored; `rowGroups` / `columnGroups` now take `2:5`, `2..5`, `[2, 5]` or an `IntRange`.
+- **pptx:** speaker notes dropped behind a caught exception (and READ now returns them); `resolveLayout` always returned null (a `return` inside an `each` closure), so a named layout was never used; RECTANGLE, OVAL and LINE were written as text boxes; the presentation title and properties not set; text-shape bold, italic, underline, font, size, colour and fill ignored; `defaultLayout` (background, fonts) ignored; transition `durationMs` ignored (now sets the speed).
+- **docx:** heading paragraphs used styles the document did not define (Word showed body text); bullet and numbered lists had no numbering; table `headerStyle`, `bodyStyle` and `columnWidths` ignored; a section `style` font ignored; `category` and `company` properties dropped.
+- **XlsxTask:** the `workbook { }` DSL was never wired to the adapter; only READ worked.
+- **DSL named-argument forms** (`row 1, values: [...]`, `cell 'A1', value: 1`, `column 'A', width: 20`, `range 'A1:B2', style: 'x'`, `run 'x', bold: true`) threw `MissingMethodException`: Groovy passes the Map first. `values:` strings were taken as cell references ("Cell index must be >= 0").
+- **Writes are atomic** (`OfficeFiles.writeAtomically`: a temporary file beside the target, then a move), so a failed write leaves the old file.
+- **Javadoc:** the `PresentationDsl` example no longer shows `theme`, `accentColor` or a named style.
+- **Book:** "Office Document DSL" chapter: new section "Applied or Refused (2.0.1)", the pptx example and transition note corrected, the POI dependency block names `poi-ooxml-full`.
+
 ## 2.0.0 (2026-11-23): five modules and an aggregate, the new baseline; one meaning per actor send (WP9)
 
 Source: D5 in the 2026-11-20 decisions, and Will on 2026-11-23: the promises library as its own jar, TaskGraph as its own jar, the remaining parts as their own jars, and a fat jar of everything; the books restructured for the multi-project build; the whole project at 2.0.0 as the new baseline. Then (14:24) WP9, the API consistency work, into the same release, with Will's choices: `ask` returns a future, `<<` waits and `>>` sends, `ErrorMode.RETRY` made to work.

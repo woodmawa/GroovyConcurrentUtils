@@ -234,6 +234,12 @@ class RichTextDsl {
     /** Append a styled run using a named-arg map. */
     void run(String text, Map<String, Object> style) { _runs << _buildRun(text, style) }
 
+    // Named-argument forms (2.0.1): Groovy passes named arguments first, so {@code bold 'Total', color:'#FF0000'}
+    // arrives as (Map, String). Without these the documented calls failed with MissingMethodException.
+    void run(Map<String, Object> style, String text)  { run(text, style) }
+    void bold(Map<String, Object> opts, String text)   { bold(text, opts) }
+    void italic(Map<String, Object> opts, String text) { italic(text, opts) }
+
     /** Append a bold run with optional extra styling. {@code bold 'Total', color:'#FF0000'} */
     void bold(String text, Map<String, Object> opts = [:]) {
         _runs << _buildRun(text, (opts ?: [:]) + [bold: true])

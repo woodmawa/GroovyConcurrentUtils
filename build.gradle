@@ -4,6 +4,29 @@ import org.asciidoctor.gradle.jvm.pdf.AsciidoctorPdfTask
 import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
 import org.gradle.plugins.signing.Sign
 
+// =====================================================================================================
+// GroovyConcurrentUtils 2.0.0 - multi-project build.
+//
+//   gcu-core       promises, dataflow, pools, gstream, config, agents, security   -> org.softwood:gcu-core
+//   gcu-cluster    Hazelcast cluster manager and the shared cluster state types   -> org.softwood:gcu-cluster
+//   gcu-taskgraph  the TaskGraph engine, task types, scripts, persistence        -> org.softwood:gcu-taskgraph
+//   gcu-actors     actors and remote actor transports                            -> org.softwood:gcu-actors
+//   gcu-reactive   Reactor helpers                                                -> org.softwood:gcu-reactive
+//
+//   root           GroovyConcurrentUtils: the aggregate. Its POM depends on all five modules, so a consumer
+//                  that used org.softwood:GroovyConcurrentUtils:1.x changes the version and nothing else.
+//                  Its own jar carries no classes. The root also holds the cross-module tests (src/test).
+//
+// Build:   gradlew build                    every module jar, all tests
+//          gradlew :gcu-core:jar            one module          -> gcu-core/build/libs/gcu-core-2.0.0.jar
+//          gradlew allJar                   every GCU class in one jar, no third-party classes
+//                                                               -> build/libs/GroovyConcurrentUtils-2.0.0-all.jar
+//          gradlew fatJar                   GCU and every runtime dependency in one jar
+//                                                               -> build/libs/GroovyConcurrentUtils-2.0.0-fat.jar
+//          gradlew publishToMavenLocal      the five modules and the aggregate
+// allJar and fatJar are build outputs, not published artifacts (see docs chapter "Modules and building").
+// =====================================================================================================
+
 plugins {
     id 'groovy'
     id 'java-library'
@@ -14,124 +37,161 @@ plugins {
     id 'maven-publish'
     id 'signing'
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
-
+    id 'com.gradleup.shadow' version '9.2.2' apply false
 }
 
-group = 'org.softwood'
-version = '1.4.2'   // 1.4.2: a shell run on Windows is held in a Job Object, so a timeout stops processes whose parent has already exited (see CHANGENOTE.md). 1.4.1: ShellTask (allow 'process' + interpreters), allow 'sql' on named datasources, a capability reachable only through its methods (see CHANGENOTE.md, "What you must change"). 1.4.0: restricted evaluation - ControlTask rule conditions and ScriptTask scripts compiled under a profile, trusted true, allow 'files'/'http', enforced scriptTimeout, failure signal on events and exceptions (see CHANGENOTE.md, "What you must change"). 1.3.0: safe defaults - HttpTask guard, FileTask strict by default, remote transports on loopback with marked actors, cluster event signing and deserialisation allow-list (see CHANGENOTE.md, "What you must change"). 1.2.2: defects - TaskContext builder config and lazy caches, one promise state, dataflow listeners/timeouts/interrupts/task overloads, actor mailbox resize, JWT with no exp, opt-in result redaction (see CHANGENOTE.md). 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
+// 2.0.0: the single jar is split into five modules (gcu-core, gcu-cluster, gcu-taskgraph, gcu-actors,
+// gcu-reactive) plus the aggregate GroovyConcurrentUtils; package names are unchanged (see CHANGENOTE.md).
+// 1.4.2: a shell run on Windows is held in a Job Object, so a timeout stops processes whose parent has already exited (see CHANGENOTE.md). 1.4.1: ShellTask (allow 'process' + interpreters), allow 'sql' on named datasources, a capability reachable only through its methods (see CHANGENOTE.md, "What you must change"). 1.4.0: restricted evaluation - ControlTask rule conditions and ScriptTask scripts compiled under a profile, trusted true, allow 'files'/'http', enforced scriptTimeout, failure signal on events and exceptions (see CHANGENOTE.md, "What you must change"). 1.3.0: safe defaults - HttpTask guard, FileTask strict by default, remote transports on loopback with marked actors, cluster event signing and deserialisation allow-list (see CHANGENOTE.md, "What you must change"). 1.2.2: defects - TaskContext builder config and lazy caches, one promise state, dataflow listeners/timeouts/interrupts/task overloads, actor mailbox resize, JWT with no exp, opt-in result redaction (see CHANGENOTE.md). 1.2.1: second hardening pass - actor stop/supervision, agent state version, deserialisation filter, Hazelcast security settings applied, external config sources, timers released (see CHANGENOTE.md). 1.2.0: core hardening. 1.1.2: Groovy 6.0.0 / Spock 2.5-groovy-6.0
+allprojects {
+    group = 'org.softwood'
+    version = '2.0.0'
+}
 
 // Repositories are declared once, in settings.gradle (dependencyResolutionManagement, PREFER_SETTINGS).
 
+// Library versions shared by the module build files.
+ext.libs = [
+        hazelcast    : 'com.hazelcast:hazelcast:5.6.0',
+        slf4j        : 'org.slf4j:slf4j-api:2.0.17',
+        logback      : 'ch.qos.logback:logback-classic:1.5.20',
+        snakeyaml    : 'org.yaml:snakeyaml:2.5',
+        mail         : 'org.simplejavamail:simple-java-mail:8.12.6',
+        esStorage    : 'org.eclipse.store:storage-embedded:3.1.0',
+        esConfig     : 'org.eclipse.store:storage-embedded-configuration:3.1.0',
+        esSerializer : 'org.eclipse.serializer:serializer:2.0.0',
+        msgpack      : 'org.msgpack:msgpack-core:0.9.10',
+        vertx        : 'io.vertx:vertx-core:5.0.5',
+        reactor      : 'io.projectreactor:reactor-core:3.8.0',
+        rsocketCore  : 'io.rsocket:rsocket-core:1.1.5',
+        rsocketNetty : 'io.rsocket:rsocket-transport-netty:1.1.5',
+        rsocketLb    : 'io.rsocket:rsocket-load-balancer:1.1.5',
+        netty        : 'io.netty:netty-all:4.2.7.Final',
+        nashorn      : 'org.openjdk.nashorn:nashorn-core:15.7',
+        poi          : 'org.apache.poi:poi-ooxml:5.3.0',
+        poiFull      : 'org.apache.poi:poi-ooxml-full:5.3.0',
+]
+
+// -----------------------------------------------------------------------------------------------------
+// Settings every project shares: toolchain, Groovy compiler heap, test platform and test dependencies.
+// -----------------------------------------------------------------------------------------------------
+allprojects { p ->
+    apply plugin: 'groovy'
+    apply plugin: 'java-library'
+    apply plugin: 'idea'
+    apply plugin: 'maven-publish'
+    apply plugin: 'signing'
+
+    // Groovy 6.0.0 (2026-11-16): compileTestGroovy runs in a Gradle compiler worker, whose default 512m heap the
+    // Groovy 6 compiler exhausts on a large test source set ("Java heap space" from ApiGroovyCompiler in WorkerDaemonServer).
+    tasks.withType(GroovyCompile).configureEach {
+        groovyOptions.forkOptions.memoryMaximumSize = '4g'
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.release = 25
+    }
+
+    jar {
+        exclude 'logback-test.xml'
+    }
+
+    dependencies {
+        implementation "org.apache.groovy:groovy:$groovyVersion"
+        implementation "org.apache.groovy:groovy-json:$groovyVersion"
+        implementation rootProject.libs.slf4j
+        implementation rootProject.libs.logback
+
+        testImplementation platform('org.junit:junit-bom:5.10.0')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+        testImplementation "org.apache.groovy:groovy-test:$groovyVersion"
+        testImplementation 'org.spockframework:spock-core:2.5-groovy-6.0'
+        testImplementation 'org.awaitility:awaitility:4.3.0'
+    }
+
+    test {
+        useJUnitPlatform()
+        // ShellTask holds Windows processes in a Job Object through the JDK foreign-function API (1.4.2).
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+        // A --tests filter names classes in one module; the other modules have no match and must not fail the run.
+        filter { failOnNoMatchingTests = false }
+        testLogging {
+            events "passed", "skipped", "failed"
+            exceptionFormat "short"
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------
+// The root project: the aggregate GroovyConcurrentUtils artifact and the cross-module tests.
+// -----------------------------------------------------------------------------------------------------
+def gcuModules = [':gcu-core', ':gcu-cluster', ':gcu-taskgraph', ':gcu-actors', ':gcu-reactive']
+
 dependencies {
-    implementation "org.apache.groovy:groovy:$groovyVersion"
-    implementation "org.apache.groovy:groovy-json:$groovyVersion"
-    implementation "org.apache.groovy:groovy-sql:$groovyVersion"
-    implementation "org.apache.groovy:groovy-templates:$groovyVersion"
-    implementation "com.hazelcast:hazelcast:5.6.0"
-    implementation("org.slf4j:slf4j-api:2.0.17")
-    implementation("ch.qos.logback:logback-classic:1.5.20")
-    implementation "org.yaml:snakeyaml:2.5"
+    gcuModules.each { api project(it) }
 
-    //mail client
-    implementation("org.simplejavamail:simple-java-mail:8.12.6")
+    // The fixtures moved to gcu-taskgraph; the aggregate's fixtures variant passes them through, so
+    // testFixtures('org.softwood:GroovyConcurrentUtils:2.0.0') still gives TaskGraphSpec.
+    testFixturesApi testFixtures(project(':gcu-taskgraph'))
 
-    //two serialisers - EclipseStore (successor to MicroStream, Java 25 compatible)
-    implementation "org.eclipse.store:storage-embedded:3.1.0"
-    implementation "org.eclipse.store:storage-embedded-configuration:3.1.0"
-    implementation "org.eclipse.serializer:serializer:2.0.0"  // EclipseStore binary serializer
-    implementation 'org.msgpack:msgpack-core:0.9.10'  //msgpack serializer
-
-    implementation 'io.vertx:vertx-core:5.0.5'
-    implementation 'io.projectreactor:reactor-core:3.8.0'
-    // RSocket Core
-    implementation 'io.rsocket:rsocket-core:1.1.5'
-    implementation 'io.rsocket:rsocket-transport-netty:1.1.5'
-
-    // Netty (if not already included)
-    implementation 'io.netty:netty-all:4.2.7.Final'
-
-    // Optional: RSocket Load Balancer
-    implementation 'io.rsocket:rsocket-load-balancer:1.1.5'
-
-    //javascript for script engine loading
-    implementation("org.openjdk.nashorn:nashorn-core:15.7")
-
-    // Apache POI - optional compile-time dep for office doc task types.
-    // GCU stays POI-free at runtime; actual POI dep lives in consuming servers
-    // (mcp-agentic-workflow, mcp-groovy-filesystem-server).
-    // XlsxTask/DocxTask/PptxTask are injection-based - no POI calls in GCU code.
-    compileOnly 'org.apache.poi:poi-ooxml:5.3.0'
-    testImplementation 'org.apache.poi:poi-ooxml:5.3.0'
-    testImplementation 'org.apache.poi:poi-ooxml-full:5.3.0'
-
-    testImplementation platform('org.junit:junit-bom:5.10.0')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-
-    // test-fixtures jar - JUnit + Groovy available to consumers of the fixtures artifact
-    testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
-    testFixturesImplementation 'org.junit.jupiter:junit-jupiter-api'
-    testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
-    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
-    testImplementation "org.apache.groovy:groovy-test:$groovyVersion"
-    testImplementation 'io.vertx:vertx-junit5:5.0.5'
-    testImplementation("io.projectreactor:reactor-test:3.8.0")
-    testImplementation 'org.awaitility:awaitility:4.3.0'
-    testImplementation 'org.spockframework:spock-core:2.5-groovy-6.0'
-    testImplementation 'org.wiremock:wiremock:3.3.1'
+    // The root tests exercise several modules at once (the Hardening*Spec suites and the clustering tests),
+    // so they see every library the modules use.
+    testImplementation libs.hazelcast
+    testImplementation libs.vertx
+    testImplementation libs.reactor
+    testImplementation libs.rsocketCore
+    testImplementation libs.rsocketNetty
+    testImplementation libs.netty
+    testImplementation libs.esStorage
+    testImplementation libs.esSerializer
+    testImplementation libs.msgpack
+    testImplementation libs.nashorn
+    testImplementation libs.poi
+    testImplementation "org.apache.groovy:groovy-sql:$groovyVersion"
+    testImplementation "org.apache.groovy:groovy-templates:$groovyVersion"
     testImplementation 'com.h2database:h2:2.2.224'
-
-    // test-fixtures jar: TaskGraphSpec base class + verifier for library consumers
-    testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
-    testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
-    testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
-    // Pinned to the same versions as the main dependencies: a dynamic version (2.0.+) cannot be
-    // expressed in a Maven POM and produced a publication warning.
-    testFixturesImplementation "org.slf4j:slf4j-api:2.0.17"
-    testFixturesImplementation "ch.qos.logback:logback-classic:1.5.20"
+    testImplementation 'org.wiremock:wiremock:3.3.1'
+    testImplementation 'io.vertx:vertx-junit5:5.0.5'
+    testImplementation 'io.projectreactor:reactor-test:3.8.0'
+    testImplementation testFixtures(project(':gcu-taskgraph'))
 }
 
-// Groovy 6.0.0 (2026-11-16): compileTestGroovy runs in a Gradle compiler worker, whose default 512m heap the
-// Groovy 6 compiler exhausts on this test source set ("Java heap space" from ApiGroovyCompiler in WorkerDaemonServer).
-// The daemon's own heap (org.gradle.jvmargs) is not the constraint -- a 6g daemon failed the same way.
-tasks.withType(GroovyCompile).configureEach {
-    groovyOptions.forkOptions.memoryMaximumSize = '4g'
-}
-
-jar {
+// allJar: every GCU class in one jar. The consumer supplies the third-party libraries.
+def allJar = tasks.register('allJar', Jar) {
+    group = 'build'
+    description = 'Every GCU module in one jar, without third-party classes -> build/libs/*-all.jar'
+    archiveClassifier.set('all')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    gcuModules.each { m ->
+        def sub = project(m)
+        dependsOn "${m}:classes"
+        from sub.sourceSets.main.output
+    }
     exclude 'logback-test.xml'
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-}
-
-tasks.withType(JavaCompile).configureEach {
-    options.release = 25
-}
-
-// Make testFixtures classes available to the test source set at runtime
-// (needed so TaskGraphSpecExample can extend TaskGraphSpec which lives in testFixtures)
-configurations {
-    testImplementation.extendsFrom(testFixturesImplementation)
-}
-
-dependencies {
-    testImplementation sourceSets.testFixtures.output
-}
-
-test {
-    useJUnitPlatform()
-    testLogging {
-        events "passed", "skipped", "failed"
-        exceptionFormat "short"
-    }
+// fatJar: GCU and every runtime dependency, service files merged, for running stand-alone.
+// The shadow plugin is on the build classpath but not applied: applied, it adds a shadowJar variant (classifier
+// 'all') to the published java component, which would publish a fat jar and collide with allJar.
+def fatJar = tasks.register('fatJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
+    group = 'build'
+    description = 'GCU and every runtime dependency in one jar -> build/libs/*-fat.jar'
+    archiveClassifier.set('fat')
+    configurations = [project.configurations.runtimeClasspath]
+    from sourceSets.main.output
+    mergeServiceFiles()
+    exclude 'logback-test.xml', 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/INDEX.LIST',
+            'module-info.class', 'META-INF/versions/*/module-info.class'
 }
 
 // --- asciidoctor / PDF generation ----------------------------------------
-// Same layout as mcp-agentic-workflow and mcp-groovy-context-server:
 // Two books from one set of chapters (docs/asciidoc/chapters/*.adoc):
 //   index.adoc      the whole library          -> groovy-concurrent-utils-reference.pdf
 //   taskgraph.adoc  the TaskGraph chapters only -> groovy-concurrent-utils-taskgraph.pdf
@@ -144,7 +204,14 @@ asciidoctorj {
     version = '3.0.1'
     modules {
         pdf { version '2.3.19' }
+        // asciidoctor-diagram renders the [plantuml] and [ditaa] blocks to images at build time (PlantUML
+        // and ditaa are bundled). Without it the PDF and HTML printed the diagram source as text.
+        diagram.use()
+        diagram { version '2.3.1' }
     }
+    // No Graphviz needed: docs/asciidoc/plantuml.cfg selects PlantUML's built-in Smetana layout.
+    attributes 'plantuml-config': layout.projectDirectory.file('docs/asciidoc/plantuml.cfg').asFile.absolutePath,
+               'plantumlconfig': layout.projectDirectory.file('docs/asciidoc/plantuml.cfg').asFile.absolutePath
 }
 
 // JRuby reaches into sun.misc.Unsafe, JNI (jffi) and JDK IO internals. On JDK 24+ each prints a warning
@@ -194,69 +261,23 @@ tasks.named('asciidoctorPdf', AsciidoctorPdfTask).configure { t ->
     }
 }
 
+// -----------------------------------------------------------------------------------------------------
+// Publishing: one publication per project, same POM details; artifactId = project name.
+// -----------------------------------------------------------------------------------------------------
+def pomDescriptions = [
+        'GroovyConcurrentUtils': 'Groovy concurrency library: pools, promises, dataflow, actors, agents and the TaskGraph engine (aggregate of the gcu-* modules)',
+        'gcu-core'             : 'GroovyConcurrentUtils core: promises, dataflow, worker pools, gstream, configuration, agents and security helpers',
+        'gcu-cluster'          : 'GroovyConcurrentUtils cluster: Hazelcast manager and shared cluster state for TaskGraph and actors',
+        'gcu-taskgraph'        : 'GroovyConcurrentUtils TaskGraph: the DAG workflow engine, task types, restricted scripts and persistence',
+        'gcu-actors'           : 'GroovyConcurrentUtils actors: actor systems, supervision and remote actor transports',
+        'gcu-reactive'         : 'GroovyConcurrentUtils reactive: Project Reactor helpers',
+]
 
-publishing {
-    publications {
-        mavenJava(MavenPublication) {
-            from components.java
-
-            // The test-fixtures variants carry a Gradle capability that a Maven POM cannot express.
-            // Gradle consumers read the .module file, which is complete, so the POM warning is noise.
-            suppressPomMetadataWarningsFor('testFixturesApiElements')
-            suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
-
-            pom {
-                name.set(providers.gradleProperty('pomName').orElse('GroovyConcurrentUtils'))
-                description.set(providers.gradleProperty('pomDescription')
-                        .orElse('Groovy concurrency library: pools, promises, dataflow, actors, agents and the TaskGraph engine'))
-                url.set(providers.gradleProperty('pomUrl').orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
-
-                licenses {
-                    license {
-                        name.set('The Apache License, Version 2.0')
-                        url.set('https://www.apache.org/licenses/LICENSE-2.0.txt')
-                    }
-                }
-
-                developers {
-                    developer {
-                        id.set(providers.gradleProperty('pomDeveloperId').orElse('woodmawa'))
-                        name.set(providers.gradleProperty('pomDeveloperName').orElse('woodmawa'))
-                        email.set(providers.gradleProperty('pomDeveloperEmail').orElse(''))
-                    }
-                }
-
-                scm {
-                    connection.set(providers.gradleProperty('pomScmConnection')
-                            .orElse('scm:git:https://github.com/woodmawa/GroovyConcurrentUtils.git'))
-                    developerConnection.set(providers.gradleProperty('pomScmDeveloperConnection')
-                            .orElse('scm:git:ssh://git@github.com:woodmawa/GroovyConcurrentUtils.git'))
-                    url.set(providers.gradleProperty('pomScmUrl')
-                            .orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
-                }
-            }
-        }
-    }
-}
-
-/**
- * Credentials / Signing
- */
 def sonatypeUsername = (findProperty('sonatypeUsername') ?: System.getenv('SONATYPE_USERNAME'))?.toString()
 def sonatypePassword = (findProperty('sonatypePassword') ?: System.getenv('SONATYPE_PASSWORD'))?.toString()
 def signingKey       = (findProperty('signingKey')       ?: System.getenv('SIGNING_KEY'))?.toString()
 def signingPassword  = (findProperty('signingPassword')  ?: System.getenv('SIGNING_PASSWORD'))?.toString()
 
-signing {
-    if (signingKey && signingPassword) {
-        useInMemoryPgpKeys(signingKey, signingPassword)
-    }
-    sign publishing.publications.mavenJava
-}
-
-/**
- * Fail-fast checks for Sonatype publish actions
- */
 def isMavenLocalInvocation = gradle.startParameter.taskNames.any { it.toLowerCase().contains('mavenlocal') }
 def isCentralInvocation = !isMavenLocalInvocation && gradle.startParameter.taskNames.any { t ->
     def n = t.toLowerCase()
@@ -280,19 +301,73 @@ def validateCentralSecrets = tasks.register('validateCentralSecrets') {
     doLast { requireCentralSecrets(path) }
 }
 
-tasks.withType(Sign).configureEach { t ->
-    onlyIf { isCentralInvocation }
-    dependsOn(validateCentralSecrets)
-}
+allprojects { p ->
+    publishing {
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
 
-tasks.withType(PublishToMavenRepository).configureEach { t ->
-    if (t.repository?.name == 'sonatype') {
-        t.doFirst { requireCentralSecrets(t.path) }
+                // The test-fixtures variants carry a Gradle capability that a Maven POM cannot express.
+                // Gradle consumers read the .module file, which is complete, so the POM warning is noise.
+                if (p.plugins.hasPlugin('java-test-fixtures')) {
+                    suppressPomMetadataWarningsFor('testFixturesApiElements')
+                    suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
+                }
+
+                pom {
+                    name.set(p.name)
+                    description.set(pomDescriptions[p.name] ?: p.name)
+                    url.set(providers.gradleProperty('pomUrl').orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
+
+                    licenses {
+                        license {
+                            name.set('The Apache License, Version 2.0')
+                            url.set('https://www.apache.org/licenses/LICENSE-2.0.txt')
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id.set(providers.gradleProperty('pomDeveloperId').orElse('woodmawa'))
+                            name.set(providers.gradleProperty('pomDeveloperName').orElse('woodmawa'))
+                            email.set(providers.gradleProperty('pomDeveloperEmail').orElse(''))
+                        }
+                    }
+
+                    scm {
+                        connection.set(providers.gradleProperty('pomScmConnection')
+                                .orElse('scm:git:https://github.com/woodmawa/GroovyConcurrentUtils.git'))
+                        developerConnection.set(providers.gradleProperty('pomScmDeveloperConnection')
+                                .orElse('scm:git:ssh://git@github.com:woodmawa/GroovyConcurrentUtils.git'))
+                        url.set(providers.gradleProperty('pomScmUrl')
+                                .orElse('https://github.com/woodmawa/GroovyConcurrentUtils'))
+                    }
+                }
+            }
+        }
+    }
+
+    signing {
+        if (signingKey && signingPassword) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
+        sign publishing.publications.mavenJava
+    }
+
+    tasks.withType(Sign).configureEach { t ->
+        onlyIf { isCentralInvocation }
+        dependsOn(validateCentralSecrets)
+    }
+
+    tasks.withType(PublishToMavenRepository).configureEach { t ->
+        if (t.repository?.name == 'sonatype') {
+            t.doFirst { requireCentralSecrets(t.path) }
+        }
     }
 }
 
 /**
- * Nexus publish plugin
+ * Nexus publish plugin (publishes every project's mavenJava publication)
  */
 nexusPublishing {
     repositories {
@@ -309,12 +384,11 @@ nexusPublishing {
  */
 tasks.register('publishToMavenCentral') {
     group = 'publishing'
-    description = 'Publishes to Sonatype/Maven Central (snapshots go to snapshots repo; releases are staged then closed+released).'
+    description = 'Publishes every module and the aggregate to Sonatype/Maven Central (releases are staged then closed+released).'
 
-    dependsOn tasks.named('publish')
+    dependsOn allprojects.collect { "${it.path == ':' ? '' : it.path}:publish".toString() }
 
     if (!version.toString().endsWith('-SNAPSHOT')) {
         finalizedBy tasks.named('closeAndReleaseSonatypeStagingRepository')
     }
 }
-

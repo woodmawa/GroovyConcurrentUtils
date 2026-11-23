@@ -4,7 +4,7 @@ Will Woodman <will@woodmawa.com>
 // --- Single source of truth for the version this BOOK describes. ---------
 // This is the only place the library version appears in this book: chapters
 // describe the library as it stands, not the build that produced it.
-:gcu-version: 1.4.2
+:gcu-version: 2.0.0
 :revnumber: {gcu-version}
 :toc: left
 :toclevels: 3
@@ -47,49 +47,77 @@ was last checked against.
 = Part I -- The Library
 
 include::chapters/01-overview.adoc[leveloffset=+1]
+<<<
+include::chapters/01a-modules-and-building.adoc[leveloffset=+1]
 
 = Part II -- Core Concurrency
 
 include::chapters/02-pools.adoc[leveloffset=+1]
+<<<
 include::chapters/03-promises.adoc[leveloffset=+1]
+<<<
 include::chapters/04-dataflow.adoc[leveloffset=+1]
+<<<
 include::chapters/05-gstream.adoc[leveloffset=+1]
+<<<
 include::chapters/06-reactive.adoc[leveloffset=+1]
 
 = Part III -- Actors and Agents
 
 include::chapters/07-actors.adoc[leveloffset=+1]
+<<<
 include::chapters/08-agents.adoc[leveloffset=+1]
 
 = Part IV -- Platform Services
 
 include::chapters/09-configuration.adoc[leveloffset=+1]
+<<<
 include::chapters/10-security.adoc[leveloffset=+1]
+<<<
 include::chapters/11-clustering.adoc[leveloffset=+1]
+<<<
 include::chapters/12-security-controls.adoc[leveloffset=+1]
 
 = Part V -- TaskGraph
 
 include::chapters/tg-01-architecture.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-02-dsl-approach.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-03-foundation-libraries.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-03a-simple-task-execution.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-04-layers.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-05-extensibility.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-06-task-context.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-07-examples.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-08-test-harness.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-14-taskgraph-spec.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-09-security.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-10-observability.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-11-taskbase.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-12-gateways.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-13-task-types.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-15-office-task-dsl.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-16-execution-integrity.adoc[leveloffset=+1]
 
+<<<
 [appendix]
 include::chapters/appendix-a-glossary.adoc[leveloffset=+1]
 
+<<<
 [appendix]
 include::chapters/appendix-b-history-map.adoc[leveloffset=+1]

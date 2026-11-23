@@ -1,6 +1,8 @@
 [[ch-clustering]]
 = Clustering: Shared State Across Nodes
 
+_Module: `gcu-cluster`. See <<ch-modules>>._
+
 Package `org.softwood.cluster`. Clustering is optional and off by default. When it is on, a
 set of JVMs share a small amount of state through Hazelcast: which actors exist and where,
 and the progress of TaskGraph runs. The library does not move work between nodes on its own;

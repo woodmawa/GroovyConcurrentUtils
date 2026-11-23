@@ -22,62 +22,73 @@ what each layer takes from the one below.
 
 The same capabilities as a table, with where each is described:
 
-[cols="2,3,5,3",options="header"]
+[cols="2,3,2,5,3",options="header"]
 |===
-| Capability | Package | What it gives you | Chapter
+| Capability | Package | Module | What it gives you | Chapter
 
 | Pools
 | `org.softwood.pool`
+| `gcu-core`
 | One contract for running and scheduling work, on virtual threads by default.
 | <<ch-pools>>
 
 | Promises
 | `org.softwood.promise`
+| `gcu-core`
 | A value that arrives later, with composition, timeouts and combinators, over three interchangeable implementations.
 | <<ch-promises>>
 
 | Dataflow
 | `org.softwood.dataflow`
+| `gcu-core`
 | Single-assignment variables: readers wait for the writer, and nothing is overwritten.
 | <<ch-dataflow>>
 
 | Gstream
 | `org.softwood.gstream`
+| `gcu-core`
 | Java streams driven by Groovy closures.
 | <<ch-gstream>>
 
 | Reactive channels
 | `org.softwood.reactive`
+| `gcu-reactive`
 | A bounded work queue and a hot topic, consumed as a Reactor `Flux`.
 | <<ch-reactive>>
 
 | Actors
 | `org.softwood.actor`
+| `gcu-actors`
 | State behind a mailbox, with supervision, hierarchy, scheduling and remoting.
 | <<ch-actors>>
 
 | Agents
 | `org.softwood.agent`
+| `gcu-core`
 | One mutable object, updated by closures applied in turn.
 | <<ch-agents>>
 
 | Configuration
 | `org.softwood.config`
+| `gcu-core`
 | Layered settings from files, system properties and the environment, with a trace of where each value came from.
 | <<ch-configuration>>
 
 | Security services
 | `org.softwood.security`
+| `gcu-core`
 | Secret lookup, TLS contexts, signed tokens and login rate limiting.
 | <<ch-security>>
 
 | Clustering
 | `org.softwood.cluster`
+| `gcu-cluster`
 | Optional shared state across JVMs through Hazelcast.
 | <<ch-clustering>>
 
 | TaskGraph
 | `org.softwood.dag`
+| `gcu-taskgraph`
 | A DSL and engine for graphs of tasks, with gateways, retries, persistence and a test harness.
 | Part V
 |===
@@ -145,12 +156,18 @@ a `Flux`, and a `Gstream` for an in-memory pipeline.
 [source,groovy,subs="attributes+"]
 ----
 dependencies {
+    // everything; or a single module such as 'org.softwood:gcu-core' or 'org.softwood:gcu-taskgraph'
     implementation 'org.softwood:GroovyConcurrentUtils:{gcu-version}'
 
     // TaskGraph test harness (TaskGraphSpec), published as a test-fixtures variant
     testImplementation testFixtures('org.softwood:GroovyConcurrentUtils:{gcu-version}')
 }
 ----
+
+The library is published as five modules and an aggregate that depends on all of them; the
+Module column above says which module carries each capability. <<ch-modules>> lists what each
+module brings with it, and how to build the modules, one jar with every GCU class, and a fat
+jar with the dependencies included.
 
 The library is built with Groovy 6 on a Java 25 toolchain. Virtual threads are used when the
 JVM has them and platform threads otherwise.
@@ -168,7 +185,8 @@ application that uses those tasks.
   implementation.
 * *Operators where they read well.* `<<` binds a dataflow variable and publishes to a queue
   or topic. On an actor and on an agent `<<` is the synchronous form: it waits for the reply
-  or the result. `>>` registers a dataflow callback or queues an asynchronous agent update.
+  or the result, and `>>` is the asynchronous one: it sends the message or queues the update
+  and returns at once. On a dataflow variable `>>` registers a callback.
 * *`health()` and `metrics()`.* Pools, actors, agents and agent pools expose maps for
   monitoring.
 * *Errors are kept, not swallowed.* Actors and agents retain a bounded list of recent

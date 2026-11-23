@@ -31,7 +31,7 @@ SPI contracts ensure custom implementations work seamlessly with TaskGraph.
 
 TaskGraph uses Java's ServiceLoader mechanism:
 
-[plantuml, spi-pattern, svg]
+[plantuml, spi-pattern, png]
 ....
 @startuml
 interface Provider {

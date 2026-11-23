@@ -1,6 +1,8 @@
 [[ch-security-controls]]
 = Security Controls: What Is Enforced and What Is Planned
 
+_Module: `gcu-taskgraph` (the actor remoting controls are in gcu-actors, the cluster controls in gcu-cluster). See <<ch-modules>>._
+
 The library runs things on behalf of a flow definition: scripts, rule expressions, HTTP calls,
 file operations, messages from other processes. This chapter is the single place that says,
 for each of those, what limits it today, what the agreed design is, and which release brings

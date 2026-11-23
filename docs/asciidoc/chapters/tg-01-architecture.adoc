@@ -1,6 +1,8 @@
 [[tg-01]]
 = Architecture & Design Philosophy
 
+_Module: `gcu-taskgraph`, as is everything in the TaskGraph chapters. See <<ch-modules>>._
+
 [abstract]
 --
 This chapter explores the fundamental architecture and design principles behind TaskGraph. Understanding these concepts will help you make the most of the framework and extend it effectively.
@@ -85,7 +87,7 @@ Workflows are composed from reusable building blocks:
 
 TaskGraph is organized in distinct layers, each with clear responsibilities:
 
-[plantuml, taskgraph-architecture, svg]
+[plantuml, taskgraph-architecture, png]
 ....
 @startuml
 !define RECTANGLE class
@@ -281,7 +283,7 @@ TaskGraph workflows are represented as DAGs:
 * **No cycles** ensures termination
 * **Multiple roots** supported (parallel entry points)
 
-[ditaa, dag-example]
+[ditaa, dag-example, png]
 ....
     +--------+     +--------+
     | Task A |     | Task B |

@@ -17,7 +17,7 @@ TaskContext is the shared execution environment for all tasks in a TaskGraph wor
 * **Event dispatcher** - Event publishing
 * **Result storage** - Task result access
 
-[plantuml, context-architecture, svg]
+[plantuml, context-architecture, png]
 ....
 @startuml
 class TaskContext {

@@ -1,6 +1,8 @@
 [[ch-configuration]]
 = Configuration: Layered Settings
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.config`. `ConfigLoader` assembles one map of settings from several
 sources, in a fixed order, and can say afterwards where each value came from. The library
 uses it for its own settings (the default promise implementation, whether the actor registry

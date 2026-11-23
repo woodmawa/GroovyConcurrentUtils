@@ -1,0 +1,10 @@
+// gcu-cluster: HazelcastManager, its security settings and message validation, and the state types the
+    // cluster carries for TaskGraph (org.softwood.dag.cluster) and actors (org.softwood.actor.cluster).
+    // gcu-taskgraph and gcu-actors depend on it; it depends on gcu-core only.
+    description = 'GroovyConcurrentUtils cluster'
+
+    dependencies {
+        api project(':gcu-core')
+        // HazelcastManager returns IMap and ITopic, so the Hazelcast API is part of this module's API.
+        api libs.hazelcast
+    }

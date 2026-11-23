@@ -1,6 +1,8 @@
 [[ch-reactive]]
 = Reactive Channels: Queue and Topic
 
+_Module: `gcu-reactive`. See <<ch-modules>>._
+
 Package `org.softwood.reactive`. A dataflow variable carries one value. These two classes
 carry a series of them, and bridge ordinary producing code to a Project Reactor `Flux` on the
 consuming side. They differ in who receives each item.
@@ -98,7 +100,12 @@ once and can be replaced in a test.
 | Logs and rethrows, wrapping a checked exception in a `RuntimeException`.
 
 | `RETRY`
-| Logs that a retry was requested. No retry is implemented; this mode is a placeholder.
+| On a `DataflowTopic` with `errorMode = ErrorMode.RETRY`, a publish that no subscriber could
+take (every subscriber has no outstanding demand) is tried again up to `maxRetries` times
+(default 3), pausing `retryBackoff` (25 ms) and doubling up to one second; the publisher waits
+meanwhile. Only when it still fails does the strategy see it, and logs that the retries are
+exhausted. A topic that has completed is not retried. A `DataflowQueue` has no retry: an
+enqueue already waits up to `publishTimeout` for room. Before 2.0.0 this mode only logged.
 |===
 
 The default strategy has two settings: `publishTimeout` (a `Duration`, five seconds) and

@@ -934,7 +934,7 @@ class TaskBase {
 
 === Task Execution Flow
 
-[plantuml, execution-flow, svg]
+[plantuml, execution-flow, png]
 ....
 @startuml
 participant "TaskGraph" as TG

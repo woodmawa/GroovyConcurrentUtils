@@ -1,6 +1,8 @@
 [[ch-actors]]
 = Actors: State Behind a Mailbox
 
+_Module: `gcu-actors`. See <<ch-modules>>._
+
 Package `org.softwood.actor`. An actor owns some state and a mailbox. Messages sent to it are
 queued and handled one at a time, so the handler can read and change the actor's state
 without locks: no two messages are ever processed at once. Everything else an actor system
@@ -75,24 +77,29 @@ system.actor {
 |===
 | Method | Behaviour
 
-| `tell(msg)`, `send(msg)`
-| Fire and forget. Returns as soon as the message is queued.
+| `tell(msg)`, `send(msg)`, `actor >> msg`
+| Fire and forget. Returns as soon as the message is queued. `>>` returns the actor, so sends
+can be chained: `actor >> 'one' >> 'two'`.
 
 | `tell(msg, sender)`
 | As `tell`, recording the sending actor so the handler can answer it with `ctx.replyToSender`.
 
-| `askSync(msg, timeout)`, `ask(msg, timeout)`, `sendAndWait(msg, timeout)`, `actor << msg`
+| `ask(msg, timeout)`
+| Send and return at once with a `CompletableFuture` for the reply. If no reply arrives within
+the timeout the future completes exceptionally with a `TimeoutException`.
+
+| `askSync(msg, timeout)`, `sendAndWait(msg, timeout)`, `actor << msg`
 | Send and block for the reply. Throws `TimeoutException` if none arrives in time. The default
-timeout is five seconds, which is also what the `<<` operator uses. Note that `<<` on an
-actor waits for a reply; it is not a fire-and-forget send.
+timeout is five seconds, which is also what the `<<` operator uses.
 
 | `sendAndContinue(msg, continuation, timeout)`
 | Send and return at once; the continuation closure is called with the reply.
 |===
 
-On a local actor `ask` is the same call as `askSync` and blocks. On a remote reference
-(<<actor-remoting>>) `ask` returns a `CompletableFuture` and `askSync` blocks. Code that
-must work with both should call `askSync`.
+The rule is the same on a local actor and on a remote reference (<<actor-remoting>>): `ask` is
+the asynchronous request and `askSync` the blocking one; `<<` waits for the reply and `>>` does
+not, as on an agent (<<ch-agents>>). This differs from GPars, where `<<` on an actor is a
+fire-and-forget send. Before 2.0.0 a local `ask` blocked like `askSync`, and there was no `>>`.
 
 == The Handler Context
 

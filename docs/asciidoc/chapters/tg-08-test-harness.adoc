@@ -19,7 +19,7 @@ TaskGraph provides a dedicated test harness with:
 
 == Test Harness Architecture
 
-[plantuml, test-architecture, svg]
+[plantuml, test-architecture, png]
 ....
 @startuml
 package "Test Harness" {

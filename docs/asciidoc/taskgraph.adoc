@@ -4,7 +4,7 @@ Will Woodman <will@woodmawa.com>
 // The TaskGraph chapters only, as a book of their own for printing and desk reference.
 // The same chapter files are Part V of index.adoc (the full library book): edit them once.
 // Keep :gcu-version: in step with index.adoc.
-:gcu-version: 1.4.2
+:gcu-version: 2.0.0
 :revnumber: {gcu-version}
 :toc: left
 :toclevels: 3
@@ -26,30 +26,46 @@ library's configuration, security and clustering services, are described in the 
 
 = Part I -- Foundation
 
+include::chapters/01a-modules-and-building.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-01-architecture.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-02-dsl-approach.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-03-foundation-libraries.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-03a-simple-task-execution.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-04-layers.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-05-extensibility.adoc[leveloffset=+1]
 
 = Part II -- Using TaskGraph
 
 include::chapters/tg-06-task-context.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-07-examples.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-08-test-harness.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-14-taskgraph-spec.adoc[leveloffset=+1]
 
 = Part III -- Operations
 
 include::chapters/12-security-controls.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-09-security.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-10-observability.adoc[leveloffset=+1]
 
 = Part IV -- Reference
 
 include::chapters/tg-11-taskbase.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-12-gateways.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-13-task-types.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-15-office-task-dsl.adoc[leveloffset=+1]
+<<<
 include::chapters/tg-16-execution-integrity.adoc[leveloffset=+1]

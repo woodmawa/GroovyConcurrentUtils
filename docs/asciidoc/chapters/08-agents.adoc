@@ -1,6 +1,8 @@
 [[ch-agents]]
 = Agents: Serialised Access to One Object
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.agent`. An agent wraps a single mutable object and applies every change
 to it in turn. Any number of threads may submit closures; the agent runs them one after
 another against the wrapped object, so the object itself needs no locking.

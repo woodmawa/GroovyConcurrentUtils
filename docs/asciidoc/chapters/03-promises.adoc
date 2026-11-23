@@ -1,6 +1,8 @@
 [[ch-promises]]
 = Promises: Values That Arrive Later
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.promise`. A promise stands for a value that is not available yet. It is
 completed once, with a value or with an error, and anything registered against it is told
 when that happens. Promises are the currency of the library: a TaskGraph task returns one, an

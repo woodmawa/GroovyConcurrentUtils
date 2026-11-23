@@ -1,0 +1,40 @@
+// gcu-taskgraph: the TaskGraph engine and DSL, every task type (including ShellTask and its Windows Job Object),
+    // the restricted script profile, EclipseStore persistence, resilience and saga support; plus the test fixtures
+    // (TaskGraphSpec, TaskGraphVerifier) as testFixtures('org.softwood:gcu-taskgraph').
+    apply plugin: 'java-test-fixtures'
+    description = 'GroovyConcurrentUtils TaskGraph'
+
+    dependencies {
+        api project(':gcu-core')
+        api project(':gcu-cluster')
+
+        implementation "org.apache.groovy:groovy-sql:$groovyVersion"
+        implementation "org.apache.groovy:groovy-templates:$groovyVersion"
+        implementation libs.mail
+        implementation libs.esStorage
+        implementation libs.esConfig
+        implementation libs.esSerializer
+        implementation libs.msgpack
+        implementation libs.nashorn
+
+        // Apache POI - optional compile-time dep for office doc task types.
+        // GCU stays POI-free at runtime; actual POI dep lives in consuming servers
+        // (mcp-agentic-workflow, mcp-groovy-filesystem-server).
+        // XlsxTask/DocxTask/PptxTask are injection-based - no POI calls in GCU code.
+        compileOnly libs.poi
+        testImplementation libs.poi
+        testImplementation libs.poiFull
+
+        testImplementation 'org.wiremock:wiremock:3.3.1'
+        testImplementation 'com.h2database:h2:2.2.224'
+        testImplementation 'io.vertx:vertx-junit5:5.0.5'
+
+        // test-fixtures jar: TaskGraphSpec base class + verifier for library consumers
+        testFixturesImplementation platform('org.junit:junit-bom:5.10.0')
+        testFixturesImplementation 'org.junit.jupiter:junit-jupiter'
+        testFixturesImplementation "org.apache.groovy:groovy:$groovyVersion"
+        // Pinned to the same versions as the main dependencies: a dynamic version (2.0.+) cannot be
+        // expressed in a Maven POM and produced a publication warning.
+        testFixturesImplementation libs.slf4j
+        testFixturesImplementation libs.logback
+    }

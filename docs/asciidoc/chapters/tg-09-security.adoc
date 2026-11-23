@@ -32,7 +32,7 @@ TaskGraph implements a "secure by default" architecture with multiple layers of 
 * **Audit logging** - Track security-relevant events
 * **Resource limits** - Prevent resource exhaustion
 
-[plantuml, security-architecture, svg]
+[plantuml, security-architecture, png]
 ....
 @startuml
 package "Security Layer" {

@@ -1,0 +1,13 @@
+// gcu-core: promises (DATAFLOW, COMPLETABLE_FUTURE, VERTX), dataflow variables and expressions, worker pools,
+    // gstream, layered configuration, agents and the security helpers (secrets, TLS, JWT, deserialisation filter).
+    // Every other module depends on this one.
+    description = 'GroovyConcurrentUtils core'
+
+    dependencies {
+        // Vert.x stays here for 2.0.0: PromiseConfiguration creates the VERTX factory lazily but names it directly.
+        api libs.vertx
+        implementation libs.snakeyaml
+        implementation "org.apache.groovy:groovy-templates:$groovyVersion"
+
+        testImplementation 'io.vertx:vertx-junit5:5.0.5'
+    }

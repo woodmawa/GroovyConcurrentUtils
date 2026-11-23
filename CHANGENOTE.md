@@ -3,6 +3,53 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 2.0.0 (2026-11-23): five modules and an aggregate, the new baseline; one meaning per actor send (WP9)
+
+Source: D5 in the 2026-11-20 decisions, and Will on 2026-11-23: the promises library as its own jar, TaskGraph as its own jar, the remaining parts as their own jars, and a fat jar of everything; the books restructured for the multi-project build; the whole project at 2.0.0 as the new baseline. Then (14:24) WP9, the API consistency work, into the same release, with Will's choices: `ask` returns a future, `<<` waits and `>>` sends, `ErrorMode.RETRY` made to work.
+The split changes no behaviour: every class keeps its package. WP9 changes three behaviours, in actors and reactive topics only: see "What you must change" 4 to 6.
+Tests: 171 result files, 2775 tests, 0 failures, 46 skipped (root 681, gcu-core 554, gcu-cluster 16, gcu-taskgraph 1314, gcu-actors 192, gcu-reactive 18). That is the 1.4.2 suite redistributed (169 files, 2763 tests, as at 1.4.2; in the split-only run one known `ManualTaskTest` timing failure, 9 of 9 green alone) plus `Hardening200ActorSpec` (7) and `Hardening200RetrySpec` (5). Two existing test classes changed: the three stand-in actors in `ActorSystemTest` implement the new `Actor` methods, and `ActorSupervisionIntegrationTest` calls `askSync` where it used the old blocking `ask`.
+Red first: actor spec 6 of 7 red on the split source (the seventh, that `askSync` and `<<` still wait, is the unchanged behaviour); retry spec 3 of 5 red, two for the old behaviour itself (the topic ended by one undeliverable event; the "no retry handler" message) and one because the retry did not exist, while the two green ones show that such a publish does reach the strategy. Mutation checks, both caught: no timeout on the local `ask` future (1 red), the RETRY branch switched off (1 red).
+`allJar` holds the same 1636 classes as the 1.4.2 jar (checked on the split source). The fat jar ran a promise and a two-task graph on a bare JVM.
+
+### What you must change
+
+1. **Nothing, if you depend on `org.softwood:GroovyConcurrentUtils`.** Change the version to 2.0.0. The artifact is now an aggregate whose POM depends on the five modules, so the same classes arrive in five jars instead of one. `testFixtures('org.softwood:GroovyConcurrentUtils:2.0.0')` still gives `TaskGraphSpec`.
+2. **A Maven build that used the `test-fixtures` classifier** on `GroovyConcurrentUtils` names `gcu-taskgraph` instead (`<artifactId>gcu-taskgraph</artifactId><classifier>test-fixtures</classifier>`).
+3. **A build that copied the single jar** (a `lib/` folder, a fat jar of its own) takes `GroovyConcurrentUtils-2.0.0-all.jar` from `gradlew allJar`, or the five module jars.
+4. **A local `actor.ask(msg[, timeout])` that used the reply directly** now gets a `CompletableFuture`: call `askSync` (or `.get()` on the future). `ask` on a remote reference is unchanged. A class implementing `Actor` declares `CompletableFuture<Object> ask(Object, Duration)` and the new `Actor rightShift(Object)`.
+5. **`actor >> msg`** used to fail (no such method); it now sends without waiting and returns the actor. `actor << msg` is unchanged: it waits for the reply.
+6. **A `DataflowTopic` with `errorMode = ErrorMode.RETRY`** now retries a publish that no subscriber could take, and the publisher waits while it does (at most `maxRetries` pauses from `retryBackoff`, 25 ms doubling to 1 s). With any mode, such a publish no longer ends the topic (below).
+
+### Changed (WP9)
+
+- **`Actor.ask` returns `CompletableFuture<Object>`** on a local actor as on a remote reference (`GroovyActor.ask` blocked and returned the reply, `RemoteActorRef.ask` returned a future, the interface said `Object`). The future completes exceptionally with a `TimeoutException` after the timeout (default five seconds). `askSync`, `sendAndWait` and `<<` block, as before.
+- **New `actor >> msg`**, on `GroovyActor` and `RemoteActorRef`: `tell`, returning the actor, so `actor >> 'a' >> 'b'` chains. The rule on actors is now the rule on agents: `<<` waits for the result, `>>` does not. The Javadoc's claim that `<<` is "GPars-compatible" is corrected (in GPars `<<` on an actor does not wait).
+- **`ErrorMode.RETRY` works.** On a `DataflowTopic`, a publish that found no subscriber with demand (`FAIL_OVERFLOW`) is emitted again up to `maxRetries` times with a doubling pause from the new `retryBackoff`; only then does the strategy see it, and `DefaultErrorHandlingStrategy` logs "Retries exhausted" for RETRY (it logged "no retry handler implemented"). A completed or cancelled topic is not retried. `DataflowQueue` has no retry (an enqueue already waits `publishTimeout` for room).
+- **Defect found doing this: one undeliverable event ended a `DataflowTopic` for everyone.** `publish` used `emitNext` with a failure handler; when the handler gives up on `FAIL_OVERFLOW`, Reactor terminates the sink with an overflow error, so every subscriber's stream ended and later events went nowhere. `publish` now uses `tryEmitNext`, which reports the outcome and leaves the sink running.
+
+### Changed (module split)
+
+- **The build is a Gradle multi-project build.** Modules, each published as `org.softwood:<module>:2.0.0`:
+  - `gcu-core`: pools, promises (all three implementations, Vert.x included), dataflow, Gstream, configuration, agents, security services. The promises library: promises are built on dataflow and pools and read the configuration, so they cannot be separated from them.
+  - `gcu-cluster`: `HazelcastManager`, its security settings and message validation, and the cluster state types for TaskGraph (`org.softwood.dag.cluster`) and actors (`org.softwood.actor.cluster`). Depends on gcu-core.
+  - `gcu-taskgraph`: the TaskGraph engine, DSL, every task type (ShellTask and `WindowsJobObject` included), the script profile, EclipseStore persistence, resilience, sagas; and the test fixtures. Depends on gcu-core and gcu-cluster.
+  - `gcu-actors`: actors and the remote transports, with the sample scripts and `Main`. Depends on gcu-core and gcu-cluster.
+  - `gcu-reactive`: the reactive channels. Depends on gcu-core.
+  - `GroovyConcurrentUtils`: the aggregate (no classes of its own).
+- **Third-party libraries per module.** Each module declares only what it uses, as runtime dependencies (as the single jar did), except Vert.x in gcu-core and Hazelcast in gcu-cluster, which appear in GCU method signatures and so are compile dependencies. A consumer of gcu-core alone no longer receives Hazelcast, Netty, RSocket, Reactor, EclipseStore, Nashorn or Simple Java Mail.
+- **Two jars of everything, built on request, not published:** `gradlew allJar` (every GCU class, no third-party classes, `build/libs/GroovyConcurrentUtils-2.0.0-all.jar`) and `gradlew fatJar` (GCU and every runtime dependency, service files merged, `-fat.jar`). Publishing either would put each class on a classpath twice next to the module jars.
+- **Tests moved with their packages.** The cross-module suites (`Hardening*Spec`, the TaskGraph and actor clustering tests) are in the root project.
+- Shared build settings (toolchain, the Groovy compiler heap, test platform, `--enable-native-access=ALL-UNNAMED` for test JVMs, a `--tests` filter that matches nothing in a module does not fail the run, POM and signing) are set once in the root `build.gradle`; `publishToMavenCentral` publishes all six artifacts.
+- **Books:** new chapter "Modules and Building" in both books; the overview's capability table names each capability's module; each capability chapter says which module carries it; the TaskGraphSpec chapter's dependency setup corrected (it still named `groovy-concurrent-utils:1.0-SNAPSHOT`).
+- **Diagrams are pictures now.** The nine PlantUML and two ditaa diagrams in the TaskGraph chapters printed their source text in both PDFs and the HTML (no diagram extension was configured). The docs build now uses asciidoctor-diagram 2.3.1 (PlantUML and ditaa bundled, PNG output, PlantUML's built-in Smetana layout so no Graphviz is needed: `docs/asciidoc/plantuml.cfg`). The module dependency sketch in "Modules and Building" is a PlantUML diagram too. Images are generated into `build/` only.
+- **Part pages** (Will, 2026-11-23): a part still starts on a new page, but its title no longer has the page to itself; its first chapter follows on the same page, and every later chapter starts on a new page (`<<<` in the two book files, theme `heading.part.break-after: auto`, `heading.chapter.break-before: auto`). The library book is 412 pages (418), the TaskGraph book 361 (365).
+
+### Not split (yet)
+
+- The Vert.x promise implementation stays in gcu-core: `PromiseConfiguration` creates it by name.
+- EclipseStore persistence and the Nashorn script engine stay in gcu-taskgraph: `TaskGraph` and `TaskGraphDsl` construct the persistence manager themselves.
+- `TaskGraph` and `ActorSystem` call `HazelcastManager` directly, so gcu-taskgraph and gcu-actors depend on gcu-cluster and bring Hazelcast even with clustering off. Putting these three behind interfaces (the rest of D5) is later work.
+
 ## 1.4.2 (2026-11-23): nothing a shell run starts outlives it (Windows Job Object)
 
 Source: the known gap recorded in 1.4.1, found with Git Bash; Will asked for it as a small release before 2.0.0, that a finished script should stop the background processes it left running, and that a task can say it means to keep one running until the graph ends.

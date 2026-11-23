@@ -1,6 +1,8 @@
 [[ch-gstream]]
 = Gstream: Java Streams with Groovy Closures
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.gstream`. `Gstream<T>` wraps `java.util.stream.Stream<T>` so that a
 pipeline is written with Groovy closures and a few operations the Java API lacks. It is
 statically compiled, lazy in the same way a Java stream is, and available wherever the rest of

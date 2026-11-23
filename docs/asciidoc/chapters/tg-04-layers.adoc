@@ -14,7 +14,7 @@ TaskGraph is built in three progressive layers, each adding capabilities:
 2. **TaskCollection Layer** - Logical grouping and shared configuration
 3. **TaskGraph Layer** - Complete workflow with dependency management and orchestration
 
-[ditaa, layers-diagram]
+[ditaa, layers-diagram, png]
 ....
                     +---------------------------+
                     |      TaskGraph Layer      |
@@ -52,7 +52,7 @@ The Task layer represents individual units of work.
 
 === Task Hierarchy
 
-[plantuml, task-hierarchy, svg]
+[plantuml, task-hierarchy, png]
 ....
 @startuml
 abstract class TaskBase<T> {
@@ -321,7 +321,7 @@ fileTask("process-files") {
 
 Tasks progress through well-defined states:
 
-[plantuml, task-states, svg]
+[plantuml, task-states, png]
 ....
 @startuml
 [*] --> NOT_STARTED

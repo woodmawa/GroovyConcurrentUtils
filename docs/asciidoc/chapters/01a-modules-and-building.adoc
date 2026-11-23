@@ -1,0 +1,202 @@
+[[ch-modules]]
+= Modules and Building
+
+From 2.0.0 the library is a Gradle multi-project build. Five module jars each carry one part
+of the library, and an aggregate artifact gives you all of them under the coordinates GCU has
+always used. Package names did not change: a class has the same name wherever you get it
+from, so choosing modules changes your build file and nothing in your code.
+
+== The Modules
+
+[cols="3,5,4,4",options="header"]
+|===
+| Artifact | What it contains | Depends on | Third-party libraries it brings
+
+| `org.softwood:gcu-core`
+| Pools, promises (all three implementations), dataflow, Gstream, configuration, agents and
+  the security services. This is the promises library: promises are built on dataflow and
+  pools, and they read the configuration, so the four travel together.
+| --
+| Vert.x core, SnakeYAML, SLF4J, Logback
+
+| `org.softwood:gcu-cluster`
+| `HazelcastManager`, its security settings and message validation, and the state the
+  cluster carries for TaskGraph (`org.softwood.dag.cluster`) and actors
+  (`org.softwood.actor.cluster`).
+| gcu-core
+| Hazelcast
+
+| `org.softwood:gcu-taskgraph`
+| The TaskGraph engine and DSL, every task type (ShellTask and its Windows Job Object
+  included), the restricted script profile, EclipseStore persistence, resilience and sagas.
+  Also the TaskGraph test harness, as a test-fixtures variant.
+| gcu-core, gcu-cluster
+| EclipseStore, Nashorn, Groovy SQL and templates, Simple Java Mail, MessagePack
+
+| `org.softwood:gcu-actors`
+| Actor systems, the registry, supervision, hierarchy, scheduling and the remote transports
+  (HTTP, RSocket, EclipseStore serialisation), with the sample scripts.
+| gcu-core, gcu-cluster
+| Reactor, RSocket, Netty, MessagePack, EclipseStore
+
+| `org.softwood:gcu-reactive`
+| The reactive channels: the bounded work queue and the hot topic.
+| gcu-core
+| Reactor
+
+| `org.softwood:GroovyConcurrentUtils`
+| The aggregate. Its jar holds no classes; its POM depends on all five modules.
+| all five
+| everything above
+|===
+
+.Module dependencies (an arrow points from a module to one it depends on)
+[plantuml, gcu-module-dependencies, png]
+....
+@startuml
+skinparam componentStyle rectangle
+component "gcu-taskgraph" as TG
+component "gcu-actors" as AC
+component "gcu-reactive" as RX
+component "gcu-cluster" as CL
+component "gcu-core" as CO
+component "GroovyConcurrentUtils\n(aggregate)" as AG
+AG ..> TG
+AG ..> AC
+AG ..> RX
+TG --> CL
+AC --> CL
+TG --> CO
+AC --> CO
+RX --> CO
+CL --> CO
+@enduml
+....
+
+The arrows point one way only: no module depends on one above it. TaskGraph and the actor
+system call the cluster manager directly when clustering is switched on, which is why both
+depend on gcu-cluster and so bring Hazelcast with them even when clustering is off.
+
+== Choosing What to Depend On
+
+Everything, as before. This is the line to keep if you used 1.x:
+
+[source,groovy,subs="attributes+"]
+----
+dependencies {
+    implementation 'org.softwood:GroovyConcurrentUtils:{gcu-version}'
+
+    // TaskGraph test harness (TaskGraphSpec); the aggregate passes gcu-taskgraph's fixtures through
+    testImplementation testFixtures('org.softwood:GroovyConcurrentUtils:{gcu-version}')
+}
+----
+
+Only promises, dataflow and pools:
+
+[source,groovy,subs="attributes+"]
+----
+dependencies {
+    implementation 'org.softwood:gcu-core:{gcu-version}'
+}
+----
+
+Only TaskGraph (gcu-core and gcu-cluster come with it):
+
+[source,groovy,subs="attributes+"]
+----
+dependencies {
+    implementation 'org.softwood:gcu-taskgraph:{gcu-version}'
+    testImplementation testFixtures('org.softwood:gcu-taskgraph:{gcu-version}')
+}
+----
+
+The same in a Maven POM:
+
+[source,xml,subs="attributes+"]
+----
+<dependency>
+    <groupId>org.softwood</groupId>
+    <artifactId>gcu-taskgraph</artifactId>
+    <version>{gcu-version}</version>
+</dependency>
+----
+
+The modules declare their third-party libraries as runtime dependencies, as the single jar
+did: you get them on the runtime classpath, and you declare any you call directly yourself.
+Two are compile dependencies because their types appear in GCU's own methods: Vert.x in
+gcu-core and Hazelcast in gcu-cluster.
+Apache POI, needed by the Office document tasks in TaskGraph, is compile-only and must be
+added by an application that uses those tasks.
+
+== Building
+
+The build needs a JDK that Gradle's toolchain support can find for Java 25; Gradle itself is
+the wrapper in the repository.
+
+[cols="4,6",options="header"]
+|===
+| Command | Produces
+
+| `gradlew build`
+| Every module jar, the aggregate, and every test run.
+
+| `gradlew :gcu-core:jar` +
+  (or `:gcu-taskgraph:jar`, `:gcu-actors:jar`, ...)
+| One module: `gcu-core/build/libs/gcu-core-{gcu-version}.jar`.
+
+| `gradlew :gcu-taskgraph:test`
+| One module's tests. `gradlew test` runs them all; the cross-module suites are in the
+  root project (`gradlew :test`).
+
+| `gradlew allJar`
+| `build/libs/GroovyConcurrentUtils-{gcu-version}-all.jar`: every GCU class in one jar and no
+  third-party classes. For an application that manages its own dependencies and wants one
+  GCU file.
+
+| `gradlew fatJar`
+| `build/libs/GroovyConcurrentUtils-{gcu-version}-fat.jar`: GCU and every runtime dependency in
+  one jar, with the `META-INF/services` files merged. For running a script or a tool
+  stand-alone with `java -cp`.
+
+| `gradlew publishToMavenLocal`
+| The five modules and the aggregate, with POMs and Gradle module files, in `~/.m2`.
+
+| `gradlew asciidoctor asciidoctorPdf`
+| This book and the TaskGraph book, as HTML and PDF.
+|===
+
+`allJar` and `fatJar` are build outputs and are not published. A published jar with every
+class in it would duplicate the module jars on any classpath that also has them, which is
+the situation the aggregate POM avoids.
+
+== The Source Layout
+
+----
+GroovyConcurrentUtils/
+  settings.gradle            the five modules
+  build.gradle               shared settings, the aggregate, allJar, fatJar, publishing, docs
+  gcu-core/       src/main/groovy/org/softwood/{pool,promise,dataflow,gstream,config,agent,security}
+  gcu-cluster/    src/main/groovy/org/softwood/{cluster,dag/cluster,actor/cluster}
+  gcu-taskgraph/  src/main/groovy/org/softwood/dag/...   src/testFixtures/...
+  gcu-actors/     src/main/groovy/org/softwood/{actor,sampleScripts}
+  gcu-reactive/   src/main/groovy/org/softwood/reactive
+  src/test/groovy             tests that use several modules at once
+  docs/asciidoc               the books
+----
+
+Each module's tests sit in that module. A test that needs more than one module, such as the
+hardening suites and the clustering tests, sits in the root project, which depends on all of
+them.
+
+== What 2.0.0 Does Not Split
+
+Three parts that could be modules of their own are still inside a larger jar. Separating them
+needs interfaces in code that today names the implementation directly:
+
+* *The Vert.x promise implementation* is in gcu-core, because `PromiseConfiguration` creates
+  it by name.
+* *EclipseStore persistence* is in gcu-taskgraph, because `TaskGraph` and `TaskGraphDsl`
+  construct the persistence manager themselves.
+* *The JavaScript script engine* (Nashorn) is in gcu-taskgraph with the rest of the script
+  support it serves.
+* *Clustering* is a dependency of gcu-taskgraph and gcu-actors, as described above.

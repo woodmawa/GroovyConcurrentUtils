@@ -1,0 +1,7 @@
+# Service Provider Interface Configuration for Task Providers
+# 
+# This file enables automatic discovery of custom task providers via Java's ServiceLoader.
+# Add the fully qualified class name of each provider implementation below.
+
+# Example Kafka Producer Task Provider
+org.softwood.dag.task.spi.KafkaProducerTaskProvider

@@ -24,6 +24,9 @@ pluginManagement {
 
 rootProject.name = 'GroovyConcurrentUtils'
 
+// 2.0.0: five library modules; the root project is the aggregate org.softwood:GroovyConcurrentUtils.
+include 'gcu-core', 'gcu-cluster', 'gcu-taskgraph', 'gcu-actors', 'gcu-reactive'
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {

@@ -1,0 +1,8 @@
+// gcu-reactive: Project Reactor helpers. Depends on gcu-core for the shared logging and Groovy setup only.
+    description = 'GroovyConcurrentUtils reactive'
+
+    dependencies {
+        api project(':gcu-core')
+        implementation libs.reactor
+        testImplementation 'io.projectreactor:reactor-test:3.8.0'
+    }

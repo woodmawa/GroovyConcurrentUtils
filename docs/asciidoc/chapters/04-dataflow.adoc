@@ -1,6 +1,8 @@
 [[ch-dataflow]]
 = Dataflow: Single-Assignment Variables
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.dataflow`. A dataflow variable is a cell that is written once and can
 be read by any number of threads; a reader that arrives before the writer waits. Concurrent
 code written this way has no shared mutable state to guard, because nothing is ever

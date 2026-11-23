@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Console appender for test output -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Optional: File appender for test runs -->
+    <appender name="TEST_FILE" class="ch.qos.logback.core.FileAppender">
+        <file>build/test-logs/test-run.log</file>
+        <append>false</append>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Root logger - INFO level by default for tests -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+
+    <!-- Our code - DEBUG level for thorough test logging -->
+    <logger name="org.softwood.promise" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="TEST_FILE" />
+    </logger>
+
+    <logger name="org.softwood.dataflow" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="TEST_FILE" />
+    </logger>
+
+    <logger name="org.softwood.pool" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="TEST_FILE" />
+    </logger>
+
+    <logger name="org.softwood.task" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="TEST_FILE" />
+    </logger>
+
+    <!-- Silence noisy libraries during tests -->
+    <logger name="org.springframework" level="WARN" />
+    <logger name="org.hibernate" level="WARN" />
+    <logger name="org.apache" level="WARN" />
+
+    <!-- If you want to see specific test debug output, uncomment: -->
+    <!--
+    <logger name="org.softwood.promise.Promises" level="TRACE" />
+    <logger name="org.softwood.promise.core.dataflow.DataflowPromise" level="TRACE" />
+    -->
+</configuration>

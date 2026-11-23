@@ -10,7 +10,7 @@ This chapter introduces TaskGraphSpec, a fluent, Spock-inspired testing framewor
 ====
 *FULLY IMPLEMENTED* — `TaskGraphSpec`, `TaskGraphExecution`, and `TaskGraphVerifier` are published as a separate test-fixtures artifact. All 12 example tests pass.
 
-The framework lives in `src/testFixtures/groovy/org/softwood/dag/test/` and is built into a `*-test-fixtures.jar` alongside the main library jar. Consumers must explicitly opt in — see <<_dependency_setup>> below.
+The framework lives in the gcu-taskgraph module, in `gcu-taskgraph/src/testFixtures/groovy/org/softwood/dag/test/`, and is built into `gcu-taskgraph-{gcu-version}-test-fixtures.jar` alongside the module jar. Consumers must explicitly opt in — see <<_dependency_setup>> below.
 ====
 
 
@@ -22,14 +22,15 @@ The testing framework is distributed as a Gradle https://docs.gradle.org/current
 
 In your consuming project's `build.gradle`:
 
-[source,groovy]
+[source,groovy,subs="attributes+"]
 ----
 dependencies {
-    // Main library
-    implementation 'org.softwood:groovy-concurrent-utils:1.0-SNAPSHOT'
+    // Main library: the aggregate, or just 'org.softwood:gcu-taskgraph:{gcu-version}'
+    implementation 'org.softwood:GroovyConcurrentUtils:{gcu-version}'
 
-    // Test framework (opt-in — only pulled onto test classpath)
-    testImplementation(testFixtures('org.softwood:groovy-concurrent-utils:1.0-SNAPSHOT'))
+    // Test framework (opt-in — only pulled onto test classpath).
+    // The aggregate's fixtures pass gcu-taskgraph's through; testFixtures('org.softwood:gcu-taskgraph:{gcu-version}') is the same thing.
+    testImplementation(testFixtures('org.softwood:GroovyConcurrentUtils:{gcu-version}'))
 }
 ----
 
@@ -37,12 +38,14 @@ The `testFixtures(...)` notation is built into Gradle 6.6+ — no extra plugins 
 
 === Adding the Dependency (Maven)
 
-[source,xml]
+Maven cannot read the Gradle capability that ties the fixtures to the aggregate, so name the module's fixtures jar directly:
+
+[source,xml,subs="attributes+"]
 ----
 <dependency>
     <groupId>org.softwood</groupId>
-    <artifactId>groovy-concurrent-utils</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <artifactId>gcu-taskgraph</artifactId>
+    <version>{gcu-version}</version>
     <classifier>test-fixtures</classifier>
     <scope>test</scope>
 </dependency>
@@ -54,7 +57,7 @@ The test-fixtures artifact declares its own transitive dependencies, so these ar
 
 === Within GroovyConcurrentUtils Itself
 
-The example suite `TaskGraphSpecExample` (in `src/test/groovy/...`) works because `build.gradle` adds `sourceSets.testFixtures.output` to the test classpath and extends `testImplementation` from `testFixturesImplementation`. External consumers do not need this — the published jar handles it.
+The example suite `TaskGraphSpecExample` (in `gcu-taskgraph/src/test/groovy/...`) sees the fixtures because the gcu-taskgraph build applies Gradle's `java-test-fixtures` plugin, which puts the fixtures on that module's test classpath. External consumers do not need this — the published fixtures variant handles it.
 
 
 

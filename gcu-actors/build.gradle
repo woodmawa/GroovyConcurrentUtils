@@ -1,0 +1,19 @@
+// gcu-actors: actor systems, registry, supervision, scheduling and the remote transports (HTTP, RSocket,
+    // EclipseStore serialisation); the sample scripts and Main live here too.
+    description = 'GroovyConcurrentUtils actors'
+
+    dependencies {
+        api project(':gcu-core')
+        api project(':gcu-cluster')
+
+        implementation libs.reactor
+        implementation libs.rsocketCore
+        implementation libs.rsocketNetty
+        implementation libs.rsocketLb
+        implementation libs.netty
+        implementation libs.msgpack
+        implementation libs.esStorage
+        implementation libs.esSerializer
+
+        testImplementation 'io.projectreactor:reactor-test:3.8.0'
+    }

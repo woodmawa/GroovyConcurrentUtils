@@ -1,6 +1,8 @@
 [[ch-pools]]
 = Pools: Where Work Runs
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.pool`. Every other capability in the library runs its work on a pool:
 promises complete on one, dataflow tasks are launched on one, actors and agents drain their
 mailboxes on one, and TaskGraph runs every task on one. This chapter describes the single

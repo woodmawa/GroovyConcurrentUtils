@@ -7,3 +7,11 @@ base:
   font-size-large: 12.5
   font-size-small: 8.5
   font-size-min: 7.5
+# A part starts on a new page, but its title no longer has the page to itself (Will, 2026-11-23):
+# the part's first chapter follows on the same page. Chapters do not break by themselves; index.adoc and
+# taskgraph.adoc put a page break (<<<) before every chapter but the first of a part.
+heading:
+  part:
+    break-after: auto
+  chapter:
+    break-before: auto

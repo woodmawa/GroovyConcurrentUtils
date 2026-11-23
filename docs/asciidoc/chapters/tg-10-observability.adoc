@@ -18,7 +18,7 @@ TaskGraph provides comprehensive observability through:
 * **Logging integration** - Structured logging support
 * **Monitoring integrations** - Prometheus, Grafana, etc.
 
-[plantuml, observability-arch, svg]
+[plantuml, observability-arch, png]
 ....
 @startuml
 package "TaskGraph" {

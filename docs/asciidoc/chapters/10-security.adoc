@@ -1,6 +1,8 @@
 [[ch-security]]
 = Security Services: Secrets, TLS and Tokens
 
+_Module: `gcu-core`. See <<ch-modules>>._
+
 Package `org.softwood.security`. These are the building blocks the rest of the library uses
 when it crosses a trust boundary: reading a secret, opening a TLS connection, and proving who
 is calling. They are used by actor remoting (<<actor-remoting>>) and are available to

@@ -214,7 +214,7 @@ TaskGraph.build {
 }
 ----
 
-The result is a map: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, `stderrTruncated`, `durationMs`. A non-zero exit fails the task as an ordinary failure, so its retry policy applies. `args { ctx, prev -> [...] }` computes the arguments when the task runs.
+The result is a map: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, `stderrTruncated`, `durationMs`. A non-zero exit fails the task as an ordinary failure, so its retry policy applies. From 1.4.2, on Windows, nothing the script starts outlives the task: a background process it leaves running is stopped when it finishes, and everything it started is stopped on a timeout. A script that starts something on purpose for later tasks (a server, a watcher) says `keepBackground true`: what it leaves running is kept until the graph ends, and the result's `keptProcessIds` names it. `args { ctx, prev -> [...] }` computes the arguments when the task runs.
 
 The script goes to the interpreter by a temporary file (PowerShell, cmd) or by standard input (bash, Python), never on the command line. The environment is rebuilt from a short keep-list, `passEnvironment` and `env`. Destructive commands (`Remove-Item`, `rm`, `del`, `shutil.rmtree` and their like) and elevation are refused before anything runs; so is an interpreter the graph did not name. Each run leaves an audit record (`TaskContext.auditListener`). On Windows, arguments to cmd and bash are limited to plain characters. The `bash` on a Windows `PATH` is often the WSL launcher; to use Git for Windows, name it: `interpreterPath 'bash', 'C:/Program Files/Git/bin/bash.exe'`.
 

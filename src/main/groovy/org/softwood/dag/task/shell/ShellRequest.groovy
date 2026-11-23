@@ -32,4 +32,9 @@ class ShellRequest {
     int maxStdout
     int maxStderr
     boolean trusted
+    /**
+     * 1.4.2: background processes the script leaves running are kept until the graph ends, not
+     * stopped when the script finishes. A runner of a flow's own decides how to honour it.
+     */
+    boolean keepBackground
 }

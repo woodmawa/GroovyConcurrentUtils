@@ -3,6 +3,35 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 1.4.2 (2026-11-23): nothing a shell run starts outlives it (Windows Job Object)
+
+Source: the known gap recorded in 1.4.1, found with Git Bash; Will asked for it as a small release before 2.0.0, that a finished script should stop the background processes it left running, and that a task can say it means to keep one running until the graph ends.
+This release changes a behaviour: see "What you must change".
+Tests: 2763 run, 0 failing in the new and changed specs (2756 at 1.4.1, plus seven). In the final full run one `ManualTaskTest` escalation test failed on timing (`testManualTaskWithEscalationAndNotification`, a second test of that class with the known load-sensitivity); the class is 9 of 9 green alone. `Hardening141ShellSpec` has 57 (the 1.4.1 `@PendingFeature` is now an ordinary test, plus seven new).
+Red first: on 1.4.1, 2 red because the old behaviour was wrong (a Git Bash background command and a PowerShell grandchild whose parent had exited both outlived the timeout) and 1 red because the switch did not exist; the two tests that a finished script's background processes are stopped, 2 red on the first 1.4.2 build, which still left them running; the three `keepBackground` tests, 3 red because it did not exist.
+Mutation checks, three on the final behaviour, all caught: not putting the process in the job (1 red), letting the job go instead of ending it on a timeout (2 red), not ending the job when the script finishes before its output is read (1 red: a leftover holding the pipe delayed the result). The first two were run on the first 1.4.2 build; the code they change is the same in the final one. Two more for `keepBackground`, both caught: not ending kept processes when the graph ends (1 red), ending them when the script finishes regardless (1 red).
+
+### What you must change
+
+1. **A shell script that starts a background process meant to outlive it** (a server, a watcher). From 1.4.2 it is stopped when the script finishes, on Windows. Say `keepBackground true` on the task: it is then kept until the graph ends. A process meant to outlive the graph has to be run outside it.
+
+### Changed
+
+- **A Windows shell run is held in a Job Object** (`org.softwood.dag.task.shell.WindowsJobObject`). `LocalShellRunner` puts the process in a new job straight after it starts (and any child it has already started); a process started inside a job stays in it whatever happens to its parent. A timeout or a cancel ends the job, then walks the tree as before. 1.4.1 walked the tree only, which cannot reach a process whose parent has exited: Git Bash starts every command of a script through a fork stub that exits at once.
+- **When the script finishes, the job is ended too** (Will, 2026-11-23): a background process the script left running is stopped, before the rest of its output is read, so a leftover holding the output pipe does not delay the result. In 1.4.1 it ran on, and held up the result by up to ten seconds while the output readers waited.
+- **`keepBackground true`** on a `ShellTask` (Will, 2026-11-23): when the script finishes, a job that still holds processes is not ended but kept on the `TaskContext` until the graph ends, however it ends (completed, failed, aborted, timed out), or until the context is closed. The result's new `keptProcessIds` lists them (also in the audit record), so a later task can use or watch them. A timeout or a non-zero exit still stops them. Not offered to `process.shell(...)` in a restricted script. A kept process may hold the output pipe: the rest of the output is then read for 300 ms only.
+- New: `ShellRequest.keepBackground`, `ShellResult.keptProcessIds` and `keeper`, `TaskContext.keepUntilGraphEnds` and `endKeptProcesses`; `TaskContext.close()` ends any still kept. A runner of a flow's own honours `keepBackground` by setting `keeper`.
+- The job is made kill-on-close, so if the JVM dies during a run Windows ends the run's processes, kept ones included.
+- The kernel32 calls go through the JDK's Foreign Function API: no new dependency. The JDK prints a one-time warning about native access unless the JVM is started with `--enable-native-access=ALL-UNNAMED`. If native access is refused, or a call fails, the run is logged once and falls back to walking the tree.
+- New `LocalShellRunner.jobObjects` (default true) switches it off.
+
+### Not verified
+
+- Not on any operating system but Windows. Elsewhere, and where native access is refused, a timeout reaches only the processes linked to the run through their parents (a process group would be the equivalent), and a finished script's background processes are not stopped: once the script has exited its id may belong to another process, so the tree is not walked then. `keepBackground` has nothing to keep there, and `keptProcessIds` is empty.
+- A sub-graph that shares its parent's context: kept processes belong to the graph that was running when they were kept, and are ended when it ends; a parent graph's end also ends any kept under a sub-graph that has already ended. Not tested with a sub-graph.
+- A process started in the instant between the interpreter starting and being put in the job, other than a direct child, escapes it. bash and Python receive their script only after the job is set; PowerShell and cmd start nothing of the script's in that instant in any test run.
+- A JVM already in a job that forbids nested jobs (pre-Windows 8) falls back to the tree walk; not tested.
+
 ## 1.4.1 (2026-11-23): ShellTask, allow 'process', allow 'sql', and capabilities reachable only through their methods
 
 Source: release 3b of the hardening plan, project doc `gcu/brief-core-hardening-2026-11-18` (rev 8), decision D2 (remainder); design agreed with Will 2026-11-23 in project doc `gcu/design-1.4.1`.

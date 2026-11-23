@@ -779,6 +779,17 @@ class TaskGraph {
         totalTaskCount = tasks.size()
         completedTaskCount = 0
         graphCompletionPromise = ctx.promiseFactory.createPromise()
+        // GCU 1.4.2 (keepBackground): background processes shell tasks kept for this run end with it,
+        // however it ends (completed, failed, aborted, timed out).
+        TaskGraph self = this
+        TaskContext runCtx = ctx
+        graphCompletionPromise.whenComplete({ Object value, Throwable error ->
+            try {
+                runCtx?.endKeptProcesses(self)
+            } catch (Exception e) {
+                log.warn("TaskGraph: could not stop kept background processes ({})", e.toString())
+            }
+        } as java.util.function.BiConsumer)
 
         List<ITask> roots = tasks.values().findAll { it.predecessors.isEmpty() }
         log.debug "Root tasks: ${roots*.id}"

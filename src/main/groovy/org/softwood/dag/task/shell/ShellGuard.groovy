@@ -63,7 +63,7 @@ final class ShellGuard {
      */
     static ShellRequest prepare(TaskContext ctx, String taskId, String interpreterName, String script, List args,
                                 Object taskDirectory, Map env, Duration timeout, Integer maxStdout, Integer maxStderr,
-                                boolean trusted, boolean checkDirectoryExists = true) {
+                                boolean trusted, boolean checkDirectoryExists = true, boolean keepBackground = false) {
         String who = "ShellTask '${taskId}'"
         if (ctx == null || !ctx.scriptCapabilities.contains('process')) {
             throw new SecurityException("${who}: running a shell needs allow 'process' on the graph")
@@ -108,7 +108,7 @@ final class ShellGuard {
 
         return new ShellRequest(taskId: taskId, interpreter: interpreter.id, executable: executable, script: script,
                 args: argList, workingDirectory: dir, environment: environment, timeout: limit,
-                maxStdout: out, maxStderr: err, trusted: trusted)
+                maxStdout: out, maxStderr: err, trusted: trusted, keepBackground: keepBackground)
     }
 
     /** Run a checked request and leave an audit record, whether it succeeds or not. */
@@ -123,6 +123,14 @@ final class ShellGuard {
         try {
             result = chosen.run(request)
             if (result == null) throw new IllegalStateException("ShellTask '${request.taskId}': the shell runner returned no result")
+            if (result.keeper != null) {
+                // 1.4.2 (keepBackground): the processes the script left running belong to the graph now
+                if (ctx != null) {
+                    ctx.keepUntilGraphEnds(result.keeper)
+                } else {
+                    try { result.keeper.close() } catch (Exception ignored) { }
+                }
+            }
             return result
         } catch (Throwable t) {
             failure = t
@@ -139,6 +147,8 @@ final class ShellGuard {
                         stdoutTruncated: result?.stdoutTruncated ?: false,
                         stderrTruncated: result?.stderrTruncated ?: false,
                         trusted        : request.trusted,
+                        keepBackground : request.keepBackground,
+                        keptProcessIds : result?.keptProcessIds ?: [],
                         timedOut       : failure instanceof TimeoutException,
                         failure        : failure?.getClass()?.simpleName] as Map<String, Object>)
         }

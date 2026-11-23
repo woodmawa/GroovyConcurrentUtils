@@ -150,6 +150,47 @@ class TaskContext implements Closeable {
 
     private static final org.slf4j.Logger AUDIT_LOG = org.slf4j.LoggerFactory.getLogger('org.softwood.dag.audit')
 
+    /**
+     * GCU 1.4.2 (keepBackground): background processes a shell task left running on purpose, each
+     * with the graph that was running when they were kept. Ended when that graph ends.
+     */
+    private final List<Map<String, Object>> keptProcesses = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Object>>()
+
+    /** GCU 1.4.2: keep a shell run's background processes until the graph running now ends. */
+    void keepUntilGraphEnds(AutoCloseable keeper) {
+        if (keeper == null) return
+        keptProcesses.add([graph: graph, keeper: keeper] as Map<String, Object>)
+    }
+
+    /**
+     * GCU 1.4.2: end the kept processes of the given graph, and of any graph that has already
+     * ended (a sub-graph sharing this context may have been the one running when they were kept).
+     * Null ends them all. Called by TaskGraph when a run ends, and by {@link #close()}.
+     */
+    void endKeptProcesses(Object endedGraph) {
+        for (Map<String, Object> entry : keptProcesses) {
+            def owner = entry.graph
+            boolean ownerDone = owner == null || owner.is(endedGraph) || endedGraph == null || graphHasEnded(owner)
+            if (!ownerDone) continue
+            if (keptProcesses.remove(entry)) {
+                try {
+                    ((AutoCloseable) entry.keeper).close()
+                } catch (Exception e) {
+                    log.warn("TaskContext: could not stop kept background processes ({})", e.toString())
+                }
+            }
+        }
+    }
+
+    private static boolean graphHasEnded(Object g) {
+        try {
+            def p = g.graphCompletionPromise
+            return p != null && p.isDone()
+        } catch (Exception ignored) {
+            return false    // in doubt the graph is running: close() ends them at the latest
+        }
+    }
+
     /** GCU 1.4.1: log an audit record and pass it to the listener. A failing listener is logged, never thrown. */
     void audit(Map<String, Object> record) {
         AUDIT_LOG.info('{}', record)
@@ -355,6 +396,7 @@ class TaskContext implements Closeable {
      */
     @Override
     void close() {
+        endKeptProcesses(null)
         try {
             if (pool != null) {
                 log.debug "TaskContext.close(): shutting down pool '${pool.name ?: 'dag-pool'}'"

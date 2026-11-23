@@ -33,8 +33,14 @@ import java.time.Duration
  *
  * <h3>Result</h3>
  * <p>A map: {@code exitCode}, {@code stdout}, {@code stderr}, {@code stdoutTruncated},
- * {@code stderrTruncated}, {@code durationMs}. A non-zero exit fails the task as an ordinary failure,
- * so its retry policy applies. A refusal is never retried.</p>
+ * {@code stderrTruncated}, {@code durationMs}, {@code keptProcessIds}. A non-zero exit fails the task
+ * as an ordinary failure, so its retry policy applies. A refusal is never retried.</p>
+ *
+ * <h3>Background processes (1.4.2)</h3>
+ * <p>On Windows nothing a script starts outlives the task: what it leaves running is stopped when it
+ * finishes. {@code keepBackground true} keeps those processes instead, until the graph ends
+ * (completed, failed, aborted or timed out), so a later task can use them; their ids are in
+ * {@code keptProcessIds}. A timeout or a failed script still stops them.</p>
  *
  * <h3>trusted true</h3>
  * <p>Skips the interpreter list and the tripwires. {@code allow 'process'}, the working directory,
@@ -67,6 +73,8 @@ class ShellTask extends TaskBase<Object> implements SelfValidating {
     int maxOutput = ShellRequest.DEFAULT_MAX_STDOUT
     int maxErrorOutput = ShellRequest.DEFAULT_MAX_STDERR
     ShellRunner runner
+    /** 1.4.2: keep the background processes the script leaves running until the graph ends. */
+    boolean keepBackgroundProcesses = false
 
     private boolean trustedTask = false
 
@@ -104,6 +112,12 @@ class ShellTask extends TaskBase<Object> implements SelfValidating {
     /** A runner of the flow's own for this task, in place of the graph's or the local one. */
     void runner(ShellRunner value) { this.runner = value }
 
+    /**
+     * 1.4.2: the script means to leave processes running (a server, a watcher): keep them until the
+     * graph ends rather than stopping them when the script finishes.
+     */
+    void keepBackground(boolean value) { this.keepBackgroundProcesses = value }
+
     /** Skip the interpreter list and the tripwires. Logged each run. */
     void trusted(boolean value) { this.trustedTask = value }
 
@@ -139,9 +153,13 @@ class ShellTask extends TaskBase<Object> implements SelfValidating {
         return ctx.promiseFactory.executeAsync {
             List args = argsProvider ? (argsProvider.call(ctx, prevValue) as List) : argList
             ShellRequest request = ShellGuard.prepare(ctx, id, interpreterName, script, args, taskWorkingDirectory,
-                    envVars, processTimeout, maxOutput, maxErrorOutput, trustedTask, true)
+                    envVars, processTimeout, maxOutput, maxErrorOutput, trustedTask, true, keepBackgroundProcesses)
             ShellResult result = ShellGuard.execute(ctx, request, runner)
             if (result.exitCode != 0) {
+                // a script that failed has not set up what it meant to keep
+                if (result.keeper != null) {
+                    try { result.keeper.close() } catch (Exception ignored) { }
+                }
                 String detail = result.stderr?.trim()
                 if (detail && detail.length() > 400) detail = detail.substring(0, 397) + '...'
                 throw new ShellExecutionException("ShellTask '${id}': ${request.interpreter} finished with exit code ${result.exitCode}" +

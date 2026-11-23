@@ -21,12 +21,20 @@ import java.util.concurrent.TimeoutException
  *   <li>stdout and stderr are read as they come and kept up to their limits; past a limit the rest is
  *       read and dropped, so the process never blocks on a full pipe, and the result is flagged.</li>
  *   <li>When the timeout passes, or the calling thread is interrupted, the process and every process
- *       it started are stopped.</li>
+ *       it started are stopped. 1.4.2: on Windows the run is held in a Job Object
+ *       ({@link WindowsJobObject}), so this includes processes whose parent has already exited;
+ *       elsewhere, and if Job Objects are not available, the processes still linked to the run
+ *       through their parents.</li>
+ *   <li>1.4.2 (Will, 2026-11-23): nothing a run started outlives it. When the script finishes,
+ *       any background process it left running is stopped the same way.</li>
  * </ul>
  */
 @Slf4j
 @CompileStatic
 class LocalShellRunner implements ShellRunner {
+
+    /** 1.4.2: hold Windows runs in a Job Object. On by default; false falls back to walking the tree. */
+    static volatile boolean jobObjects = true
 
     @Override
     ShellResult run(ShellRequest request) {
@@ -47,6 +55,8 @@ class LocalShellRunner implements ShellRunner {
 
             long started = System.nanoTime()
             Process process = builder.start()
+            WindowsJobObject job = (Interpreter.WINDOWS && jobObjects) ? WindowsJobObject.contain(process) : null
+            try {
             Capture out = new Capture(process.inputStream, request.maxStdout)
             Capture err = new Capture(process.errorStream, request.maxStderr)
             Thread outReader = Thread.ofVirtual().name('shell-out-' + request.taskId).start(out)
@@ -65,16 +75,25 @@ class LocalShellRunner implements ShellRunner {
             try {
                 finished = process.waitFor(request.timeout.toMillis(), TimeUnit.MILLISECONDS)
             } catch (InterruptedException e) {
-                stopTree(process)
+                stop(process, job)
                 Thread.currentThread().interrupt()
                 throw e
             }
             if (!finished) {
-                stopTree(process)
+                stop(process, job)
                 throw new TimeoutException("${request.interpreter} ran longer than its timeout of ${request.timeout.toMillis()} ms and was stopped, with the processes it started".toString())
             }
-            outReader.join(5000)
-            errReader.join(5000)
+            // The script has finished: end its job, stopping what it left running, before reading the
+            // rest of its output, so a leftover process holding the pipe open does not keep the readers
+            // waiting. No tree walk here: the process has exited and its id may already be another's.
+            // With keepBackground, a job that still holds processes goes to the caller instead, and the
+            // output is read for a moment only: a kept process may hold the pipe for as long as it runs.
+            List<Long> keptIds = request.keepBackground && job != null ? job.processIds() : new ArrayList<Long>()
+            boolean kept = !keptIds.isEmpty()
+            if (!kept) job?.terminate()
+            long readWait = kept ? 300L : 5000L
+            outReader.join(readWait)
+            errReader.join(readWait)
 
             ShellResult result = new ShellResult()
             result.exitCode = process.exitValue()
@@ -83,10 +102,24 @@ class LocalShellRunner implements ShellRunner {
             result.stdoutTruncated = out.truncated
             result.stderrTruncated = err.truncated
             result.durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            if (kept) {
+                result.keptProcessIds = keptIds
+                result.keeper = job
+                job = null      // the caller owns it now: not ended below
+            }
             return result
+            } finally {
+                job?.terminate()   // however the run ended; after an earlier terminate() this does nothing
+            }
         } finally {
             temp.toFile().deleteDir()
         }
+    }
+
+    /** Stop a run: end its job, if it has one, then walk the tree for anything the job could not hold. */
+    static void stop(Process process, WindowsJobObject job) {
+        job?.terminate()
+        stopTree(process)
     }
 
     /** Stop the process and everything it started: the descendants are listed first, while they still have a parent. */

@@ -79,9 +79,10 @@ with `trusted true`.
 | Enforced from 1.4.1. Off by default: the graph needs `allow 'process'` and names its
 interpreters. Working directory inside the graph's directories, scrubbed environment, script
 by file or stdin, timeout that stops the process tree, capped output, destructive-pattern
-tripwires, no elevation, an audit record per run.
+tripwires, no elevation, an audit record per run. From 1.4.2 a Windows run is held in a
+Job Object, so a timeout also stops processes whose parent has exited.
 | As built. AW to plug in a runner that hands the command to FS `execute`.
-| 1.4.1
+| 1.4.1, 1.4.2
 
 | Database access from scripts (`sql`)
 | Enforced from 1.4.1. Only datasources the flow declares by name; parameterised statements;
@@ -362,12 +363,17 @@ machine), those the graph names with `passEnvironment`, and those the task sets 
 | Time
 | `processTimeout`, 60 seconds by default. At the limit the process and every process it
 started are stopped, and the task fails with a `TimeoutException`. The same when the task
-is cancelled. Known gap in {gcu-version}: "every process it started" means every process
-still linked to it by its parent. A process whose parent has already exited is not reached.
-Git Bash (MSYS) starts the commands a script runs through a stub that exits at once, so
-they are reached only through bash itself: seen with `sleep 60 &`, which survives the
-timeout. A Windows Job Object closes this; until then, prefer PowerShell or Python for
-long-running work, and do not leave background commands running from a bash script.
+is cancelled. From 1.4.2, on Windows, each run is held in a Job Object, so this includes
+processes whose parent has already exited (Git Bash starts every command of a script that
+way, through a stub that exits at once). Nothing a run starts outlives it: when the
+script finishes, a background process it left running is stopped too, and if this JVM
+dies during a run, Windows ends the run's processes with it. A task that means to leave a
+process running says `keepBackground true`: it is then kept until the graph ends, its
+ids are in the result's `keptProcessIds` and the audit record, and a timeout or a failed
+script still stops it. Elsewhere, or when the JDK
+refuses native access, a timeout reaches the processes still linked to the run by their
+parents, and a finished script's background processes are left running. The JDK warns once about
+native access unless the JVM starts with `--enable-native-access=ALL-UNNAMED`.
 
 | Output
 | stdout kept up to `maxOutput` (1 MB), stderr up to `maxErrorOutput` (64 KB); the rest is

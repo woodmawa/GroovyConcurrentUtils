@@ -734,12 +734,11 @@ wait'''
     }
 
     /**
-     * Known gap in 1.4.1. MSYS starts a background command through a short-lived fork stub that
-     * exits at once, so the command's Windows parent is gone from the start and no walk of the
-     * process tree reaches it (seen 2026-11-23: sleep.exe's parent pid had already exited). Needs a
-     * Windows Job Object; until then this fails, which @PendingFeature expects.
+     * A gap in 1.4.1, closed in 1.4.2. MSYS starts a background command through a short-lived fork
+     * stub that exits at once, so the command's Windows parent is gone from the start and no walk of
+     * the process tree reaches it (seen 2026-11-23: sleep.exe's parent pid had already exited).
+     * 1.4.2 puts the run in a Windows Job Object, which holds every process started inside it.
      */
-    @PendingFeature(reason = 'an orphaned grandchild (MSYS fork stub) is not reached by a tree walk: needs a Windows Job Object')
     @Requires({ Hardening141ShellSpec.gitBash() })
     def "Git Bash past its timeout: a background command it started is stopped too"() {
         given:
@@ -754,6 +753,161 @@ wait'''
 
         cleanup:
         stopIfAlive(dir.resolve('sleep.pid'))
+    }
+
+    // ------------------------------------------------------------------ 1.4.2: a Windows Job Object
+
+    /** A PowerShell script that starts a child, which starts a grandchild and exits: the grandchild is orphaned. */
+    private static final String ORPHANING = '''$child = Start-Process -FilePath powershell.exe -PassThru -NoNewWindow -ArgumentList '-NoProfile','-NonInteractive','-Command',"`$g = Start-Process -FilePath powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','[System.Threading.Thread]::Sleep(60000)'; Set-Content -Path orphan.pid -Value `$g.Id"
+$child.WaitForExit()
+Write-Output "child exited"
+'''
+
+    @Requires({ WINDOWS })
+    def "1.4.2: a process orphaned by its parent's exit is stopped when the script times out"() {
+        given: 'the child that started it has exited, so no walk of the tree reaches it'
+        def graph = powershell(ORPHANING + '[System.Threading.Thread]::Sleep(60000)') { processTimeout Duration.ofSeconds(8) }
+
+        when:
+        def failure = failureOf { run(graph) }
+
+        then:
+        causedBy(failure, TimeoutException)
+        Files.exists(dir.resolve('orphan.pid'))
+        childStopped(Long.parseLong(Files.readString(dir.resolve('orphan.pid')).trim()))
+
+        cleanup:
+        stopIfAlive(dir.resolve('orphan.pid'))
+    }
+
+    @Requires({ WINDOWS })
+    def "1.4.2: when a script finishes, the background processes it left running are stopped (Will, 2026-11-23)"() {
+        given: 'the orphan would otherwise run for a minute'
+        def graph = powershell(ORPHANING + 'exit 0') { processTimeout Duration.ofSeconds(30) }
+        long started = System.nanoTime()
+
+        when:
+        def result = run(graph)
+        long seconds = (System.nanoTime() - started).intdiv(1_000_000_000L)
+
+        then:
+        result.exitCode == 0
+        lines(result.stdout).contains('child exited')
+        childStopped(Long.parseLong(Files.readString(dir.resolve('orphan.pid')).trim()))
+        seconds < 20
+
+        cleanup:
+        stopIfAlive(dir.resolve('orphan.pid'))
+    }
+
+    @Requires({ Hardening141ShellSpec.gitBash() })
+    def "1.4.2: when a Git Bash script finishes, a background command it left running is stopped"() {
+        given:
+        def graph = gitBashGraph('''sleep 60 &
+cat /proc/$!/winpid > sleep.pid
+echo done''')
+        long started = System.nanoTime()
+
+        when:
+        def result = run(graph)
+        long millis = (System.nanoTime() - started).intdiv(1_000_000L)
+
+        then: 'and at once: the sleep holds the output pipe, so it is stopped before the output is read'
+        result.exitCode == 0
+        lines(result.stdout) == ['done']
+        millis < 4000
+        childStopped(Long.parseLong(Files.readString(dir.resolve('sleep.pid')).trim()))
+
+        cleanup:
+        stopIfAlive(dir.resolve('sleep.pid'))
+    }
+
+    @Requires({ WINDOWS })
+    def "1.4.2: with Job Objects switched off, a timeout still stops the process and its linked children"() {
+        given:
+        Class runner = Class.forName('org.softwood.dag.task.shell.LocalShellRunner')
+        runner.jobObjects = false
+        def graph = powershell('''$p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-Command','[System.Threading.Thread]::Sleep(60000)' -PassThru -NoNewWindow
+Set-Content -Path child.pid -Value $p.Id
+[System.Threading.Thread]::Sleep(60000)''') { processTimeout Duration.ofSeconds(4) }
+
+        when:
+        def failure = failureOf { run(graph) }
+
+        then:
+        causedBy(failure, TimeoutException)
+        childStopped(Long.parseLong(Files.readString(dir.resolve('child.pid')).trim()))
+
+        cleanup:
+        runner.jobObjects = true
+        stopIfAlive(dir.resolve('child.pid'))
+    }
+
+    // ------------------------------------------------------------------ 1.4.2: keepBackground (Will, 2026-11-23)
+
+    private static boolean aliveIn(Path pidFile) {
+        ProcessHandle.of(Long.parseLong(Files.readString(pidFile).trim())).map { it.alive }.orElse(false)
+    }
+
+    @Requires({ WINDOWS })
+    def "1.4.2: keepBackground keeps a background process running after the script, until the graph ends"() {
+        given: 'a task that leaves a process running, and a later task that looks for it'
+        String where = dir.toString()
+        String code = ORPHANING + 'exit 0'
+        Path pidFile = dir.resolve('orphan.pid')
+        def graph = TaskGraph.build {
+            allow 'process'
+            interpreters 'powershell'
+            workingDirectory where
+            shellTask('start') {
+                interpreter 'powershell'
+                keepBackground true
+                script code
+            }
+            serviceTask('check') {
+                action { ctx, prev -> ctx.promiseFactory.executeAsync { [kept: prev.keptProcessIds, alive: aliveIn(pidFile)] } }
+            }
+            dependsOn('check', 'start')
+        }
+
+        when:
+        def result = run(graph)
+        long orphan = Long.parseLong(Files.readString(pidFile).trim())
+
+        then: 'it was running while the graph ran, and is named in the result'
+        result.alive == true
+        result.kept.contains(orphan)
+
+        and: 'it is stopped now the graph has ended'
+        childStopped(orphan)
+
+        cleanup:
+        stopIfAlive(pidFile)
+    }
+
+    @Requires({ WINDOWS })
+    def "1.4.2: keepBackground does not keep anything when the script times out"() {
+        given:
+        def graph = powershell(ORPHANING + '[System.Threading.Thread]::Sleep(60000)') {
+            keepBackground true
+            processTimeout Duration.ofSeconds(8)
+        }
+
+        when:
+        def failure = failureOf { run(graph) }
+
+        then:
+        causedBy(failure, TimeoutException)
+        childStopped(Long.parseLong(Files.readString(dir.resolve('orphan.pid')).trim()))
+
+        cleanup:
+        stopIfAlive(dir.resolve('orphan.pid'))
+    }
+
+    @Requires({ WINDOWS })
+    def "1.4.2: without keepBackground the result says nothing was kept"() {
+        expect:
+        run(powershell('Write-Output hi')).keptProcessIds == []
     }
 
     private static void stopIfAlive(Path pidFile) {

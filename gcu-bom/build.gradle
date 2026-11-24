@@ -1,4 +1,4 @@
-// gcu-bom (2.1.0): a java-platform -- constraints only, no code. The plugins (java-platform, maven-publish, signing)
+// gcu-bom (3.0.0): a java-platform -- constraints only, no code. The plugins (java-platform, maven-publish, signing)
 // are applied by the root build before the shared publishing block.
 //
 // Why it exists: a Spring Boot consumer's io.spring.dependency-management BOM overrides the versions GCU's modules

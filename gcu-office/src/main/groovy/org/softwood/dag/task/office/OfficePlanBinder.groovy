@@ -17,7 +17,7 @@ import java.time.LocalDate
 import java.util.function.Predicate
 
 /**
- * OfficePlanBinder -- FS 0.11.4; moved into gcu-office in GCU 2.1.0 (decision 499), so AW and FS bind plans one way.
+ * OfficePlanBinder -- FS 0.11.4; moved into gcu-office in GCU 3.0.0 (decision 499), so AW and FS bind plans one way.
  *
  * <p>Turns the JSON-shaped maps a caller sends as {@code workbookPlan}, {@code documentPlan},
  * {@code presentationPlan} and {@code queryPlan} into GCU's typed plan objects. Before 0.11.4 the raw maps were
@@ -63,7 +63,7 @@ class OfficePlanBinder {
         this.normalise = normalise
     }
 
-    /** GCU 2.1.0: no path rule beyond refusing URLs -- for a caller (AW) whose node paths are its own. */
+    /** GCU 3.0.0: no path rule beyond refusing URLs -- for a caller (AW) whose node paths are its own. */
     OfficePlanBinder() {
         this({ String p -> true } as Predicate<String>, { String p -> p })
     }

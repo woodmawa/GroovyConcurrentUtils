@@ -17,7 +17,7 @@
         implementation libs.msgpack
         implementation libs.nashorn
 
-        // 2.1.0: no Apache POI here at all, not even compileOnly. XlsxTask/DocxTask/PptxTask, their DSLs and the Plan
+        // 3.0.0: no Apache POI here at all, not even compileOnly. XlsxTask/DocxTask/PptxTask, their DSLs and the Plan
         // model are POI-free; the POI-backed adapters moved to gcu-office, which TaskFactory reaches through the
         // OfficeBackend SPI (org.softwood.dag.task.spi). A POI import added here fails the compile -- that is the guard.
 

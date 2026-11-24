@@ -3,7 +3,7 @@ package org.softwood.dag.task.spi
 import groovy.transform.CompileStatic
 
 /**
- * Finds the {@link OfficeBackend} -- GCU 2.1.0. See {@link OfficeBackend} for why it is looked up.
+ * Finds the {@link OfficeBackend} -- GCU 3.0.0. See {@link OfficeBackend} for why it is looked up.
  *
  * <p>The closures handed out resolve the backend when they are CALLED, not when a task is built: building an office
  * task (TaskFactory, a DSL graph) never needs gcu-office, running one does, and the failure then names the
@@ -14,7 +14,7 @@ final class OfficeBackends {
 
     static final String MISSING =
         "no office backend on the classpath: office.xlsx / office.docx / office.pptx tasks need " +
-        "org.softwood:gcu-office (GCU 2.1.0 moved the POI-backed adapters out of gcu-taskgraph)"
+        "org.softwood:gcu-office (GCU 3.0.0 moved the POI-backed adapters out of gcu-taskgraph)"
 
     private static volatile OfficeBackend cached
 

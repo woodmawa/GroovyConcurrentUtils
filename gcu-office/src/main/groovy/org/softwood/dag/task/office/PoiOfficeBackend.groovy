@@ -7,7 +7,7 @@ import org.softwood.dag.task.spi.OfficeBackend
 import org.softwood.dag.task.xlsx.XlsxAdapter
 
 /**
- * gcu-office's {@link OfficeBackend} -- GCU 2.1.0. Registered in
+ * gcu-office's {@link OfficeBackend} -- GCU 3.0.0. Registered in
  * {@code META-INF/services/org.softwood.dag.task.spi.OfficeBackend}, so gcu-taskgraph's TaskFactory wires its office
  * tasks to these adapters whenever gcu-office is on the classpath.
  */

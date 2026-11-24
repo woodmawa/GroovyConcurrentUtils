@@ -29,9 +29,9 @@ import org.softwood.dag.task.xlsx.XlsxAdapter
 import java.awt.Dimension
 
 /**
- * The office tool contract -- GCU 2.1.0 (decision 499): ONE implementation that the MCP servers share.
+ * The office tool contract -- GCU 3.0.0 (decision 499): ONE implementation that the MCP servers share.
  *
- * <p>Before 2.1.0 AW ({@code OfficeDocumentService}) and FS ({@code OfficeDocumentHandler}) each kept their own POI
+ * <p>Before 3.0.0 AW ({@code OfficeDocumentService}) and FS ({@code OfficeDocumentHandler}) each kept their own POI
  * code for the plain-map requests their flow nodes and tool calls send, and the copies drifted (AW received none of
  * FS's fixes; the 2026-11-23 office arc took seven restarts). This class is that contract, lifted from AW 1.32.8 (green
  * on office-live-check), with FS's binder, the adapters' heading styles and list numbering, and refusal of every
@@ -298,7 +298,7 @@ final class OfficeTools {
     }
 
     /**
-     * 'A' -> 0, 'AB' -> 27. 2.1.0: AW's copy injected over the String with a char-typed closure -- Groovy hands a String
+     * 'A' -> 0, 'AB' -> 27. 3.0.0: AW's copy injected over the String with a char-typed closure -- Groovy hands a String
      * one-character Strings, so every read with a cellRange threw MissingMethodException.
      */
     private static int colLetterToIndex(String col) {

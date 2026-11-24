@@ -3,16 +3,18 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
-## 2.1.0 (2026-11-24): gcu-office -- one office implementation for every consumer -- and gcu-bom
+## 3.0.0 (2026-11-24): the new baseline -- gcu-office, one office implementation for every consumer, and gcu-bom
+
+**Versioning:** first tagged as 2.1.0 earlier the same day (a55a50b, v2.1.0, consumed by AW 1.33.0 and FS 0.12.0). Re-versioned 3.0.0 and made the shared baseline because it is a breaking change for any consumer that took the office adapters from `gcu-taskgraph` (item 1 below) -- a minor version was the wrong signal (Will). The code is 2.1.0's; 2.1.0 is superseded, build against 3.0.0. 3.0.0 also adds the `gcu-publish-local` AW flow (publishToMavenLocal, every module verified, registry version recorded).
 
 Source: Will, session 2026-11-24-13-31 (decision 499): "one common capability for office that FS and AW can work with so there's one dependency and one implementation to manage", and align AW's Hazelcast with GCU's. AW and FS each kept their own POI code beside GCU's adapters (AW's copy received none of FS's fixes); and both servers resolved hazelcast 5.5.0 where gcu-cluster asks 5.6.0, because Spring Boot's BOM wins over a transitive version ("selected by rule").
-Tests: 2854 tests, 0 failures (2826 on 2.0.4; 28 new in `OfficeTools210Spec`, through the public closures and TaskFactory with transport-shaped maps). Mutation checks, all caught: the Windows move retry off (1 red); unknown-field refusal off (2); map rows placed by key order (1); slide-field refusal off (1); REPLACE_SECTION past the next heading (3); the OfficeBackend registration removed (1).
+Tests: 2854 tests, 0 failures (2826 on 2.0.4; 28 new in `OfficeTools300Spec`, through the public closures and TaskFactory with transport-shaped maps). Mutation checks, all caught: the Windows move retry off (1 red); unknown-field refusal off (2); map rows placed by key order (1); slide-field refusal off (1); REPLACE_SECTION past the next heading (3); the OfficeBackend registration removed (1).
 
 ### What you must change
 
 1. **The POI-backed adapters moved to a new module, `org.softwood:gcu-office`** -- `XlsxAdapter`, `DocxAdapter`, `PptxAdapter`, `QueryExecutor`, `OfficeFiles` and the three `*AdapterFactory` classes, package names unchanged. A consumer that depended on `gcu-taskgraph` and called them depends on `gcu-office` instead (it brings `gcu-taskgraph` and POI). The aggregate `GroovyConcurrentUtils` includes it, so aggregate consumers change nothing.
 2. **Drop your own POI lines.** `gcu-office` has POI (`poi`, `poi-ooxml` without `poi-ooxml-lite`, `poi-ooxml-full`, 5.3.0) as an api dependency.
-3. **A Spring Boot consumer imports `gcu-bom` after Spring Boot's BOM**: `dependencyManagement { imports { mavenBom 'org.softwood:gcu-bom:2.1.0' } }`. It names the gcu-* modules, Hazelcast and POI; nothing else.
+3. **A Spring Boot consumer imports `gcu-bom` after Spring Boot's BOM**: `dependencyManagement { imports { mavenBom 'org.softwood:gcu-bom:3.0.0' } }`. It names the gcu-* modules, Hazelcast and POI; nothing else.
 4. `gcu-taskgraph` no longer has POI even compileOnly. `TaskFactory.createXlsxTask/createDocxTask/createPptxTask` wire their tasks through the new `OfficeBackend` SPI (`org.softwood.dag.task.spi`), which `gcu-office` registers; without `gcu-office` the task fails when it runs, naming the dependency (it used to be a `NoClassDefFoundError`).
 
 ### Added

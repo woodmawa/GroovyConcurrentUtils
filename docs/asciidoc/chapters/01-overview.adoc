@@ -164,7 +164,7 @@ dependencies {
 }
 ----
 
-The library is published as five modules and an aggregate that depends on all of them; the
+The library is published as six modules, a BOM and an aggregate that depends on all of them; the
 Module column above says which module carries each capability. <<ch-modules>> lists what each
 module brings with it, and how to build the modules, one jar with every GCU class, and a fat
 jar with the dependencies included.
@@ -174,9 +174,11 @@ JVM has them and platform threads otherwise.
 
 Some capabilities bring a third-party library with them: Project Reactor for the reactive
 channels, Vert.x for the `VERTX` promise implementation, RSocket and Netty for actor
-remoting, Hazelcast for clustering, SnakeYAML for configuration. Apache POI, needed by the
-Office document tasks in TaskGraph, is compile-only in the library and must be added by an
-application that uses those tasks.
+remoting, Hazelcast for clustering, SnakeYAML for configuration. Apache POI comes with
+`gcu-office` (3.0.0), the module that carries the office implementation behind TaskGraph's
+office tasks; an application that uses them depends on `gcu-office` and declares no POI of
+its own. A Spring Boot application also imports `gcu-bom`, so its BOM does not downgrade
+Hazelcast or POI (<<ch-modules>>).
 
 == Conventions Shared Across the Library
 

@@ -18,14 +18,14 @@ import spock.lang.TempDir
 import java.nio.file.Path
 
 /**
- * GCU 2.1.0 -- the one office implementation AW and FS share (decision 499).
+ * GCU 3.0.0 -- the one office implementation AW and FS share (decision 499).
  *
  * <p>Every case goes through the public closures ({@link OfficeTools#docx()} etc., or TaskFactory through the
  * OfficeBackend SPI), the way the MCP servers call it -- never a private helper. Maps are built in the shapes a JSON
  * transport delivers: keys sorted, order carried only by lists.</p>
  */
 @CompileDynamic
-class OfficeTools210Spec extends Specification {
+class OfficeTools300Spec extends Specification {
 
     @TempDir Path dir
 

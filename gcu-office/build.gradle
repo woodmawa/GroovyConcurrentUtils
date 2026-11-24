@@ -1,4 +1,4 @@
-// gcu-office (2.1.0): the one office implementation every consumer shares. The POI-backed XlsxAdapter, DocxAdapter
+// gcu-office (3.0.0): the one office implementation every consumer shares. The POI-backed XlsxAdapter, DocxAdapter
 // and PptxAdapter (and QueryExecutor, OfficeFiles, the *AdapterFactory helpers) moved here from gcu-taskgraph, package
 // names unchanged, together with the plain-map binding the MCP servers used to keep their own copies of
 // (FS OfficePlanBinder, AW OfficeDocumentService). It registers PoiOfficeBackend for gcu-taskgraph's OfficeBackend SPI,

@@ -70,8 +70,8 @@ class DocxAdapter {
                 case 'READ':         return read(config)
                 case 'EXTRACT_TEXT': return extractText(config)
                 case 'MERGE':        return merge(config)
-                case 'APPEND_SECTION':  return appendSections(config)   // 2.1.0
-                case 'REPLACE_SECTION': return replaceSection(config)   // 2.1.0
+                case 'APPEND_SECTION':  return appendSections(config)   // 3.0.0
+                case 'REPLACE_SECTION': return replaceSection(config)   // 3.0.0
                 default: throw new IllegalArgumentException("DocxAdapter: unknown action '${action}'")
             }
         }
@@ -193,7 +193,7 @@ class DocxAdapter {
     }
 
     /**
-     * 2.1.0 APPEND_SECTION: {@code config.sections} (List of SectionSpec) written after the existing content of
+     * 3.0.0 APPEND_SECTION: {@code config.sections} (List of SectionSpec) written after the existing content of
      * {@code config.filePath}, in order, with the heading styles and list numbering GENERATE gives; the file is created
      * when it does not exist. Every section is checked before anything is written.
      */
@@ -222,7 +222,7 @@ class DocxAdapter {
     private static final List<String> REPLACE_FIELDS = ['text', 'bulletList', 'numberedList']
 
     /**
-     * 2.1.0 REPLACE_SECTION: the body of the section headed {@code config.targetSection} -- everything between that
+     * 3.0.0 REPLACE_SECTION: the body of the section headed {@code config.targetSection} -- everything between that
      * heading and the next heading, tables included -- is replaced by {@code config.section} (a SectionSpec carrying
      * text, bulletList or numberedList), in place. A heading that is not there, or a replacement with a field only
      * GENERATE can apply (heading, richText, table, style), is refused and the file is left as it was.

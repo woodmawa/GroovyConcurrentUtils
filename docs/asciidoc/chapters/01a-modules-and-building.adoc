@@ -1,9 +1,9 @@
 [[ch-modules]]
 = Modules and Building
 
-From 2.0.0 the library is a Gradle multi-project build. Five module jars each carry one part
-of the library, and an aggregate artifact gives you all of them under the coordinates GCU has
-always used. Package names did not change: a class has the same name wherever you get it
+From 2.0.0 the library is a Gradle multi-project build. Six module jars each carry one part
+of the library (gcu-office joined the five in 3.0.0), a BOM pins their versions, and an aggregate
+artifact gives you all of them under the coordinates GCU has always used. Package names did not change: a class has the same name wherever you get it
 from, so choosing modules changes your build file and nothing in your code.
 
 == The Modules
@@ -44,9 +44,23 @@ from, so choosing modules changes your build file and nothing in your code.
 | gcu-core
 | Reactor
 
+| `org.softwood:gcu-office` (3.0.0)
+| The office implementation: the POI-backed `XlsxAdapter`, `DocxAdapter`, `PptxAdapter` and
+  `QueryExecutor` behind TaskGraph's office tasks (registered through the `OfficeBackend` SPI),
+  `OfficeTools` -- the plain-map contract the MCP servers share -- and `OfficePlanBinder`.
+  See <<tg-15>>.
+| gcu-taskgraph
+| Apache POI 5.3.0 (`poi`, `poi-ooxml` without `poi-ooxml-lite`, `poi-ooxml-full`), Jackson
+
+| `org.softwood:gcu-bom` (3.0.0)
+| A BOM (java-platform, no classes): the gcu-* module versions and the Hazelcast and POI
+  versions GCU is built and tested against.
+| --
+| --
+
 | `org.softwood:GroovyConcurrentUtils`
-| The aggregate. Its jar holds no classes; its POM depends on all five modules.
-| all five
+| The aggregate. Its jar holds no classes; its POM depends on all six modules.
+| all six
 | everything above
 |===
 
@@ -60,7 +74,10 @@ component "gcu-actors" as AC
 component "gcu-reactive" as RX
 component "gcu-cluster" as CL
 component "gcu-core" as CO
+component "gcu-office" as OF
 component "GroovyConcurrentUtils\n(aggregate)" as AG
+AG ..> OF
+OF --> TG
 AG ..> TG
 AG ..> AC
 AG ..> RX
@@ -100,6 +117,21 @@ dependencies {
 }
 ----
 
+TaskGraph with its office tasks, and no POI line of your own (gcu-taskgraph and POI come with
+gcu-office). A Spring Boot application also imports the BOM after Spring Boot's, or Spring Boot's
+dependency management downgrades the Hazelcast gcu-cluster asks for -- AW and FS resolved 5.5.0 for
+5.6.0 until 3.0.0:
+
+[source,groovy,subs="attributes+"]
+----
+dependencyManagement {
+    imports { mavenBom 'org.softwood:gcu-bom:{gcu-version}' }
+}
+dependencies {
+    implementation 'org.softwood:gcu-office:{gcu-version}'
+}
+----
+
 Only TaskGraph (gcu-core and gcu-cluster come with it):
 
 [source,groovy,subs="attributes+"]
@@ -125,8 +157,9 @@ The modules declare their third-party libraries as runtime dependencies, as the 
 did: you get them on the runtime classpath, and you declare any you call directly yourself.
 Two are compile dependencies because their types appear in GCU's own methods: Vert.x in
 gcu-core and Hazelcast in gcu-cluster.
-Apache POI, needed by the Office document tasks in TaskGraph, is compile-only and must be
-added by an application that uses those tasks.
+Apache POI is in gcu-office alone, as an api dependency: gcu-taskgraph has none, not even
+compile-only. An office task built from gcu-taskgraph without gcu-office fails when it runs,
+naming the dependency to add.
 
 == Building
 
@@ -159,7 +192,9 @@ the wrapper in the repository.
   stand-alone with `java -cp`.
 
 | `gradlew publishToMavenLocal`
-| The five modules and the aggregate, with POMs and Gradle module files, in `~/.m2`.
+| The six modules, the BOM and the aggregate, with POMs and Gradle module files, in `~/.m2`.
+  From a platform session: the AW flow `gcu-publish-local version=<v>`, which also checks every
+  module landed and records the version.
 
 | `gradlew asciidoctor asciidoctorPdf`
 | This book and the TaskGraph book, as HTML and PDF.
@@ -173,13 +208,15 @@ the situation the aggregate POM avoids.
 
 ----
 GroovyConcurrentUtils/
-  settings.gradle            the five modules
+  settings.gradle            the six modules and the BOM
   build.gradle               shared settings, the aggregate, allJar, fatJar, publishing, docs
   gcu-core/       src/main/groovy/org/softwood/{pool,promise,dataflow,gstream,config,agent,security}
   gcu-cluster/    src/main/groovy/org/softwood/{cluster,dag/cluster,actor/cluster}
   gcu-taskgraph/  src/main/groovy/org/softwood/dag/...   src/testFixtures/...
   gcu-actors/     src/main/groovy/org/softwood/{actor,sampleScripts}
   gcu-reactive/   src/main/groovy/org/softwood/reactive
+  gcu-office/     src/main/groovy/org/softwood/dag/task/{xlsx,docx,pptx,office}   (adapters, OfficeTools)
+  gcu-bom/        build.gradle only
   src/test/groovy             tests that use several modules at once
   docs/asciidoc               the books
 ----

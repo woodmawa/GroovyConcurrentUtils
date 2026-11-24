@@ -31,7 +31,7 @@ class OfficeFiles {
         }
     }
 
-    /** GCU 2.1.0 (from FS 0.9.25 WriteUtils): attempts, and the linear backoff between them. 25+50+...+225 = 1125 ms. */
+    /** GCU 3.0.0 (from FS 0.9.25 WriteUtils): attempts, and the linear backoff between them. 25+50+...+225 = 1125 ms. */
     static final int  MOVE_ATTEMPTS   = 10
     static final long MOVE_BACKOFF_MS = 25L
 

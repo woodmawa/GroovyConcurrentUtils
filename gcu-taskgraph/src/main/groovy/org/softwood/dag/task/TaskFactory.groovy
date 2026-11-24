@@ -480,7 +480,7 @@ class TaskFactory {
         validateTaskName(name)
         log.debug("Creating XlsxTask: id=$id, name=$name")
         XlsxTask task = new XlsxTask(id, name, ctx)
-        task.xlsxCallFn = org.softwood.dag.task.spi.OfficeBackends.xlsx()   // 2.1.0: gcu-office, found at run time
+        task.xlsxCallFn = org.softwood.dag.task.spi.OfficeBackends.xlsx()   // 3.0.0: gcu-office, found at run time
         return task
     }
 
@@ -492,7 +492,7 @@ class TaskFactory {
         validateTaskName(name)
         log.debug("Creating DocxTask: id=$id, name=$name")
         DocxTask task = new DocxTask(id, name, ctx)
-        task.docxCallFn = org.softwood.dag.task.spi.OfficeBackends.docx()   // 2.1.0: gcu-office, found at run time
+        task.docxCallFn = org.softwood.dag.task.spi.OfficeBackends.docx()   // 3.0.0: gcu-office, found at run time
         return task
     }
 
@@ -504,7 +504,7 @@ class TaskFactory {
         validateTaskName(name)
         log.debug("Creating PptxTask: id=$id, name=$name")
         PptxTask task = new PptxTask(id, name, ctx)
-        task.pptxCallFn = org.softwood.dag.task.spi.OfficeBackends.pptx()   // 2.1.0: gcu-office, found at run time
+        task.pptxCallFn = org.softwood.dag.task.spi.OfficeBackends.pptx()   // 3.0.0: gcu-office, found at run time
         return task
     }
 

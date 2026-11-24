@@ -19,7 +19,7 @@ DSL entry points available from `TaskFactory`:
 ====
 
 [IMPORTANT]
-.2.1.0: the adapters live in `gcu-office`
+.3.0.0: the adapters live in `gcu-office`
 ====
 The POI-backed layer -- `XlsxAdapter`, `DocxAdapter`, `PptxAdapter`, `QueryExecutor`, `OfficeFiles`, the `*AdapterFactory`
 helpers, and the new `OfficeTools` and `OfficePlanBinder` -- moved from `gcu-taskgraph` to the module
@@ -70,7 +70,7 @@ Each task exposes a `Closure<Object> xyzCallFn` field. The adapter is wired by t
 
 [source,groovy]
 ----
-// TaskFactory does this automatically (2.1.0: through the OfficeBackend SPI that gcu-office registers).
+// TaskFactory does this automatically (3.0.0: through the OfficeBackend SPI that gcu-office registers).
 // By hand, with gcu-office on the classpath:
 XlsxTask task = new XlsxTask('gen-report', 'Generate Report', ctx)
 XlsxAdapterFactory.inject(task)        // sets task.xlsxCallFn = XlsxAdapter.asFn()

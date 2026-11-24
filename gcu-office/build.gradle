@@ -1,0 +1,23 @@
+// gcu-office (2.1.0): the one office implementation every consumer shares. The POI-backed XlsxAdapter, DocxAdapter
+// and PptxAdapter (and QueryExecutor, OfficeFiles, the *AdapterFactory helpers) moved here from gcu-taskgraph, package
+// names unchanged, together with the plain-map binding the MCP servers used to keep their own copies of
+// (FS OfficePlanBinder, AW OfficeDocumentService). It registers PoiOfficeBackend for gcu-taskgraph's OfficeBackend SPI,
+// so TaskFactory's office tasks arrive wired whenever this module is on the classpath.
+//
+// POI is an api dependency: a consumer declares org.softwood:gcu-office and nothing else -- no POI lines of its own.
+// The FULL OOXML schemas, never poi-ooxml-lite: lite carries only the classes POI's own tests touch, and docx page
+// setup (CTPageSz, CTPageMar ...) threw NoClassDefFoundError at run time (FS 0.11.4, AW 1.32.3).
+description = 'GroovyConcurrentUtils office'
+
+dependencies {
+    api project(':gcu-taskgraph')
+
+    api rootProject.libs.poiCore
+    api(rootProject.libs.poi) { exclude group: 'org.apache.poi', module: 'poi-ooxml-lite' }
+    api rootProject.libs.poiFull
+
+    // the plain-map binder: JSON-shaped maps onto the office Plans, unknown fields refused by name
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
+
+    testImplementation testFixtures(project(':gcu-taskgraph'))
+}

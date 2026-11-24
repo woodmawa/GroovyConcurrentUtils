@@ -3,6 +3,31 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 2.1.0 (2026-11-24): gcu-office -- one office implementation for every consumer -- and gcu-bom
+
+Source: Will, session 2026-11-24-13-31 (decision 499): "one common capability for office that FS and AW can work with so there's one dependency and one implementation to manage", and align AW's Hazelcast with GCU's. AW and FS each kept their own POI code beside GCU's adapters (AW's copy received none of FS's fixes); and both servers resolved hazelcast 5.5.0 where gcu-cluster asks 5.6.0, because Spring Boot's BOM wins over a transitive version ("selected by rule").
+Tests: 2854 tests, 0 failures (2826 on 2.0.4; 28 new in `OfficeTools210Spec`, through the public closures and TaskFactory with transport-shaped maps). Mutation checks, all caught: the Windows move retry off (1 red); unknown-field refusal off (2); map rows placed by key order (1); slide-field refusal off (1); REPLACE_SECTION past the next heading (3); the OfficeBackend registration removed (1).
+
+### What you must change
+
+1. **The POI-backed adapters moved to a new module, `org.softwood:gcu-office`** -- `XlsxAdapter`, `DocxAdapter`, `PptxAdapter`, `QueryExecutor`, `OfficeFiles` and the three `*AdapterFactory` classes, package names unchanged. A consumer that depended on `gcu-taskgraph` and called them depends on `gcu-office` instead (it brings `gcu-taskgraph` and POI). The aggregate `GroovyConcurrentUtils` includes it, so aggregate consumers change nothing.
+2. **Drop your own POI lines.** `gcu-office` has POI (`poi`, `poi-ooxml` without `poi-ooxml-lite`, `poi-ooxml-full`, 5.3.0) as an api dependency.
+3. **A Spring Boot consumer imports `gcu-bom` after Spring Boot's BOM**: `dependencyManagement { imports { mavenBom 'org.softwood:gcu-bom:2.1.0' } }`. It names the gcu-* modules, Hazelcast and POI; nothing else.
+4. `gcu-taskgraph` no longer has POI even compileOnly. `TaskFactory.createXlsxTask/createDocxTask/createPptxTask` wire their tasks through the new `OfficeBackend` SPI (`org.softwood.dag.task.spi`), which `gcu-office` registers; without `gcu-office` the task fails when it runs, naming the dependency (it used to be a `NoClassDefFoundError`).
+
+### Added
+
+- **`org.softwood.dag.task.office.OfficeTools`** -- `xlsx()`, `docx()`, `pptx()`: the plain-map tool contract AW nodes and FS tool calls send, with the shapes they return (`{headers, data, rowCount, sheet}`, `{sections, paragraphCount}`, `{slideCount, slideSize, slides}`). A plan in the request (`workbookPlan`, `queryPlan`, `documentPlan`, `presentationPlan`; typed or a JSON-shaped map) is bound and handed to the adapters. **Every field an action does not read is refused by name**; nothing is written. xlsx WRITE replaces one sheet and keeps the others; APPEND places map rows by the sheet's header row, never by the order keys arrived in. Accepted synonyms: `sheet|sheetName`, `range|cellRange`, `outputFormat|readFormat`.
+- **`OfficePlanBinder`** (from FS 0.11.4): JSON maps onto the Plans, unknown fields refused by name, every path through the caller's rule (a no-argument binder refuses only URLs).
+- **DocxAdapter `APPEND_SECTION`** (sections after the existing content, created when absent) and **`REPLACE_SECTION`** (the body between a heading and the next heading, tables included, replaced in place by text, bulletList or numberedList; an unknown heading, or a field only GENERATE can apply, is refused and the file left as it was).
+- **gcu-bom**, a java-platform.
+
+### Fixed
+
+- **Plain docx sections get real heading styles and list numbering** -- the AW and FS copies styled headings `Heading1` in a document that defines no such style, so Word showed them as body text, and wrote bullets as "• " text.
+- **`OfficeFiles.writeAtomically` retries the move** (bounded, 10 attempts, 1.1 s at most) when Windows refuses it because another handle is briefly open on the target -- FS's 0.9.25 rule, so no write is lost that FS used to keep.
+- **A read with a cell range works** -- AW's copy turned column letters into numbers with a char-typed closure over a String, so every `cellRange` read threw.
+
 ## 2.0.4 (2026-11-24): a titled pptx slide with no layout gets a real title
 
 Source: found by MCP FS 0.11.4's live checks (session 2026-11-23-11-14); Will, 09:03: "lets get that layout problem fixed now". A slide plan with a title and no `layout` was created on the blank layout, which has no title placeholder, so the title went into a text box: POI's `getTitle`, PptxAdapter READ and PowerPoint's outline all saw an untitled slide. Changes are in `gcu-taskgraph` only.

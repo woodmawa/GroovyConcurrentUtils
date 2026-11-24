@@ -17,13 +17,9 @@
         implementation libs.msgpack
         implementation libs.nashorn
 
-        // Apache POI - optional compile-time dep for office doc task types.
-        // GCU stays POI-free at runtime; actual POI dep lives in consuming servers
-        // (mcp-agentic-workflow, mcp-groovy-filesystem-server).
-        // XlsxTask/DocxTask/PptxTask are injection-based - no POI calls in GCU code.
-        compileOnly libs.poi
-        testImplementation libs.poi
-        testImplementation libs.poiFull
+        // 2.1.0: no Apache POI here at all, not even compileOnly. XlsxTask/DocxTask/PptxTask, their DSLs and the Plan
+        // model are POI-free; the POI-backed adapters moved to gcu-office, which TaskFactory reaches through the
+        // OfficeBackend SPI (org.softwood.dag.task.spi). A POI import added here fails the compile -- that is the guard.
 
         testImplementation 'org.wiremock:wiremock:3.3.1'
         testImplementation 'com.h2database:h2:2.2.224'

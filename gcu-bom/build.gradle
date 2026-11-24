@@ -1,0 +1,29 @@
+// gcu-bom (2.1.0): a java-platform -- constraints only, no code. The plugins (java-platform, maven-publish, signing)
+// are applied by the root build before the shared publishing block.
+//
+// Why it exists: a Spring Boot consumer's io.spring.dependency-management BOM overrides the versions GCU's modules
+// ask for transitively ("selected by rule"). On 2026-11-24 AW and FS both resolved hazelcast 5.5.0 while gcu-cluster
+// asks 5.6.0. Imported AFTER Spring Boot's BOM, this one wins for what it names:
+//
+//     dependencyManagement { imports { mavenBom 'org.softwood:gcu-bom:<gcu version>' } }
+//
+// Keep it narrow: GCU's own modules and the libraries GCU's behaviour depends on (Hazelcast for the cluster, POI for
+// the office adapters). Logging and the like are left to the consumer's platform.
+description = 'GroovyConcurrentUtils BOM'
+
+dependencies {
+    constraints {
+        api project(':gcu-core')
+        api project(':gcu-cluster')
+        api project(':gcu-taskgraph')
+        api project(':gcu-actors')
+        api project(':gcu-reactive')
+        api project(':gcu-office')
+        api rootProject
+
+        api rootProject.libs.hazelcast
+        api rootProject.libs.poiCore
+        api rootProject.libs.poi
+        api rootProject.libs.poiFull
+    }
+}

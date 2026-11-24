@@ -18,6 +18,22 @@ DSL entry points available from `TaskFactory`:
 `createXlsxTask()` • `createDocxTask()` • `createPptxTask()`
 ====
 
+[IMPORTANT]
+.2.1.0: the adapters live in `gcu-office`
+====
+The POI-backed layer -- `XlsxAdapter`, `DocxAdapter`, `PptxAdapter`, `QueryExecutor`, `OfficeFiles`, the `*AdapterFactory`
+helpers, and the new `OfficeTools` and `OfficePlanBinder` -- moved from `gcu-taskgraph` to the module
+`org.softwood:gcu-office`, package names unchanged. Depend on `gcu-office` (it brings `gcu-taskgraph` and Apache POI with
+the full OOXML schemas); declare no POI of your own. `gcu-taskgraph` keeps the tasks, DSLs and Plans and has no POI at
+all; `TaskFactory` reaches the adapters through the `OfficeBackend` SPI (`org.softwood.dag.task.spi`), which `gcu-office`
+registers, and an office task run without `gcu-office` fails naming it.
+
+`OfficeTools.xlsx()` / `docx()` / `pptx()` is the plain-map contract the MCP servers share (AW's office.* flow nodes and
+FS's read_office / write_office): plain maps in, tool-shaped results out, plans bound and handed to the adapters, every
+unknown field refused by name. See its class comment for the actions and fields. A Spring Boot consumer also imports
+`org.softwood:gcu-bom` after Spring Boot's BOM so Hazelcast and POI follow GCU.
+====
+
 ---
 
 == Architecture Overview
@@ -54,7 +70,8 @@ Each task exposes a `Closure<Object> xyzCallFn` field. The adapter is wired by t
 
 [source,groovy]
 ----
-// TaskFactory does this automatically via AdapterFactory:
+// TaskFactory does this automatically (2.1.0: through the OfficeBackend SPI that gcu-office registers).
+// By hand, with gcu-office on the classpath:
 XlsxTask task = new XlsxTask('gen-report', 'Generate Report', ctx)
 XlsxAdapterFactory.inject(task)        // sets task.xlsxCallFn = XlsxAdapter.asFn()
 

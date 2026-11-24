@@ -25,14 +25,43 @@ class OfficeFiles {
         Path tmp = Files.createTempFile(t.parent, '.' + t.fileName.toString() + '.', '.tmp')
         try {
             Files.newOutputStream(tmp).withCloseable { OutputStream out -> writer.call(out) }
-            try {
-                Files.move(tmp, t, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            } catch (AtomicMoveNotSupportedException ignored) {
-                Files.move(tmp, t, StandardCopyOption.REPLACE_EXISTING)
-            }
+            moveIntoPlace(tmp, t)
         } finally {
             Files.deleteIfExists(tmp)
         }
+    }
+
+    /** GCU 2.1.0 (from FS 0.9.25 WriteUtils): attempts, and the linear backoff between them. 25+50+...+225 = 1125 ms. */
+    static final int  MOVE_ATTEMPTS   = 10
+    static final long MOVE_BACKOFF_MS = 25L
+
+    /**
+     * The rename, with a bounded retry. On Windows {@code Files.move(.., ATOMIC_MOVE)} throws AccessDeniedException
+     * while ANY handle is open on the target -- Defender scanning the new file, the indexer, an editor -- and that
+     * handle is usually gone milliseconds later. Without the retry the write was lost and reported as a failure (FS
+     * found it as a "flaky" suite). Bounded so a permanent failure is still reported, soon and with its own reason;
+     * a missing source is never retried.
+     */
+    private static void moveIntoPlace(Path tmp, Path target) {
+        Exception last = null
+        for (int attempt = 0; attempt < MOVE_ATTEMPTS; attempt++) {
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                return
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
+                return
+            } catch (java.nio.file.NoSuchFileException e) {
+                throw e
+            } catch (java.nio.file.FileSystemException e) {
+                last = e
+                if (attempt < MOVE_ATTEMPTS - 1) {
+                    try { Thread.sleep(MOVE_BACKOFF_MS * (attempt + 1)) }
+                    catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw e }
+                }
+            }
+        }
+        throw last
     }
 
     /** Throw a single {@link IllegalArgumentException} naming every problem, or return when there are none. */

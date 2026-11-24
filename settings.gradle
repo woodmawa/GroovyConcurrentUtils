@@ -25,7 +25,9 @@ pluginManagement {
 rootProject.name = 'GroovyConcurrentUtils'
 
 // 2.0.0: five library modules; the root project is the aggregate org.softwood:GroovyConcurrentUtils.
-include 'gcu-core', 'gcu-cluster', 'gcu-taskgraph', 'gcu-actors', 'gcu-reactive'
+// 2.1.0: gcu-office (the POI-backed office adapters, POI as an api dependency) and gcu-bom (a java-platform that
+// pins GCU's modules and its third-party versions, for consumers whose Spring Boot BOM would otherwise win).
+include 'gcu-core', 'gcu-cluster', 'gcu-taskgraph', 'gcu-actors', 'gcu-reactive', 'gcu-office', 'gcu-bom'
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)

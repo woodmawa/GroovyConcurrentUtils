@@ -27,6 +27,7 @@ import org.softwood.dag.task.xlsx.StyleSpec
 import org.softwood.dag.task.xlsx.model.RichRun
 
 import java.math.BigInteger
+import org.apache.poi.xwpf.usermodel.IBodyElement
 
 /**
  * POI-backed adapter for Word (.docx) operations.
@@ -69,6 +70,8 @@ class DocxAdapter {
                 case 'READ':         return read(config)
                 case 'EXTRACT_TEXT': return extractText(config)
                 case 'MERGE':        return merge(config)
+                case 'APPEND_SECTION':  return appendSections(config)   // 2.1.0
+                case 'REPLACE_SECTION': return replaceSection(config)   // 2.1.0
                 default: throw new IllegalArgumentException("DocxAdapter: unknown action '${action}'")
             }
         }
@@ -187,6 +190,97 @@ class DocxAdapter {
             merged.close()
         }
         return [outputPath: outputPath, merged: inputPaths.size()]
+    }
+
+    /**
+     * 2.1.0 APPEND_SECTION: {@code config.sections} (List of SectionSpec) written after the existing content of
+     * {@code config.filePath}, in order, with the heading styles and list numbering GENERATE gives; the file is created
+     * when it does not exist. Every section is checked before anything is written.
+     */
+    private static Object appendSections(Map config) {
+        String filePath = config.filePath as String
+        List<SectionSpec> sections = (config.sections ?: []) as List<SectionSpec>
+        if (!filePath) throw new IllegalArgumentException('DocxAdapter APPEND_SECTION: config.filePath is required')
+        if (!sections) throw new IllegalArgumentException('DocxAdapter APPEND_SECTION: config.sections (List<SectionSpec>) is required')
+        DocumentPlan plan = new DocumentPlan(sections: sections)
+        checkPlan(plan, [:])
+
+        File file = new File(filePath)
+        XWPFDocument doc = file.exists() ? file.withInputStream { InputStream ins -> new XWPFDocument(ins) } : new XWPFDocument()
+        try {
+            ensureHeadingStyles(doc, sections.findAll { it.heading }.collect { it.headingLevel } as Set<Integer>)
+            Map<String, BigInteger> lists = [:]
+            sections.each { SectionSpec s -> writeSection(doc, s, [:], lists) }
+            OfficeFiles.writeAtomically(file) { OutputStream out -> doc.write(out) }
+        } finally {
+            doc.close()
+        }
+        return [filePath: filePath, sectionsAppended: sections.size()]
+    }
+
+    /** Fields a REPLACE_SECTION replacement may carry: the body only -- the heading stays the one being replaced. */
+    private static final List<String> REPLACE_FIELDS = ['text', 'bulletList', 'numberedList']
+
+    /**
+     * 2.1.0 REPLACE_SECTION: the body of the section headed {@code config.targetSection} -- everything between that
+     * heading and the next heading, tables included -- is replaced by {@code config.section} (a SectionSpec carrying
+     * text, bulletList or numberedList), in place. A heading that is not there, or a replacement with a field only
+     * GENERATE can apply (heading, richText, table, style), is refused and the file is left as it was.
+     */
+    private static Object replaceSection(Map config) {
+        String filePath = config.filePath as String
+        String target   = config.targetSection as String
+        SectionSpec spec = config.section as SectionSpec
+        if (!filePath) throw new IllegalArgumentException('DocxAdapter REPLACE_SECTION: config.filePath is required')
+        if (!target)   throw new IllegalArgumentException('DocxAdapter REPLACE_SECTION: config.targetSection is required')
+        if (spec == null) throw new IllegalArgumentException('DocxAdapter REPLACE_SECTION: config.section (SectionSpec) is required')
+        List<String> problems = []
+        if (spec.heading)  problems << "section.heading is not accepted -- the heading is '${target}', the one replaced".toString()
+        if (spec.richText) problems << "section.richText is not applied by REPLACE_SECTION (use one of ${REPLACE_FIELDS})".toString()
+        if (spec.table)    problems << "section.table is not applied by REPLACE_SECTION (use one of ${REPLACE_FIELDS})".toString()
+        if (spec.style)    problems << "section.style is not applied by REPLACE_SECTION (use one of ${REPLACE_FIELDS})".toString()
+        OfficeFiles.refuse('DocxAdapter REPLACE_SECTION', problems)
+
+        File file = new File(filePath)
+        XWPFDocument doc = file.withInputStream { InputStream ins -> new XWPFDocument(ins) }
+        try {
+            List<IBodyElement> body = doc.bodyElements
+            int at = body.findIndexOf { IBodyElement e -> isHeading(e) && (e as XWPFParagraph).text == target }
+            if (at < 0) {
+                List<String> headings = body.findAll { isHeading(it) }.collect { (it as XWPFParagraph).text }
+                throw new IllegalArgumentException("DocxAdapter REPLACE_SECTION: nothing written -- no section headed '${target}' (headings: ${headings})".toString())
+            }
+            while (at + 1 < doc.bodyElements.size() && !isHeading(doc.bodyElements[at + 1])) {
+                doc.removeBodyElement(at + 1)
+            }
+            IBodyElement next = at + 1 < doc.bodyElements.size() ? doc.bodyElements[at + 1] : null
+            Closure<XWPFParagraph> newPara = { ->
+                next == null ? doc.createParagraph() : doc.insertNewParagraph((next as XWPFParagraph).CTP.newCursor())
+            }
+            if (spec.text) {
+                newPara.call().createRun().setText(spec.text)
+            }
+            Map<String, BigInteger> lists = [:]
+            [bullet: spec.bulletList, decimal: spec.numberedList].each { String kind, List<String> items ->
+                if (!items) return
+                BigInteger numId = addListNumbering(doc, lists, kind)
+                items.each { String item ->
+                    XWPFParagraph p = newPara.call()
+                    p.numID = numId
+                    p.numILvl = BigInteger.ZERO
+                    p.createRun().setText(item)
+                }
+            }
+            OfficeFiles.writeAtomically(file) { OutputStream out -> doc.write(out) }
+        } finally {
+            doc.close()
+        }
+        return [filePath: filePath, replacedSection: target]
+    }
+
+    /** A heading paragraph: its style id is Heading<n> (as GENERATE writes them) or a template's heading style. */
+    static boolean isHeading(IBodyElement e) {
+        e instanceof XWPFParagraph && ((e as XWPFParagraph).style ?: '').toLowerCase().startsWith('heading')
     }
 
     // =========================================================================

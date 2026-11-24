@@ -578,6 +578,25 @@ class Hardening201OfficeSpec extends Specification {
         s?.close()
     }
 
+    def "2.0.4: a titled slide with no layout gets a real title placeholder, and READ returns its title"() {
+        given:
+        File f = pptx(new PresentationPlan(slides: [new SlidePlan(title: 'T', shapes: [new ShapeSpec(text: 'body', width: 914400, height: 457200)]),
+                                                     new SlidePlan(shapes: [new ShapeSpec(text: 'untitled', width: 914400, height: 457200)])]))
+
+        when:
+        XMLSlideShow s = openPptx(f)
+        Map read = PptxAdapter.asFn().call('READ', [filePath: f.absolutePath]) as Map
+
+        then: 'the title is in the title placeholder, not a text box'
+        s.slides[0].title == 'T'
+        s.slides[0].placeholders.any { (it.textType == Placeholder.TITLE || it.textType == Placeholder.CENTERED_TITLE) && it.text == 'T' }
+        !s.slides[0].shapes.any { it instanceof XSLFTextBox && it.text == 'T' }
+        read.slides[0].title == 'T'
+
+        and: 'a slide with no title and no layout stays blank: no empty placeholders'
+        s.slides[1].placeholders.size() == 0
+    }
+
     def "an unknown layout name fails by name"() {
         when:
         pptx(new PresentationPlan(slides: [new SlidePlan(layout: 'No Such Layout')]))

@@ -553,6 +553,10 @@ longer slow), written directly so that `poi-ooxml-lite` is enough. `layout { the
 theme or change theme colours, nothing on a slide can reference a named style, and no chart writer exists. Start
 from a template for a theme, and set colours and fonts on each shape.
 
+NOTE: Since 2.0.4 a slide with a `title` and no `layout` is created on the master's Title Only layout (Title and
+Content if there is none), so the title is the slide's real title -- readers such as PowerPoint's outline and POI's
+`getTitle` see it. Before 2.0.4 it was created on the blank layout and the title went into a plain text box.
+
 ---
 
 == TaskFactory Integration

@@ -16,6 +16,7 @@ import org.apache.poi.xslf.usermodel.XSLFTable
 import org.apache.poi.xslf.usermodel.XSLFTableCell
 import org.apache.poi.xslf.usermodel.XSLFTableRow
 import org.apache.poi.xslf.usermodel.XSLFTextBox
+import org.apache.poi.xslf.usermodel.SlideLayout
 import org.apache.poi.xslf.usermodel.XSLFTextParagraph
 import org.apache.poi.xslf.usermodel.XSLFTextRun
 import org.softwood.dag.task.docx.TableSpec
@@ -199,6 +200,10 @@ class PptxAdapter {
                                         SlideLayoutSpec defaultLayout = null) {
         // Resolve layout (an unknown name was refused by checkLayouts)
         XSLFSlideLayout layout = resolveLayout(ss, sp.layout)
+        // 2.0.4: a titled slide that names no layout uses the master's Title Only layout. createSlide() alone uses
+        // the blank layout, which has no title placeholder, so the title became a text box and readers (POI's
+        // getTitle, PptxAdapter READ, PowerPoint's outline) saw an untitled slide.
+        if (!layout && sp.title) layout = titleOnlyLayout(ss)
         XSLFSlide slide = layout ? ss.createSlide(layout) : ss.createSlide()
 
         // 2.0.1: slide background from the presentation default
@@ -444,6 +449,13 @@ class PptxAdapter {
             if (found) return found
         }
         throw new IllegalArgumentException("PptxAdapter: layout '${layoutName}' not found (available: ${layoutNames(ss)})".toString())
+    }
+
+    /** The first master's Title Only layout, else its Title and Content; null when neither exists (text box title). */
+    private static XSLFSlideLayout titleOnlyLayout(XMLSlideShow ss) {
+        def master = ss.slideMasters ? ss.slideMasters[0] : null
+        if (!master) return null
+        return master.getLayout(SlideLayout.TITLE_ONLY) ?: master.getLayout(SlideLayout.TITLE_AND_CONTENT)
     }
 
     private static List<String> layoutNames(XMLSlideShow ss) {

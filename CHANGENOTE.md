@@ -3,6 +3,15 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 2.0.4 (2026-11-24): a titled pptx slide with no layout gets a real title
+
+Source: found by MCP FS 0.11.4's live checks (session 2026-11-23-11-14); Will, 09:03: "lets get that layout problem fixed now". A slide plan with a title and no `layout` was created on the blank layout, which has no title placeholder, so the title went into a text box: POI's `getTitle`, PptxAdapter READ and PowerPoint's outline all saw an untitled slide. Changes are in `gcu-taskgraph` only.
+Tests: 2826 tests, 0 failures, 46 skipped. One new test in `Hardening201OfficeSpec` (51 in all), red on 2.0.3. Mutation check: the Title Only default switched off, caught (1 red).
+
+### What you must change
+
+1. **A titled slide that names no layout is now on the master's Title Only layout** (Title and Content if there is no Title Only), with the title in its title placeholder. Code that looked for the title in a text box finds it in the placeholder. A slide with no title and no layout is still blank. A text box is used only when the master has neither layout.
+
 ## 2.0.3 (2026-11-24): a validation-only xlsx range adds no empty rows; queries skip blank rows
 
 Source: MCP FS 0.11.4's live checks after install (session 2026-11-23-11-14, Will chose "fix now, then baseline"). A plan range with only a data validation and a conditional format (`B2:B20`) created an empty cell in every row of the range; a query then returned 16 blank rows, and a map_by_key query handed FS a null key. Changes are in `gcu-taskgraph` only.

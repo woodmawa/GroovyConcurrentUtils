@@ -3,6 +3,20 @@
 History of changes, newest first. One section per version: what changed, why, what a consumer has to do.
 Entries before 1.2.0 are reconstructed from commit messages.
 
+## 2.0.3 (2026-11-24): a validation-only xlsx range adds no empty rows; queries skip blank rows
+
+Source: MCP FS 0.11.4's live checks after install (session 2026-11-23-11-14, Will chose "fix now, then baseline"). A plan range with only a data validation and a conditional format (`B2:B20`) created an empty cell in every row of the range; a query then returned 16 blank rows, and a map_by_key query handed FS a null key. Changes are in `gcu-taskgraph` only.
+Tests: 2825 tests, 0 failures, 46 skipped. Three new tests in `Hardening201OfficeSpec` (50 in all), all red on 2.0.2. Mutation checks, all caught (1 red each): cells written regardless of what the range holds; blank rows kept; an empty map_by_key key allowed.
+
+### What you must change
+
+1. **A query no longer returns rows that are blank in every column it returns** (null or whitespace-only text). Code that counted rows to find the end of formatted space should read the sheet instead.
+2. **A map_by_key row whose key cell is empty is refused**, naming the spreadsheet row(s): `QueryExecutor: map_by_key: keyColumn 'name' is empty in row 3`. 2.0.2 put it under a null key.
+
+### Fixed
+
+- **A range creates cells only when it writes something** (a style, zebra stripes, values, a formula, a column formula). A range with only a validation, a conditional format, borders or a comment covers the cells without creating them (before 2.0.3 an empty cell went into every row of the range, so `lastRowNum` was the range's last row).
+
 ## 2.0.2 (2026-11-23): an xlsx map_by_key query works
 
 Source: found by MCP FS 0.11.4's new integration spec the same evening (session 2026-11-23-11-14), after 2.0.1 was published to mavenLocal; 2.0.1 is not changed, so this is 2.0.2. Changes are in `gcu-taskgraph` only.

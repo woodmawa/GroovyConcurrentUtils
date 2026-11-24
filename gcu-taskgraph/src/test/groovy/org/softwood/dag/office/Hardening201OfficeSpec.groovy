@@ -171,6 +171,52 @@ class Hardening201OfficeSpec extends Specification {
         e.message.contains('nmae')
     }
 
+    def "2.0.3: a range with only a validation or conditional format creates no empty rows"() {
+        given:
+        def plan = oneSheet([rows: rows([['name', 'n'], ['a', 1]]),
+                             ranges: [new RangeSpec(ref: 'B2:B20', dataValidation: new DataValidationSpec(type: 'integer', operator: 'between', formula1: '0', formula2: '150'),
+                                                    conditionalFormat: new ConditionalFormatSpec(type: 'cellValue', operator: 'greaterThan', value1: 40, styleRef: 'b'))]],
+                            [b: bold()])
+
+        when:
+        XSSFWorkbook wb = openXlsx(xlsx(plan))
+        XSSFSheet s = wb.getSheet('S')
+
+        then:
+        s.lastRowNum == 1
+        s.physicalNumberOfRows == 2
+        s.dataValidations.size() == 1
+        s.sheetConditionalFormatting.numConditionalFormattings == 1
+    }
+
+    def "2.0.3: a query skips rows that are blank in every column it returns"() {
+        given: 'a styled range that legitimately creates empty, styled cells below the data'
+        File f = xlsx(oneSheet([rows: rows([['name', 'n'], ['a', 1]]), ranges: [new RangeSpec(ref: 'A2:B6', styleRef: 'b')]], [b: bold()]))
+
+        when:
+        List all = XlsxAdapter.asFn().call('QUERY', [filePath: f.absolutePath, query: new QueryPlan(sheetName: 'S')]) as List
+        Map keyed = XlsxAdapter.asFn().call('QUERY', [filePath: f.absolutePath,
+                query: new QueryPlan(sheetName: 'S', format: 'map_by_key', keyColumn: 'name')]) as Map
+
+        then:
+        all*.name == ['a']
+        keyed.keySet() == ['a'] as Set
+    }
+
+    def "2.0.3: a map_by_key row with no key is refused, naming the spreadsheet row"() {
+        given:
+        File f = xlsx(oneSheet(rows: rows([['name', 'n'], ['a', 1], [null, 2]])))
+
+        when:
+        XlsxAdapter.asFn().call('QUERY', [filePath: f.absolutePath,
+                query: new QueryPlan(sheetName: 'S', format: 'map_by_key', keyColumn: 'name')])
+
+        then:
+        IllegalArgumentException e = thrown()
+        e.message.contains('row 3')
+        e.message.contains('name')
+    }
+
     def "a row styleRef reaches the cells written in that row, and a cell styleRef wins"() {
         given:
         def plan = oneSheet([rows: [new RowSpec(styleRef: 'b', cells: [new CellSpec(value: 'h1'), new CellSpec(value: 'h2', styleRef: 'plain')])]],

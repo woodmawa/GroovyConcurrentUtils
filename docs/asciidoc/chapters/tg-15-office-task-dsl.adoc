@@ -103,6 +103,11 @@ What is refused rather than applied:
   that is not a header, or is left out of `columns` (2.0.2: map_by_key itself works now -- before 2.0.2 every
   map_by_key query failed with a GroovyCastException, and `XlsxTask.query` is declared `Object`).
 
+Since 2.0.3 a range creates cells only when it writes something (a style, zebra stripes, values or a formula); a
+range that only carries a validation, a conditional format, borders or a comment leaves the rows it covers as they
+were. A query skips rows blank in every column it returns, and a map_by_key row with an empty key is refused naming
+the spreadsheet row.
+
 Every write goes to a temporary file beside the target and is moved into place, so a failed write leaves the old
 file as it was.
 

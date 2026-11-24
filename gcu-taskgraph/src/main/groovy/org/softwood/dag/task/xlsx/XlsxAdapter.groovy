@@ -425,7 +425,11 @@ class XlsxAdapter {
                 zebra.setFillPattern(FillPatternType.SOLID_FOREGROUND)
             }
 
-            for (int rn = addr.firstRow; rn <= addr.lastRow; rn++) {
+            // 2.0.3: touch cells only when the range has something to put in them. A range with only a validation,
+            // a conditional format, borders or a comment created an empty cell in every row it covered, so queries
+            // returned blank rows and a map_by_key query met a null key.
+            boolean writesCells = cs != null || zebra != null || r.values || r.formula || r.columnFormula
+            for (int rn = addr.firstRow; writesCells && rn <= addr.lastRow; rn++) {
                 XSSFRow row = sheet.getRow(rn) ?: sheet.createRow(rn)
                 boolean striped = zebra != null && ((rn - addr.firstRow) % 2 == 1)
                 for (int cn = addr.firstColumn; cn <= addr.lastColumn; cn++) {

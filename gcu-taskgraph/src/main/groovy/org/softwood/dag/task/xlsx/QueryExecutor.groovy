@@ -101,6 +101,7 @@ class QueryExecutor {
 
         // ---- Read data rows ----
         List result = []
+        List<Integer> sheetRows = []   // 2.0.3: the 1-based spreadsheet row of each result entry, for messages
         for (int r = firstRow + 1; r <= lastRow; r++) {
             XSSFRow row = sheet.getRow(r)
             if (!row) continue
@@ -124,11 +125,20 @@ class QueryExecutor {
                 rowMap[header] = val
                 rowList << val
             }
+            // 2.0.3: a row blank in every column returned is not data (formatting or an emptied row); skip it
+            if (rowList.every { Object v -> v == null || (v instanceof String && (v as String).trim().isEmpty()) }) continue
             result << (plan.format == 'list_of_lists' ? rowList : rowMap)
+            sheetRows << (r + 1)
         }
 
         // ---- Final format ----
         if (plan.format == 'map_by_key') {
+            // 2.0.3: a row with no key is refused naming its spreadsheet row (it became a null map key)
+            List<Integer> noKey = []
+            result.eachWithIndex { Object row, int i -> if ((row as Map)[plan.keyColumn] == null) noKey << sheetRows[i] }
+            if (noKey)
+                throw new IllegalArgumentException(
+                    "QueryExecutor: map_by_key: keyColumn '${plan.keyColumn}' is empty in row ${noKey.join(', ')}")
             return result.collectEntries { Map row -> [(row[plan.keyColumn]): row] }
         }
         return result
